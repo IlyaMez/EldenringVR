@@ -1,0 +1,17 @@
+#pragma once
+#include <windows.h>
+#include <xinput.h>
+#include <cstdint>
+
+namespace ervr {
+
+// Builds a synthetic XINPUT_GAMEPAD from VR controller state + gestures.
+// Update() runs on the ERVR worker thread; Merge() runs inside the XInput hook.
+void VirtualPadInit();
+void VirtualPadUpdate(double now);
+// Merges the current virtual pad into `st`. Returns true if the virtual pad is
+// active (a VR runtime is attached and at least one controller is connected).
+bool VirtualPadMerge(XINPUT_STATE& st);
+// Rumble from the game (XInputSetState) -> controllers.
+void VirtualPadRumble(float left, float right);
+}
