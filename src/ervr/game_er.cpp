@@ -30,6 +30,9 @@ namespace off {
     constexpr size_t WCM_ChrCam       = 0x1ECE0;   // WorldChrMan -> ChrCam*
     constexpr size_t Chr_ChrCtrl      = 0x58;
     constexpr size_t Chr_IsLockedOn   = 0xC9;
+    constexpr size_t Chr_LockOnTarget = 0xD0;      // float4 world position the character faces when locked
+    constexpr size_t Ctrl_IsUnlocked  = 0x199;     // ChrCtrl: 1 = free movement (body turns to move dir), 0 = strafe
+    constexpr size_t PI_LockedEnemy   = 0x6B0;     // PlayerIns: FieldInsHandle of the locked-on enemy (-1 = none)
     constexpr size_t Chr_AimViewMtx   = 0x120;     // 4x4 float, camera-style rows
     constexpr size_t Chr_Modules      = 0x190;
     constexpr size_t Chr_BaseTransp   = 0x24C;
@@ -61,6 +64,9 @@ namespace off {
 // RVAs for eldenring.exe 2.6.2.0 (erfps2 src/rva/ww.rs), with AOB fallbacks below.
 constexpr uint32_t RVA_CameraStepUpdate = 0x3bc5e0;
 constexpr uint32_t RVA_GetDmyPos        = 0x3e94d0;
+constexpr uint32_t RVA_MmsUpdateChrCam  = 0xb02390;   // per-frame ChrCam update (erfps2 MMS_UPDATE_CHR_CAM)
+constexpr uint32_t RVA_FollowCamFollow  = 0x3b6e20;   // ChrExFollowCam::follow (erfps2 FOLLOW_CAM_FOLLOW)
+constexpr size_t   OFF_FollowCam_ResetCamera = 0x315;
 
 // ---------------------------------------------------------------- game types
 struct HkQsTransform { float t[4]; float q[4]; float s[4]; };   // hkQsTransform (parent-relative)
@@ -73,6 +79,9 @@ uint8_t* g_base = nullptr;
 uint8_t** g_worldChrManPtr = nullptr;    // address of the WorldChrMan* global
 uint8_t** g_fieldAreaPtr = nullptr;      // address of the FieldArea* global
 FnCameraStep g_origCameraStep = nullptr;
+using FnMmsUpdate = void (__fastcall*)(void*);
+using FnFollow = void (__fastcall*)(void* followCam, float dt, void* c);
+FnMmsUpdate g_origMms = nullptr; FnFollow g_origFollow = nullptr;
 FnGetDmyPos  g_getDmyPos = nullptr;
 void* g_hkOrig = nullptr; void** g_hkSlot = nullptr;
 GameERStatus g_status;
@@ -80,6 +89,11 @@ std::mutex g_vrMtx;
 VRTracking g_vrTr; VRInputState g_vrIn; bool g_vrValid = false;
 double g_lastDebug = 0;
 uint32_t g_frame = 0;
+// perf counters (reset by GameERGetStatus)
+volatile LONG g_hkCalls = 0, g_hkSolves = 0, g_camCalls = 0;
+volatile LONGLONG g_hkTicks = 0, g_camTicks = 0;
+uint32_t g_lastArmFrame = 0xFFFFFFFF;
+struct ScopedTicks { volatile LONGLONG* acc; LARGE_INTEGER t0; ScopedTicks(volatile LONGLONG* a) : acc(a) { QueryPerformanceCounter(&t0); } ~ScopedTicks() { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); InterlockedExchangeAdd64(acc, t1.QuadPart - t0.QuadPart); } };
 
 // ---------------------------------------------------------------- helpers
 template <class T> bool RD(const void* addr, T& out) { return SafeRead(addr, &out, sizeof(T)); }
@@ -145,8 +159,10 @@ void ApplyHeadVisibility(uint8_t* player, bool hideHead, bool hideSheathed) {
     if (asmIns) {
         static const int kHead[] = {0, 2, 6, 21, 22, 23, 24, 25};
         for (int i : kHead) SetPartVisible(asmIns, i, !hideHead);
-        static const int kSheath[] = {7, 8, 11, 12};
+        // 7 = left weapon, 8 = left sheath, 11 = right weapon, 12 = right sheath. Never touch the weapons.
+        static const int kSheath[] = {8, 12};
         for (int i : kSheath) SetPartVisible(asmIns, i, !hideSheathed);
+        SetPartVisible(asmIns, 7, true); SetPartVisible(asmIns, 11, true);
     }
     if (uint8_t* res = Deref(player + off::PI_AsmModelRes)) {
         uint8_t b;
@@ -166,6 +182,7 @@ struct Skeleton {
     HkQsTransform* refPose = nullptr;
     std::vector<HkQsTransform> refPoseCopy;
     int L_ua = -1, L_fa = -1, L_hand = -1, R_ua = -1, R_fa = -1, R_hand = -1;
+    Vec3 handFwd[2], handThumb[2]; bool handAxesOk[2]{};   // hand-bone local frame, from ref pose finger roots
     bool warned = false;
 
     HkQsTransform* LivePose() const {
@@ -212,6 +229,22 @@ bool BuildSkeleton(uint8_t* chr) {
     const Config& c = Cfg();
     s.L_ua = s.Find(c.boneLUpperArm); s.L_fa = s.Find(c.boneLForearm); s.L_hand = s.Find(c.boneLHand);
     s.R_ua = s.Find(c.boneRUpperArm); s.R_fa = s.Find(c.boneRForearm); s.R_hand = s.Find(c.boneRHand);
+    // Anatomical hand axes from the reference pose: finger roots = forward, thumb root = thumb side.
+    for (int h = 0; h < 2; ++h) {
+        const char* pre = h == HandLeft ? "L_" : "R_";
+        int hand = h == HandLeft ? s.L_hand : s.R_hand;
+        int f2 = s.Find(std::string(pre) + "Finger2"), f1 = s.Find(std::string(pre) + "Finger1"), f3 = s.Find(std::string(pre) + "Finger3"), f0 = s.Find(std::string(pre) + "Finger0");
+        if (hand < 0 || f2 < 0 || f0 < 0) continue;
+        auto rootOf = [&](int i) {   // accumulate local offsets up to the hand bone
+            Vec3 acc{}; int cur = i; int guard = 0;
+            while (cur >= 0 && cur != hand && guard++ < 8) { const HkQsTransform& t = s.refPoseCopy[cur]; Quat lq{t.q[0], t.q[1], t.q[2], t.q[3]}; acc = lq.Rotate(acc) + Vec3{t.t[0], t.t[1], t.t[2]}; cur = s.parents[cur]; }
+            return acc; };
+        Vec3 F = rootOf(f2); if (f1 >= 0) F = F + rootOf(f1); if (f3 >= 0) F = F + rootOf(f3);
+        Vec3 T = rootOf(f0);
+        if (F.Length() < 1e-3f || T.Length() < 1e-3f) continue;
+        s.handFwd[h] = F.Normalized(); s.handThumb[h] = T; s.handAxesOk[h] = true;
+        LOGI("[skel] %shand axes (local): fwd(%.2f,%.2f,%.2f) thumb(%.2f,%.2f,%.2f)", pre, s.handFwd[h].x, s.handFwd[h].y, s.handFwd[h].z, T.x, T.y, T.z);
+    }
     if (c.dumpSkeleton) {
         std::string all;
         for (int i = 0; i < s.boneCount; ++i) { all += std::to_string(i) + ":" + s.names[i] + "(p" + std::to_string(s.parents[i]) + ") "; if (all.size() > 1500) { LOGI("[skel] %s", all.c_str()); all.clear(); } }
@@ -299,6 +332,19 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
 
     if (uint8_t* pc = PersCam1()) WriteCamMatrix(pc + off::Cam_Matrix, r, u, fw, pos);
     if (uint8_t* cc = ChrCam()) WriteCamMatrix(cc + off::Cam_Matrix, r, u, fw, pos);
+    // Keep the body facing the camera direction (strafe/lock-on mode) unless a real enemy is locked on,
+    // otherwise walking backwards/sideways turns the torso away and the arms cannot reach the hands.
+    if (c.fpFaceCamera) {
+        int64_t enemy = -1; RD(player + off::PI_LockedEnemy, enemy);
+        bool realLock = enemy != -1 && enemy != 0;
+        WR(player + off::Chr_IsLockedOn, (uint8_t)1);
+        if (uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl)) WR(ctrl + off::Ctrl_IsUnlocked, (uint8_t)0);
+        if (!realLock) {
+            Vec3 tgt = pos + fw * 10.f;
+            float t4[4] = {tgt.x, tgt.y, tgt.z, 1.f};
+            SafeWrite(player + off::Chr_LockOnTarget, t4, 16);
+        }
+    }
     if (c.fpWriteAim) {
         Quat q = Quat::YawQ(f.baseYaw) * f.headQ;
         Vec3 ar = q.Rotate({1, 0, 0}), au = q.Rotate({0, 1, 0}), af = q.Rotate({0, 0, 1});
@@ -367,8 +413,11 @@ void UpdateArms(uint8_t* player, const FrameInfo& f) {
     bool any = false;
     for (int h = 0; h < 2; ++h) {
         if (!f.handValid[h]) continue;
-        Quat q = (baseQ * f.handQ[h] * calib).Normalized();
-        Vec3 p = f.anchor + baseQ.Rotate(f.handP[h]) - q.Rotate({0, 0, 1}) * c.handBackOffset;   // hand forward = +Z in game frame
+        Quat cq = (baseQ * f.handQ[h] * calib).Normalized();          // controller orientation in game world
+        Vec3 cf = cq.Rotate({0, 0, 1}), cu = cq.Rotate({0, 1, 0});     // controller forward / up (game frame)
+        Quat q = cq;
+        if (g_skel.handAxesOk[h]) q = Quat::MapPairs(g_skel.handFwd[h], g_skel.handThumb[h], cf, cu);   // hand-local -> world
+        Vec3 p = f.anchor + baseQ.Rotate(f.handP[h]) - cf * c.handBackOffset;
         float side = h == HandLeft ? -1.f : 1.f;
         Vec3 pole = baseQ.Rotate(Vec3{side * c.elbowPoleOut, -c.elbowPoleDown, -c.elbowPoleBack});
         if (h == HandLeft) SolveArm(g_skel, pose, local, w, g_skel.L_ua, g_skel.L_fa, g_skel.L_hand, p, q, pole);
@@ -414,12 +463,32 @@ void CameraStepBody(bool& skipOriginal, bool afterOriginal) {
     ApplyHeadVisibility(player, c.fpHideHead, c.fpHideSheathed);
     if (c.fpCameraMode == "passthrough") { skipOriginal = false; return; }
     if (c.fpCameraMode == "post" && !afterOriginal) { skipOriginal = false; return; }   // come back after the original
+    if (afterOriginal) { UpdateCamera(player, f); return; }                                // post pass: just re-assert
     UpdateCamera(player, f);
     if (dump) { DumpMatrix("ervr chr_cam (after write)", ChrCam()); DumpMatrix("ervr pers_cam_1 (after write)", PersCam1()); }
     skipOriginal = (c.fpCameraMode == "block");
     g_status.playerFound = true;
 }
+void __fastcall Hook_MmsUpdateChrCam(void* a) {
+    if (!g_tripped && FirstPersonActive() && Cfg().fpCameraMode == "pre") {
+        __try { bool d; CameraStepBody(d, false); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
+    }
+    g_origMms(a);
+}
+void __fastcall Hook_FollowCamFollow(void* fc, float dt, void* c) {
+    // Setting reset_camera disables the follow cam's position interpolation (erfps2 trick) so it stops fighting us.
+    uint8_t saved = 0; bool have = false;
+    if (!g_tripped && FirstPersonActive() && Cfg().fpCameraMode == "pre") { have = RD(((uint8_t*)fc) + OFF_FollowCam_ResetCamera, saved); if (have) WR(((uint8_t*)fc) + OFF_FollowCam_ResetCamera, (uint8_t)1); }
+    g_origFollow(fc, dt, c);
+    if (have) WR(((uint8_t*)fc) + OFF_FollowCam_ResetCamera, saved);
+}
+void HookCameraStepImpl(void* a, void* b);
 void __fastcall Hook_CameraStep(void* a, void* b) {
+    InterlockedIncrement(&g_camCalls);
+    ScopedTicks st(&g_camTicks);
+    HookCameraStepImpl(a, b);
+}
+void HookCameraStepImpl(void* a, void* b) {
     ++g_frame;
     bool skip = false;
     if (!g_tripped && FirstPersonActive()) {
@@ -428,18 +497,24 @@ void __fastcall Hook_CameraStep(void* a, void* b) {
     }
     if (skip) return;
     g_origCameraStep(a, b);
-    if (!g_tripped && FirstPersonActive() && Cfg().fpCameraMode == "post") {
+    if (!g_tripped && FirstPersonActive() && (Cfg().fpCameraMode == "post" || Cfg().fpCameraMode == "pre")) {
         __try { bool dummy; CameraStepBody(dummy, true); }
         __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     }
 }
 
 void HkBody() {
+    // Solve once per rendered frame (the Havok update fires many times per frame).
+    if (g_status.cameraHooked && g_lastArmFrame == g_frame) return;
+    g_lastArmFrame = g_frame;
+    InterlockedIncrement(&g_hkSolves);
+    ScopedTicks st(&g_hkTicks);
     uint8_t* player = MainPlayer(); if (!player) return;
     FrameInfo f; if (!BuildFrame(player, f)) return;
     UpdateArms(player, f);
 }
 void HkHandler(MidHookRegs*, void*) {
+    InterlockedIncrement(&g_hkCalls);
     if (g_tripped || !Cfg().fpEnabled || !Cfg().handTracking) return;
     __try { HkBody(); }
     __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
@@ -494,6 +569,10 @@ bool GameERInit() {
             g_status.cameraHooked = true; LOGI("[game] camera step hooked");
         } else LOGW("[game] failed to hook camera step");
     }
+    uint8_t* mms = g_status.versionOk ? g_base + RVA_MmsUpdateChrCam : ResolveCallTarget("48 8b cb e8 $ f3 0f 10 4f 08 48 8b cb e8 ?? ?? ?? ?? f3 0f 10 4f 08 48 8b cb e8 ?? ?? ?? ?? 48 8b cb e8", "MmsUpdateChrCam");
+    uint8_t* fol = g_status.versionOk ? g_base + RVA_FollowCamFollow : ResolveCallTarget("4d 8b c6 41 0f 28 cf 48 8b ce e8 $ 0f b6 86 10 03 00 00", "FollowCamFollow");
+    if (mms && MH_CreateHook(mms, (void*)&Hook_MmsUpdateChrCam, (void**)&g_origMms) == MH_OK && MH_EnableHook(mms) == MH_OK) LOGI("[game] chr-cam update hooked @ %p", (void*)mms); else LOGW("[game] chr-cam update hook unavailable");
+    if (fol && MH_CreateHook(fol, (void*)&Hook_FollowCamFollow, (void**)&g_origFollow) == MH_OK && MH_EnableHook(fol) == MH_OK) LOGI("[game] follow-cam hooked @ %p", (void*)fol); else LOGW("[game] follow-cam hook unavailable");
 
     // Per-frame pose hook: CS::NoUpdateInterface vft[10] (ERSkeletonMan's timing point).
     if (void** vt = FindVTable("CS::NoUpdateInterface")) {
@@ -520,7 +599,14 @@ void GameERTick() {
     g_vrValid = ok; if (ok) { g_vrTr = tr; g_vrIn = in; }
 }
 
-GameERStatus GameERGetStatus() { GameERStatus s = g_status; s.boneCount = g_skel.boneCount; return s; }
+GameERStatus GameERGetStatus() {
+    GameERStatus s = g_status; s.boneCount = g_skel.boneCount;
+    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+    s.hkCalls = InterlockedExchange(&g_hkCalls, 0); s.hkSolves = InterlockedExchange(&g_hkSolves, 0); s.camCalls = InterlockedExchange(&g_camCalls, 0);
+    s.hkMs = (double)InterlockedExchange64(&g_hkTicks, 0) * 1000.0 / (double)f.QuadPart;
+    s.camMs = (double)InterlockedExchange64(&g_camTicks, 0) * 1000.0 / (double)f.QuadPart;
+    return s;
+}
 
 void GameERShutdown() {
     if (g_hkSlot && g_hkOrig) {

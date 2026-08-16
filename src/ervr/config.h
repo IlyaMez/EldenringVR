@@ -65,8 +65,9 @@ struct Config {
     std::string fpCameraRotation = "yaw"; // yaw | game | hmd  -> what rotation we write into the game camera
     bool  fpAddHmdPosition = false;       // add the HMD positional offset ourselves (R.E.A.L. usually does)
     bool  fpHmdYawInGameCamera = false;   // set true if R.E.A.L. writes HMD yaw into the game camera (hands double-turn otherwise)
+    bool  fpFaceCamera = true;           // keep the body facing the camera (strafe mode) so arms can always reach
     bool  fpHideHead = true;
-    bool  fpHideSheathed = true;
+    bool  fpHideSheathed = false;
     bool  fpWriteAim = true;              // write the HMD look direction into the player's aim matrix (spells/bows)
     bool  handTracking = true;            // drive arm bones from the controllers
     std::string handOrigin = "head";      // head | tracking | floor

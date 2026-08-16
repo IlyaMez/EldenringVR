@@ -124,6 +124,7 @@ void Config::Load(const std::wstring& path) {
     fpCameraRotation = GetS(ini, L"FirstPerson", L"CameraRotation", fpCameraRotation);
     fpAddHmdPosition = GetB(ini, L"FirstPerson", L"AddHmdPosition", fpAddHmdPosition);
     fpHmdYawInGameCamera = GetB(ini, L"FirstPerson", L"HmdYawInGameCamera", fpHmdYawInGameCamera);
+    fpFaceCamera = GetB(ini, L"FirstPerson", L"FaceCamera", fpFaceCamera);
     fpHideHead = GetB(ini, L"FirstPerson", L"HideHead", fpHideHead);
     fpHideSheathed = GetB(ini, L"FirstPerson", L"HideSheathedWeapons", fpHideSheathed);
     fpWriteAim = GetB(ini, L"FirstPerson", L"WriteAim", fpWriteAim);

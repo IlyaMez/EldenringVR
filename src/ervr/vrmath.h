@@ -56,6 +56,22 @@ struct Quat { float x = 0, y = 0, z = 0, w = 1;
         return q.Normalized();
     }
     static Quat FromEulerYXZ(float yaw, float pitch, float roll) { return YawQ(yaw) * AxisAngle({1, 0, 0}, pitch) * AxisAngle({0, 0, 1}, roll); }
+    // Quaternion whose Rotate() of the unit axes gives the orthonormal basis X,Y,Z.
+    static Quat FromBasis(const Vec3& X, const Vec3& Y, const Vec3& Z) {
+        float m00 = X.x, m10 = X.y, m20 = X.z, m01 = Y.x, m11 = Y.y, m21 = Y.z, m02 = Z.x, m12 = Z.y, m22 = Z.z;
+        float tr = m00 + m11 + m22; Quat q;
+        if (tr > 0) { float s = std::sqrt(tr + 1.f) * 2.f; q.w = 0.25f * s; q.x = (m21 - m12) / s; q.y = (m02 - m20) / s; q.z = (m10 - m01) / s; }
+        else if (m00 > m11 && m00 > m22) { float s = std::sqrt(1.f + m00 - m11 - m22) * 2.f; q.w = (m21 - m12) / s; q.x = 0.25f * s; q.y = (m01 + m10) / s; q.z = (m02 + m20) / s; }
+        else if (m11 > m22) { float s = std::sqrt(1.f + m11 - m00 - m22) * 2.f; q.w = (m02 - m20) / s; q.x = (m01 + m10) / s; q.y = 0.25f * s; q.z = (m12 + m21) / s; }
+        else { float s = std::sqrt(1.f + m22 - m00 - m11) * 2.f; q.w = (m10 - m01) / s; q.x = (m02 + m20) / s; q.y = (m12 + m21) / s; q.z = 0.25f * s; }
+        return q.Normalized();
+    }
+    // Rotation mapping the local pair (f,u) onto the target pair (F,U): R*f = F, R*u ~ U.
+    static Quat MapPairs(Vec3 f, Vec3 u, Vec3 F, Vec3 U) {
+        f = f.Normalized(); u = (u - f * u.Dot(f)).Normalized(); Vec3 w = f.Cross(u);
+        F = F.Normalized(); U = (U - F * U.Dot(F)).Normalized(); Vec3 W = F.Cross(U);
+        return (FromBasis(F, U, W) * FromBasis(f, u, w).Conj()).Normalized();
+    }
     // Rotation matrix rows (basis vectors): X = Rotate(1,0,0) etc.
 };
 

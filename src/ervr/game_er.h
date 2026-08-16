@@ -20,6 +20,8 @@ struct GameERStatus {
     bool playerFound = false;
     int  boneCount = 0;
     bool armsActive = false;
+    long hkCalls = 0, hkSolves = 0, camCalls = 0;   // since last query
+    double hkMs = 0, camMs = 0;                     // total ms spent in the hooks since last query
 };
 GameERStatus GameERGetStatus();
 }

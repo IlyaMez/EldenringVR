@@ -22,20 +22,18 @@ std::vector<PatByte> Parse(const std::string& s) {
 }
 }
 
+// SEH-guarded copies: free when the access is valid (no syscall), safe when it isn't.
+static bool GuardedCopy(void* dst, const void* src, size_t size) {
+    __try { std::memcpy(dst, src, size); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 bool SafeRead(const void* addr, void* out, size_t size) {
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!addr || !VirtualQuery(addr, &mbi, sizeof(mbi))) return false;
-    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
-    if ((const uint8_t*)addr + size > (const uint8_t*)mbi.BaseAddress + mbi.RegionSize) return false;
-    std::memcpy(out, addr, size);
-    return true;
+    if (!addr || (uintptr_t)addr < 0x10000) return false;
+    return GuardedCopy(out, addr, size);
 }
 bool SafeWrite(void* addr, const void* in, size_t size) {
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!addr || !VirtualQuery(addr, &mbi, sizeof(mbi))) return false;
-    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD | PAGE_READONLY | PAGE_EXECUTE_READ))) return false;
-    std::memcpy(addr, in, size);
-    return true;
+    if (!addr || (uintptr_t)addr < 0x10000) return false;
+    return GuardedCopy(addr, in, size);
 }
 
 uint8_t* AobScan(const std::string& pattern) {

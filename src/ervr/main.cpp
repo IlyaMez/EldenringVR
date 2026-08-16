@@ -104,7 +104,8 @@ DWORD WINAPI Worker(LPVOID) {
                      in.indexTrigger[0], in.indexTrigger[1], in.thumb[0][0], in.thumb[0][1], in.thumb[1][0], in.thumb[1][1], calls, merged, fab);
             else LOGD("hb: waiting for VR runtime (%s)", ActiveBackend() ? ActiveBackend()->Name() : "none attached");
             GameERStatus gs = GameERGetStatus();
-            LOGD("hb: game: version %d camHook %d skelHook %d player %d bones %d arms %d", gs.versionOk, gs.cameraHooked, gs.skeletonHooked, gs.playerFound, gs.boneCount, gs.armsActive);
+            LOGD("hb: game: version %d camHook %d skelHook %d player %d bones %d arms %d | 5s: camStep %ld calls %.1f ms, hk %ld calls / %ld solves %.1f ms",
+                 gs.versionOk, gs.cameraHooked, gs.skeletonHooked, gs.playerFound, gs.boneCount, gs.armsActive, gs.camCalls, gs.camMs, gs.hkCalls, gs.hkSolves, gs.hkMs);
         }
         double spent = Now() - t;
         DWORD sleepMs = (DWORD)((period - spent) * 1000.0);
