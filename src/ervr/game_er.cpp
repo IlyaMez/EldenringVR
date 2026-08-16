@@ -183,6 +183,7 @@ struct Skeleton {
     std::vector<HkQsTransform> refPoseCopy;
     int L_ua = -1, L_fa = -1, L_hand = -1, R_ua = -1, R_fa = -1, R_hand = -1;
     Vec3 handFwd[2], handThumb[2]; bool handAxesOk[2]{};   // hand-bone local frame, from ref pose finger roots
+    int torso = -1, L_clav = -1, R_clav = -1;
     bool warned = false;
 
     HkQsTransform* LivePose() const {
@@ -229,6 +230,8 @@ bool BuildSkeleton(uint8_t* chr) {
     const Config& c = Cfg();
     s.L_ua = s.Find(c.boneLUpperArm); s.L_fa = s.Find(c.boneLForearm); s.L_hand = s.Find(c.boneLHand);
     s.R_ua = s.Find(c.boneRUpperArm); s.R_fa = s.Find(c.boneRForearm); s.R_hand = s.Find(c.boneRHand);
+    s.torso = s.Find(c.boneTorso); s.L_clav = s.Find("L_Clavicle"); s.R_clav = s.Find("R_Clavicle");
+    if (s.L_clav < 0) s.L_clav = s.L_ua; if (s.R_clav < 0) s.R_clav = s.R_ua;
     // Anatomical hand axes from the reference pose: finger roots = forward, thumb root = thumb side.
     for (int h = 0; h < 2; ++h) {
         const char* pre = h == HandLeft ? "L_" : "R_";
@@ -367,7 +370,13 @@ void SolveArm(const Skeleton& s, HkQsTransform* pose, std::vector<HkQsTransform>
     Vec3 toT = target - S; float d = toT.Length();
     if (d < 1e-4f) return;
     float maxReach = (L1 + L2) * 0.999f;
-    if (d > maxReach) { toT = toT * (maxReach / d); d = maxReach; }
+    float stretch = 1.f;
+    if (d > maxReach) {
+        float want = d / maxReach;
+        stretch = std::fmin(want, std::fmax(1.f, Cfg().armStretch));
+        L1 *= stretch; L2 *= stretch; maxReach *= stretch;
+        if (d > maxReach) { toT = toT * (maxReach / d); d = maxReach; }
+    }
     Vec3 dir = toT * (1.f / d);
     float cosA = Clamp((L1 * L1 + d * d - L2 * L2) / (2.f * L1 * d), -1.f, 1.f);
     float sinA = std::sqrt(std::fmax(0.f, 1.f - cosA * cosA));
@@ -396,7 +405,13 @@ void SolveArm(const Skeleton& s, HkQsTransform* pose, std::vector<HkQsTransform>
         HkQsTransform& t = local[i]; t.q[0] = q.x; t.q[1] = q.y; t.q[2] = q.z; t.q[3] = q.w;
         SafeWrite(&pose[i].q[0], t.q, 16);
     };
+    auto writeT = [&](int i, float scale) {   // stretch bone length along its (reference) offset
+        const HkQsTransform& r = s.refPoseCopy[i]; HkQsTransform& t = local[i];
+        t.t[0] = r.t[0] * scale; t.t[1] = r.t[1] * scale; t.t[2] = r.t[2] * scale;
+        SafeWrite(&pose[i].t[0], t.t, 16);
+    };
     writeQ(iUA, lUA); writeQ(iFA, lFA); writeQ(iHand, lHand);
+    if (stretch != 1.f) { writeT(iFA, stretch); writeT(iHand, stretch); }
     w.q[iUA] = qUA; w.q[iFA] = qFA; w.q[iHand] = targetQ; w.pos[iFA] = E; w.pos[iHand] = T;
 }
 
@@ -409,6 +424,27 @@ void UpdateArms(uint8_t* player, const FrameInfo& f) {
     WorldPose w; if (!ComputeWorld(g_skel, pose, rootPos, rootQ, w, local)) return;
 
     Quat baseQ = Quat::YawQ(f.baseYaw);
+    // Torso twist: rotate the Spine bone about world Y so the shoulder line faces the camera yaw.
+    if (c.torsoFaceCamera && g_skel.torso >= 0 && g_skel.L_clav >= 0 && g_skel.R_clav >= 0 && (f.handValid[0] || f.handValid[1])) {
+        Vec3 right = w.pos[g_skel.R_clav] - w.pos[g_skel.L_clav]; right.y = 0.f;
+        if (right.Length() > 1e-3f) {
+            float bodyYaw = std::atan2(-right.z, right.x);           // right vector at yaw t = (cos t, 0, -sin t)
+            float delta = WrapPi(f.baseYaw - bodyYaw);
+            int i = g_skel.torso, p = g_skel.parents[i];
+            Quat parentQ = p >= 0 ? w.q[p] : Quat{};
+            Quat newW = (Quat::YawQ(delta) * w.q[i]).Normalized();
+            Quat lq = (parentQ.Conj() * newW).Normalized();
+            HkQsTransform& t = local[i]; t.q[0] = lq.x; t.q[1] = lq.y; t.q[2] = lq.z; t.q[3] = lq.w;
+            SafeWrite(&pose[i].q[0], t.q, 16);
+            // recompute world transforms from the modified local pose (cheap: local copy already updated)
+            for (int k = 0; k < g_skel.boneCount; ++k) {
+                const HkQsTransform& lt = local[k]; Vec3 v{lt.t[0], lt.t[1], lt.t[2]}; Quat q{lt.q[0], lt.q[1], lt.q[2], lt.q[3]};
+                int pk = g_skel.parents[k];
+                if (pk < 0 || pk >= k) { w.q[k] = rootQ * q; w.pos[k] = rootPos + rootQ.Rotate(v); }
+                else { w.q[k] = w.q[pk] * q; w.pos[k] = w.pos[pk] + w.q[pk].Rotate(v); }
+            }
+        }
+    }
     Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(c.handRotOffX), Deg2Rad(c.handRotOffZ));
     bool any = false;
     for (int h = 0; h < 2; ++h) {
@@ -417,7 +453,7 @@ void UpdateArms(uint8_t* player, const FrameInfo& f) {
         Vec3 cf = cq.Rotate({0, 0, 1}), cu = cq.Rotate({0, 1, 0});     // controller forward / up (game frame)
         Quat q = cq;
         if (g_skel.handAxesOk[h]) q = Quat::MapPairs(g_skel.handFwd[h], g_skel.handThumb[h], cf, cu);   // hand-local -> world
-        Vec3 p = f.anchor + baseQ.Rotate(f.handP[h]) - cf * c.handBackOffset;
+        Vec3 p = f.anchor + baseQ.Rotate(f.handP[h] * c.handScale) - cf * c.handBackOffset;
         float side = h == HandLeft ? -1.f : 1.f;
         Vec3 pole = baseQ.Rotate(Vec3{side * c.elbowPoleOut, -c.elbowPoleDown, -c.elbowPoleBack});
         if (h == HandLeft) SolveArm(g_skel, pose, local, w, g_skel.L_ua, g_skel.L_fa, g_skel.L_hand, p, q, pole);

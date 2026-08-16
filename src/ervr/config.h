@@ -74,10 +74,26 @@ struct Config {
     float handBackOffset = 0.06f;         // meters from controller grip pose back to the wrist bone
     float handRotOffX = 0.f, handRotOffY = 0.f, handRotOffZ = 0.f;   // degrees, controller -> hand bone calibration
     float elbowPoleDown = 1.0f, elbowPoleOut = 0.6f, elbowPoleBack = 0.3f;
+    float armStretch = 1.5f;              // max stretch factor of forearm+hand when the target is out of reach (1 = none)
+    float handScale = 1.0f;               // scale controller offsets from the head (compensate arm length differences)
+    bool  torsoFaceCamera = true;         // twist the Spine bone so the chest faces the camera yaw
+    std::string boneTorso = "Spine";
     std::string boneLUpperArm = "L_UpperArm", boneLForearm = "L_Forearm", boneLHand = "L_Hand";
     std::string boneRUpperArm = "R_UpperArm", boneRForearm = "R_Forearm", boneRHand = "R_Hand";
     bool  dumpSkeleton = true;            // log all bone names once when the player skeleton is first seen
     bool  fpDebug = false;                // per-second debug lines with frame data
+
+    // [MenuNav]  left stick acts as a held D-pad while a menu is open (game auto-repeats), gestures muted
+    bool  menuNavEnabled = true;
+    float menuNavThreshold = 0.55f;       // stick deflection that counts as a D-pad press (hysteresis: releases at 0.6x)
+    bool  menuNavFollowStart = true;      // no memory flag: enter on our START press, leave on the next START/BACK
+    float menuNavToggleHold = 0.5f;       // hold left stick click (no tilt) this long -> toggle menu mode; 0 = off
+    bool  menuNavHaptics = true;
+    std::string menuAob = "48 8B 0D ?? ?? ?? ?? 48 8B 53 08 48 8B 92 D8 00 00 00 48 83 C4 20 5B";  // CSMenuMan* global
+    int   menuAobOffset = 3, menuAobInstrLen = 7;
+    std::string menuChain;                // pointer chain from the CSMenuMan* global to a byte that is nonzero while a menu is open; empty = disabled
+    bool  menuScan = false;               // debug: log which bytes of the CSMenuMan object change (find MenuChain)
+    int   menuScanSize = 0x400;
 
     // [Experimental] hand-aim: rotates the game camera toward where the right hand points
     bool  handAimEnabled = false;

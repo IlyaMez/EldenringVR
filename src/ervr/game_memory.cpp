@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <sstream>
 #include <cstring>
+#include <vector>
 
 namespace ervr {
 
@@ -125,5 +126,67 @@ void GameHandAimTick(const VRTracking& tr, const VRInputState& in, double /*now*
     float np = Clamp(g_pitch0 + (hp - g_handPitch0) * c.handAimStrength, -1.4f, 1.4f);
     SafeWrite(yaw, &ny, 4);
     SafeWrite(pitch, &np, 4);
+}
+
+// ---- menu-open flag ------------------------------------------------------------
+namespace {
+uint8_t* g_menuBasePtr = nullptr;     // address of the CSMenuMan* global
+std::vector<int> g_menuChain;
+std::string g_menuChainStr, g_menuAobStr;
+bool g_menuInitTried = false;
+int  g_menuLast = -1;
+// scan helper
+std::vector<uint8_t> g_scanPrev;
+std::vector<uint16_t> g_scanFlips;    // per-offset change count within the current window
+double g_scanWindow = 0, g_scanNext = 0;
+}
+
+void GameMenuInit() {
+    const Config& c = Cfg();
+    g_menuInitTried = true;
+    g_menuBasePtr = nullptr;
+    g_menuAobStr = c.menuAob; g_menuChainStr = c.menuChain;
+    g_menuChain = ParseChain(c.menuChain);
+    if (c.menuAob.empty()) return;
+    uint8_t* hit = AobScan(c.menuAob);
+    if (!hit) { LOGW("[menu] MenuAOB not found in eldenring.exe; menu detection falls back to the START button"); return; }
+    g_menuBasePtr = ResolveRipRelative(hit, c.menuAobOffset, c.menuAobInstrLen);
+    LOGI("[menu] AOB hit %p -> CSMenuMan* global %p, chain of %zu offsets%s", (void*)hit, (void*)g_menuBasePtr,
+         g_menuChain.size(), g_menuChain.empty() ? " (MenuChain empty: flag disabled)" : "");
+}
+
+static void MenuScanTick(double now) {
+    const Config& c = Cfg();
+    uint8_t* obj = nullptr;
+    if (!SafeRead(g_menuBasePtr, &obj, sizeof(obj)) || !obj) return;
+    size_t n = (size_t)Clamp((float)c.menuScanSize, 16.f, 65536.f);
+    std::vector<uint8_t> cur(n);
+    if (!SafeRead(obj, cur.data(), n)) return;
+    if (g_scanPrev.size() != n) { g_scanPrev = cur; g_scanFlips.assign(n, 0); g_scanWindow = now; LOGI("[menuscan] watching CSMenuMan object %p (%zu bytes); open/close a menu and look for offsets that flip once each way", (void*)obj, n); return; }
+    if (now >= g_scanNext) {                       // 20 Hz compare
+        g_scanNext = now + 0.05;
+        for (size_t i = 0; i < n; ++i) {
+            if (cur[i] == g_scanPrev[i]) continue;
+            if (g_scanFlips[i] < 65535) ++g_scanFlips[i];
+            if (g_scanFlips[i] <= 3)   // stop reporting noisy offsets (counters, timers)
+                LOGI("[menuscan] +0x%zX: %02X -> %02X", i, g_scanPrev[i], cur[i]);
+        }
+        g_scanPrev = cur;
+        if (now - g_scanWindow > 10.0) { g_scanFlips.assign(n, 0); g_scanWindow = now; }
+    }
+}
+
+int GameMenuOpen(double now) {
+    const Config& c = Cfg();
+    if (!g_menuInitTried || c.menuAob != g_menuAobStr || c.menuChain != g_menuChainStr) GameMenuInit();
+    if (!g_menuBasePtr) return -1;
+    if (c.menuScan) MenuScanTick(now);
+    if (g_menuChain.empty()) return -1;
+    uint8_t* flag = FollowChain(g_menuBasePtr, g_menuChain);
+    uint8_t v = 0;
+    if (!flag || !SafeRead(flag, &v, 1)) return -1;
+    int open = v ? 1 : 0;
+    if (open != g_menuLast) { LOGD("[menu] flag %p = %u -> %s", (void*)flag, v, open ? "open" : "closed"); g_menuLast = open; }
+    return open;
 }
 }

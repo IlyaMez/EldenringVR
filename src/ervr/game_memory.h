@@ -23,4 +23,12 @@ std::vector<int> ParseChain(const std::string& s);
 // CameraAOB / CameraChain / offsets in ERVR.ini; silently inactive otherwise.
 void GameHandAimInit();
 void GameHandAimTick(const VRTracking& tr, const VRInputState& in, double now);
+
+// --- menu-open flag ---------------------------------------------------------------
+// Resolves [MenuNav] MenuAOB -> CSMenuMan* global and, if MenuChain is set, reads a byte
+// that is nonzero while a menu is open. Returns -1 when unknown/unconfigured, else 0/1.
+// With [MenuNav] Scan=true it logs which bytes of the CSMenuMan object change over time,
+// which is how you find MenuChain for a new game version.
+void GameMenuInit();
+int  GameMenuOpen(double now);
 }

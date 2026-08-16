@@ -40,6 +40,15 @@ double g_lastSnap = -1e9;
 int g_lastDpadDir = 0;
 bool g_snapActive = false;
 
+// Menu navigation mode: left stick = held D-pad, movement zeroed, gestures muted.
+bool g_menuMode = false;        // effective state (memory flag if known, else manual/START-driven)
+bool g_menuManual = false;      // state driven by START/toggle when the memory flag is unavailable
+int  g_menuDpadDir = 0;         // 0 none, 1 up, 2 down, 3 left, 4 right (with hysteresis)
+bool g_menuToggleFired = false; // stick-click hold already toggled during this press
+int  g_menuLastFlag = -1;       // last value of the memory flag (to notice when it changes)
+bool g_menuOverride = false;    // manual toggle currently overriding the memory flag
+
+
 // Haptic scheduling (worker thread stops vibration after a short duration).
 double g_hapticUntil[2] = {0, 0};
 float  g_rumble[2] = {0, 0};   // from XInputSetState, 0..1
@@ -125,11 +134,12 @@ void VirtualPadUpdate(double now) {
     // ---- Menu: tap = START, hold = BACK (map) ---------------------------------
     bool menuDown = (in.buttons & VRB_Menu) != 0;
     if (menuDown && !g_menuHold.down) { g_menuHold = {true, now, false}; }
+    bool pressedStart = false, pressedBack = false;
     if (menuDown && !g_menuHold.consumed && now - g_menuHold.since >= c.menuHoldForBack) {
-        AddPulse(XINPUT_GAMEPAD_BACK, now, c.gesturePressDuration); g_menuHold.consumed = true;
+        AddPulse(XINPUT_GAMEPAD_BACK, now, c.gesturePressDuration); g_menuHold.consumed = true; pressedBack = true;
     }
     if (!menuDown && g_menuHold.down) {
-        if (!g_menuHold.consumed) AddPulse(g_map.menu, now, c.gesturePressDuration);
+        if (!g_menuHold.consumed) { AddPulse(g_map.menu, now, c.gesturePressDuration); pressedStart = (g_map.menu == XINPUT_GAMEPAD_START); }
         g_menuHold.down = false;
     }
 
@@ -139,7 +149,7 @@ void VirtualPadUpdate(double now) {
     if (!yFallback) mapHeld(g_map.y, yDown);
     else {
         if (yDown && !g_yHold.down) g_yHold = {true, now, false};
-        if (yDown && !g_yHold.consumed && now - g_yHold.since >= 0.6) { AddPulse(g_map.menu, now, c.gesturePressDuration); g_yHold.consumed = true; }
+        if (yDown && !g_yHold.consumed && now - g_yHold.since >= 0.6) { AddPulse(g_map.menu, now, c.gesturePressDuration); g_yHold.consumed = true; pressedStart = (g_map.menu == XINPUT_GAMEPAD_START); }
         if (!yDown && g_yHold.down) { if (!g_yHold.consumed) AddPulse(g_map.y, now, c.gesturePressDuration); g_yHold.down = false; }
     }
 
@@ -150,11 +160,60 @@ void VirtualPadUpdate(double now) {
     ApplyDeadzone(lx, ly, c.stickDeadzone);
     ApplyDeadzone(rx, ry, c.stickDeadzone);
 
-    // Left stick click: tap = LS (crouch); hold + tilt = D-pad (quick slots).
+    // ---- menu navigation mode ------------------------------------------------
+    // Source of truth, in order: memory flag (CSMenuMan) if configured; else our own START/BACK presses
+    // and the manual toggle (hold left stick click without tilting).
     bool lThumbDown = (in.buttons & VRB_LThumb) != 0;
-    bool dpadMode = c.leftGripPlusStickIsDpad && lThumbDown;
-    if (lThumbDown && !g_lthumbHold.down) { g_lthumbHold = {true, now, false}; g_lastDpadDir = 0; }
-    if (dpadMode) {
+    bool stickIdle = std::fabs(lx) < 0.3f && std::fabs(ly) < 0.3f;
+    if (lThumbDown && !g_lthumbHold.down) { g_lthumbHold = {true, now, false}; g_lastDpadDir = 0; g_menuToggleFired = false; }
+    bool wasMenu = g_menuMode;
+    if (c.menuNavEnabled) {
+        int flag = GameMenuOpen(now);   // -1 = no memory flag configured/resolved
+        bool toggle = c.menuNavToggleHold > 0.f && lThumbDown && !g_menuToggleFired && stickIdle && !g_lthumbHold.consumed &&
+                      now - g_lthumbHold.since >= c.menuNavToggleHold;
+        if (toggle) { g_menuToggleFired = true; g_lthumbHold.consumed = true; }
+        if (flag >= 0) {
+            // Memory flag drives the mode; a manual toggle overrides it until the flag next changes.
+            if (flag != g_menuLastFlag) { g_menuOverride = false; g_menuLastFlag = flag; }
+            if (toggle) { g_menuOverride = true; g_menuManual = !g_menuMode; }
+            g_menuMode = g_menuOverride ? g_menuManual : (flag == 1);
+        } else {
+            if (c.menuNavFollowStart) {
+                if (pressedStart) g_menuManual = !g_menuManual;   // START opens the menu, and closes it again
+                if (pressedBack)  g_menuManual = false;           // map: the stick pans there, keep it a stick
+            }
+            if (toggle) g_menuManual = !g_menuManual;
+            g_menuMode = g_menuManual;
+        }
+    } else {
+        g_menuMode = g_menuManual = false;
+    }
+    if (g_menuMode != wasMenu) {
+        LOGI("[menu] navigation mode %s", g_menuMode ? "ON (left stick = D-pad, gestures muted)" : "off");
+        if (c.menuNavHaptics) { Haptic(HandLeft, g_menuMode ? 0.6f : 0.3f, now, g_menuMode ? 0.12 : 0.06); }
+        g_menuDpadDir = 0;
+    }
+
+    // Left stick click: tap = LS (crouch); hold + tilt = D-pad (quick slots).
+    bool dpadMode = !g_menuMode && c.leftGripPlusStickIsDpad && lThumbDown;
+    if (g_menuMode) {
+        // Held D-pad from stick tilt (the game auto-repeats), with hysteresis so the cursor does not stutter.
+        float on = c.menuNavThreshold, off = c.menuNavThreshold * 0.6f;
+        int dir = g_menuDpadDir;
+        float ax = std::fabs(lx), ay = std::fabs(ly);
+        bool stillHeld = dir && ((dir <= 2 ? ay : ax) >= off);
+        if (!stillHeld) {
+            dir = 0;
+            if (ax >= on || ay >= on) dir = (ax > ay) ? (lx > 0 ? 4 : 3) : (ly > 0 ? 1 : 2);
+        }
+        if (dir != g_menuDpadDir) {
+            g_menuDpadDir = dir;
+            if (dir && c.menuNavHaptics) Haptic(HandLeft, 0.25f, now, 0.02);
+        }
+        static const uint16_t kDpadHeld[] = {0, XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT};
+        held |= kDpadHeld[dir];
+        lx = ly = 0.f;
+    } else if (dpadMode) {
         int dir = 0;
         if (std::fabs(lx) > 0.6f || std::fabs(ly) > 0.6f) {
             if (std::fabs(lx) > std::fabs(ly)) dir = lx > 0 ? 4 : 3; else dir = ly > 0 ? 1 : 2;
@@ -170,7 +229,7 @@ void VirtualPadUpdate(double now) {
         mapHeld(g_map.lthumb, lThumbDown);
     }
     if (!lThumbDown && g_lthumbHold.down) {
-        if (c.leftGripPlusStickIsDpad && !g_lthumbHold.consumed && now - g_lthumbHold.since < 0.4) AddPulse(g_map.lthumb, now, c.gesturePressDuration);
+        if ((c.leftGripPlusStickIsDpad || g_menuMode) && !g_lthumbHold.consumed && now - g_lthumbHold.since < 0.4) AddPulse(g_map.lthumb, now, c.gesturePressDuration);
         g_lthumbHold.down = false;
     }
 
@@ -202,9 +261,11 @@ void VirtualPadUpdate(double now) {
         } else AddPulse(mask, now, c.gesturePressDuration);
         if (c.gestureHaptics) Haptic(h, amp, now, 0.08);
     };
-    if (sr == Swing::Light) fire(g_map.light, HandRight, 0.5f);
-    if (sr == Swing::Heavy) fire(g_map.heavy, HandRight, 1.0f);
-    if (sl == Swing::LeftSwing) fire(g_map.leftSwing, HandLeft, 0.6f);
+    if (!g_menuMode) {   // muted in menus: a swing there would press RB/RT/LB = tab switching / item use
+        if (sr == Swing::Light) fire(g_map.light, HandRight, 0.5f);
+        if (sr == Swing::Heavy) fire(g_map.heavy, HandRight, 1.0f);
+        if (sl == Swing::LeftSwing) fire(g_map.leftSwing, HandLeft, 0.6f);
+    }
 
     // ---- pulses -> outputs ----------------------------------------------------
     uint16_t pulses = ActivePulses(now);

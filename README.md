@@ -72,9 +72,16 @@ are being read before you blame the mapping.
 | Left grip | Skill (LT) |
 | Right stick click | Lock‑on |
 | Left stick click (tap) | Crouch |
+| Left stick click (hold 0.5 s, no tilt) | Toggle **menu navigation** by hand |
 | ≡ menu (tap / hold) | Menu / Map |
 | **Swing right hand** | Light attack; swing harder → heavy |
 | **Swing left hand** | LB (parry / bash / offhand attack) |
+
+**Menu navigation** (`[MenuNav]`): while a game menu is open the left stick becomes a held D‑pad (tilt = press,
+keep tilted to auto‑repeat), movement is suppressed and swing gestures are muted (a swing in the inventory would
+otherwise switch tabs). ERVR knows a menu is open from an optional memory flag (`MenuChain`, found with `Scan=true`),
+else it follows your own ≡ press (on with START, off with the next START/BACK — the map keeps the stick, it pans
+there) plus the manual toggle above for menus opened by grace sites, shops or level‑up.
 
 Everything above is a key in `ERVR.ini`. Speeds are in m/s; the debug heartbeat and `[gesture]` lines in the log tell
 you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpeed`.

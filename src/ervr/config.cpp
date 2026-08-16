@@ -137,6 +137,10 @@ void Config::Load(const std::wstring& path) {
     elbowPoleDown = GetF(ini, L"FirstPerson", L"ElbowPoleDown", elbowPoleDown);
     elbowPoleOut = GetF(ini, L"FirstPerson", L"ElbowPoleOut", elbowPoleOut);
     elbowPoleBack = GetF(ini, L"FirstPerson", L"ElbowPoleBack", elbowPoleBack);
+    armStretch = GetF(ini, L"FirstPerson", L"ArmStretch", armStretch);
+    handScale = GetF(ini, L"FirstPerson", L"HandScale", handScale);
+    torsoFaceCamera = GetB(ini, L"FirstPerson", L"TorsoFaceCamera", torsoFaceCamera);
+    boneTorso = GetS(ini, L"FirstPerson", L"BoneTorso", boneTorso);
     boneLUpperArm = GetS(ini, L"FirstPerson", L"BoneLeftUpperArm", boneLUpperArm);
     boneLForearm = GetS(ini, L"FirstPerson", L"BoneLeftForearm", boneLForearm);
     boneLHand = GetS(ini, L"FirstPerson", L"BoneLeftHand", boneLHand);
@@ -145,6 +149,18 @@ void Config::Load(const std::wstring& path) {
     boneRHand = GetS(ini, L"FirstPerson", L"BoneRightHand", boneRHand);
     dumpSkeleton = GetB(ini, L"FirstPerson", L"DumpSkeleton", dumpSkeleton);
     fpDebug = GetB(ini, L"FirstPerson", L"Debug", fpDebug);
+
+    menuNavEnabled = GetB(ini, L"MenuNav", L"Enabled", menuNavEnabled);
+    menuNavThreshold = GetF(ini, L"MenuNav", L"Threshold", menuNavThreshold);
+    menuNavFollowStart = GetB(ini, L"MenuNav", L"FollowStartButton", menuNavFollowStart);
+    menuNavToggleHold = GetF(ini, L"MenuNav", L"ToggleHold", menuNavToggleHold);
+    menuNavHaptics = GetB(ini, L"MenuNav", L"Haptics", menuNavHaptics);
+    menuAob = GetS(ini, L"MenuNav", L"MenuAOB", menuAob);
+    menuAobOffset = GetI(ini, L"MenuNav", L"MenuAOBOffset", menuAobOffset);
+    menuAobInstrLen = GetI(ini, L"MenuNav", L"MenuAOBInstrLen", menuAobInstrLen);
+    menuChain = GetS(ini, L"MenuNav", L"MenuChain", menuChain);
+    menuScan = GetB(ini, L"MenuNav", L"Scan", menuScan);
+    menuScanSize = GetI(ini, L"MenuNav", L"ScanSize", menuScanSize);
 
     handAimEnabled = GetB(ini, L"Experimental", L"HandAim", handAimEnabled);
     cameraAob      = GetS(ini, L"Experimental", L"CameraAOB", cameraAob);

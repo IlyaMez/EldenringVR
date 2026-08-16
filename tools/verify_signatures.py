@@ -24,6 +24,7 @@ def aob(pat):
 checks = {
     "WorldChrMan": "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88",
     "FieldArea": "48 8B 3D ?? ?? ?? ?? 49 8B D8 48 8B F2 4C 8B F1 48 85 FF",
+    "CSMenuMan (MenuNav)": "48 8B 0D ?? ?? ?? ?? 48 8B 53 08 48 8B 92 D8 00 00 00 48 83 C4 20 5B",
     "GetDmyPos call": "48 8d 44 24 40 48 89 44 24 28 41 8b 00 89 44 24 40 4c 8d 44 24 40 49 8b ca e8",
 }
 for name, pat in checks.items():
