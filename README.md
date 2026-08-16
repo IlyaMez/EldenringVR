@@ -96,6 +96,28 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
 * **Gestures** – linear velocity from the runtime; a rising edge over threshold arms a 70 ms window; the peak decides
   light vs heavy; per‑hand cooldown; synthesized buttons are held for `PressDuration`.
 
+## First person + hand-tracked weapons (v0.2, ELDEN RING 1.16.2 / exe 2.6.2.0)
+
+`[FirstPerson]` in `ERVR.ini`. ERVR takes over the game camera and the arm bones; R.E.A.L. keeps rendering.
+
+* **Camera** – MinHook on the camera step function (RVA `0x3bc5e0`, erfps2's `CAMERA_STEP_UPDATE`). While first
+  person is on the original is *not* called; ERVR writes `CSPersCam1` (`[[FieldArea]+0x20]+0x20`, matrix at +0x10)
+  and `ChrCam.pers_cam` (`WorldChrMan+0x1ECE0`) with position = character root (`ChrCtrl+0x230` row 3) +
+  `EyeHeight`, rotation = base yaw from the game's own chr-cam (stick / lock-on) — R.E.A.L. composes the HMD on top.
+  The HMD look direction is written to `ChrIns+0x120` (`aim_view_mtx`) so spells/bows aim where you look.
+* **Head hiding** – erfps2's part list: `PlayerIns+0x648 -> CSChrAsmModelIns+0x28 [27] -> CSModelIns+0x18 ->
+  CSModelDispEntity+0x20 bit0` for parts 0,2,6,21..25 (+ sheathed 7,8,11,12) and the model-res masks at
+  `PlayerIns+0x640` (+0x58 bit3, +0x49 bit3, +0x50 bit5).
+* **Arms** – ERSkeletonMan's pose access: `ChrIns+0x190 -> +0x28 (behavior) -> +0x10 (or +0x60) -> +0x30 =
+  hkbCharacter`; skeleton `[[hkb+0x90]+0x28]` (parent indices +0x20, count +0x28, names +0x30, ref pose +0x40);
+  live pose `[[hkb+0x38]] + *(int*)(..+0x54)` as `hkQsTransform[bones]` (parent-relative). Timing point:
+  `CS::NoUpdateInterface` vtable slot 10 (RTTI-located; slot replaced with a register-preserving stub).
+  Each call: read pose, compute world transforms from the physics module root (`+0x70` pos, `+0x50` quat), solve
+  2-bone IK per arm toward the controller (VR -> game frame: mirror Z; hand rotation = controller * calibration),
+  write the three local quaternions back. Weapons/hitboxes hang off the hand bones and follow.
+* Version gate: RVAs are used only when the exe is 2.6.2.0; otherwise erfps2's AOBs are tried. AOB check script:
+  see `tools/verify_signatures.py`.
+
 ## Troubleshooting notes (learned the hard way)
 
 * **Virtual Desktop**: R.E.A.L. runs on the Oculus path via VD's shim, which is injected as

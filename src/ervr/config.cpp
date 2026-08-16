@@ -118,6 +118,33 @@ void Config::Load(const std::wstring& path) {
     rumbleToControllers = GetB(ini, L"Haptics", L"RumbleToControllers", rumbleToControllers);
     rumbleScale = GetF(ini, L"Haptics", L"RumbleScale", rumbleScale);
 
+    fpEnabled = GetB(ini, L"FirstPerson", L"Enabled", fpEnabled);
+    fpEyeHeight = GetF(ini, L"FirstPerson", L"EyeHeight", fpEyeHeight);
+    fpCameraMode = GetS(ini, L"FirstPerson", L"CameraMode", fpCameraMode);
+    fpCameraRotation = GetS(ini, L"FirstPerson", L"CameraRotation", fpCameraRotation);
+    fpAddHmdPosition = GetB(ini, L"FirstPerson", L"AddHmdPosition", fpAddHmdPosition);
+    fpHmdYawInGameCamera = GetB(ini, L"FirstPerson", L"HmdYawInGameCamera", fpHmdYawInGameCamera);
+    fpHideHead = GetB(ini, L"FirstPerson", L"HideHead", fpHideHead);
+    fpHideSheathed = GetB(ini, L"FirstPerson", L"HideSheathedWeapons", fpHideSheathed);
+    fpWriteAim = GetB(ini, L"FirstPerson", L"WriteAim", fpWriteAim);
+    handTracking = GetB(ini, L"FirstPerson", L"HandTracking", handTracking);
+    handOrigin = GetS(ini, L"FirstPerson", L"HandOrigin", handOrigin);
+    handBackOffset = GetF(ini, L"FirstPerson", L"HandBackOffset", handBackOffset);
+    handRotOffX = GetF(ini, L"FirstPerson", L"HandRotOffsetX", handRotOffX);
+    handRotOffY = GetF(ini, L"FirstPerson", L"HandRotOffsetY", handRotOffY);
+    handRotOffZ = GetF(ini, L"FirstPerson", L"HandRotOffsetZ", handRotOffZ);
+    elbowPoleDown = GetF(ini, L"FirstPerson", L"ElbowPoleDown", elbowPoleDown);
+    elbowPoleOut = GetF(ini, L"FirstPerson", L"ElbowPoleOut", elbowPoleOut);
+    elbowPoleBack = GetF(ini, L"FirstPerson", L"ElbowPoleBack", elbowPoleBack);
+    boneLUpperArm = GetS(ini, L"FirstPerson", L"BoneLeftUpperArm", boneLUpperArm);
+    boneLForearm = GetS(ini, L"FirstPerson", L"BoneLeftForearm", boneLForearm);
+    boneLHand = GetS(ini, L"FirstPerson", L"BoneLeftHand", boneLHand);
+    boneRUpperArm = GetS(ini, L"FirstPerson", L"BoneRightUpperArm", boneRUpperArm);
+    boneRForearm = GetS(ini, L"FirstPerson", L"BoneRightForearm", boneRForearm);
+    boneRHand = GetS(ini, L"FirstPerson", L"BoneRightHand", boneRHand);
+    dumpSkeleton = GetB(ini, L"FirstPerson", L"DumpSkeleton", dumpSkeleton);
+    fpDebug = GetB(ini, L"FirstPerson", L"Debug", fpDebug);
+
     handAimEnabled = GetB(ini, L"Experimental", L"HandAim", handAimEnabled);
     cameraAob      = GetS(ini, L"Experimental", L"CameraAOB", cameraAob);
     cameraAobOffset = GetI(ini, L"Experimental", L"CameraAOBOffset", cameraAobOffset);

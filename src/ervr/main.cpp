@@ -10,6 +10,8 @@
 #include "virtual_pad.h"
 #include "xinput_hook.h"
 #include "game_memory.h"
+#include "midhook.h"
+#include "game_er.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -60,8 +62,10 @@ DWORD WINAPI Worker(LPVOID) {
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
         LOGE("MinHook init failed"); return 0;
     }
+    MidHookSelfTest();
     BackendsInit(Cfg().vrRuntime.c_str());
     VirtualPadInit();
+    if (Cfg().fpEnabled) GameERInit();
 
     FILETIME iniTime = IniWriteTime(ini);
     bool xinputHooked = false;
@@ -90,6 +94,7 @@ DWORD WINAPI Worker(LPVOID) {
         }
         BackendsTick();
         VirtualPadUpdate(t);
+        GameERTick();
         if ((++tick % (int)(5.0 / period)) == 0) {   // heartbeat every ~5s at debug level
             VRTracking tr; VRInputState in;
             long calls, merged, fab; XInputHookStats(calls, merged, fab);
@@ -98,6 +103,8 @@ DWORD WINAPI Worker(LPVOID) {
                      in.controllerConnected[0] ? "+" : "-", in.controllerConnected[1] ? "+" : "-", Rad2Deg(tr.head.rot.Yaw()),
                      in.indexTrigger[0], in.indexTrigger[1], in.thumb[0][0], in.thumb[0][1], in.thumb[1][0], in.thumb[1][1], calls, merged, fab);
             else LOGD("hb: waiting for VR runtime (%s)", ActiveBackend() ? ActiveBackend()->Name() : "none attached");
+            GameERStatus gs = GameERGetStatus();
+            LOGD("hb: game: version %d camHook %d skelHook %d player %d bones %d arms %d", gs.versionOk, gs.cameraHooked, gs.skeletonHooked, gs.playerFound, gs.boneCount, gs.armsActive);
         }
         double spent = Now() - t;
         DWORD sleepMs = (DWORD)((period - spent) * 1000.0);

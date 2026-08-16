@@ -58,6 +58,26 @@ struct Config {
     bool  rumbleToControllers = true;     // forward XInputSetState rumble to Touch controllers
     float rumbleScale = 1.0f;
 
+    // [FirstPerson]  (ERVR takes over the game camera; R.E.A.L. keeps rendering)
+    bool  fpEnabled = true;
+    float fpEyeHeight = 1.60f;            // meters above the character root
+    std::string fpCameraMode = "pre";     // pre | post | block | passthrough (how we hand the camera to the game)
+    std::string fpCameraRotation = "yaw"; // yaw | game | hmd  -> what rotation we write into the game camera
+    bool  fpAddHmdPosition = false;       // add the HMD positional offset ourselves (R.E.A.L. usually does)
+    bool  fpHmdYawInGameCamera = false;   // set true if R.E.A.L. writes HMD yaw into the game camera (hands double-turn otherwise)
+    bool  fpHideHead = true;
+    bool  fpHideSheathed = true;
+    bool  fpWriteAim = true;              // write the HMD look direction into the player's aim matrix (spells/bows)
+    bool  handTracking = true;            // drive arm bones from the controllers
+    std::string handOrigin = "head";      // head | tracking | floor
+    float handBackOffset = 0.06f;         // meters from controller grip pose back to the wrist bone
+    float handRotOffX = 0.f, handRotOffY = 0.f, handRotOffZ = 0.f;   // degrees, controller -> hand bone calibration
+    float elbowPoleDown = 1.0f, elbowPoleOut = 0.6f, elbowPoleBack = 0.3f;
+    std::string boneLUpperArm = "L_UpperArm", boneLForearm = "L_Forearm", boneLHand = "L_Hand";
+    std::string boneRUpperArm = "R_UpperArm", boneRForearm = "R_Forearm", boneRHand = "R_Hand";
+    bool  dumpSkeleton = true;            // log all bone names once when the player skeleton is first seen
+    bool  fpDebug = false;                // per-second debug lines with frame data
+
     // [Experimental] hand-aim: rotates the game camera toward where the right hand points
     bool  handAimEnabled = false;
     std::string cameraAob;                // AOB for a rip-relative LEA/MOV to the camera manager pointer

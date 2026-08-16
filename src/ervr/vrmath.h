@@ -10,6 +10,8 @@ struct Vec3 { float x = 0, y = 0, z = 0;
     float Length() const { return std::sqrt(x * x + y * y + z * z); }
     float Dot(const Vec3& o) const { return x * o.x + y * o.y + z * o.z; }
     Vec3 Normalized() const { float l = Length(); return l > 1e-6f ? (*this) * (1.f / l) : Vec3{}; }
+    Vec3 Cross(const Vec3& o) const { return {y * o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x}; }
+    Vec3 operator-() const { return {-x, -y, -z}; }
 };
 
 // Unit quaternion, (x,y,z,w), right-handed, Y-up (Oculus/OpenVR convention: -Z forward).
@@ -26,6 +28,35 @@ struct Quat { float x = 0, y = 0, z = 0, w = 1;
     // Yaw about +Y in radians, in [-pi, pi]; 0 = facing -Z.
     float Yaw() const { Vec3 f = Forward(); return std::atan2(-f.x, -f.z); }
     float Pitch() const { Vec3 f = Forward(); return std::asin(std::fmax(-1.f, std::fmin(1.f, f.y))); }
+
+    Quat operator*(const Quat& b) const {   // this * b  (apply b first, then this)
+        return { w * b.x + x * b.w + y * b.z - z * b.y,
+                 w * b.y - x * b.z + y * b.w + z * b.x,
+                 w * b.z + x * b.y - y * b.x + z * b.w,
+                 w * b.w - x * b.x - y * b.y - z * b.z };
+    }
+    Quat Conj() const { return {-x, -y, -z, w}; }
+    float Norm() const { return std::sqrt(x * x + y * y + z * z + w * w); }
+    Quat Normalized() const { float n = Norm(); return n > 1e-8f ? Quat{x / n, y / n, z / n, w / n} : Quat{}; }
+    static Quat AxisAngle(const Vec3& axisIn, float rad) {
+        Vec3 a = axisIn.Normalized(); float s = std::sin(rad * 0.5f);
+        return {a.x * s, a.y * s, a.z * s, std::cos(rad * 0.5f)};
+    }
+    static Quat YawQ(float rad) { return AxisAngle({0, 1, 0}, rad); }
+    // Minimal rotation taking unit vector a onto unit vector b.
+    static Quat FromTo(const Vec3& a, const Vec3& b) {
+        float d = a.Dot(b);
+        if (d > 0.999999f) return {};
+        if (d < -0.999999f) {
+            Vec3 axis = Vec3{1, 0, 0}.Cross(a); if (axis.Length() < 1e-4f) axis = Vec3{0, 1, 0}.Cross(a);
+            return AxisAngle(axis, 3.14159265f);
+        }
+        Vec3 c = a.Cross(b);
+        Quat q{c.x, c.y, c.z, 1.f + d};
+        return q.Normalized();
+    }
+    static Quat FromEulerYXZ(float yaw, float pitch, float roll) { return YawQ(yaw) * AxisAngle({1, 0, 0}, pitch) * AxisAngle({0, 0, 1}, roll); }
+    // Rotation matrix rows (basis vectors): X = Rotate(1,0,0) etc.
 };
 
 struct Pose { Vec3 pos; Quat rot; Vec3 linVel; Vec3 angVel; bool valid = false; };

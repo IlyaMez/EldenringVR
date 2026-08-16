@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EldenRingVR VERSION 0.1.0 LANGUAGES CXX)
+project(EldenRingVR VERSION 0.2.0 LANGUAGES C CXX)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "ELDEN RING is 64-bit; configure with a 64-bit toolchain (e.g. -A x64).")
@@ -39,8 +39,12 @@ add_library(ERVR SHARED
   src/ervr/xinput_hook.cpp
   src/ervr/virtual_pad.cpp
   src/ervr/gestures.cpp
-  src/ervr/game_memory.cpp)
-target_include_directories(ERVR PRIVATE src/ervr ${OPENVR_INCLUDE_DIR})
+  src/ervr/game_memory.cpp
+  src/ervr/midhook.cpp
+  src/ervr/rtti.cpp
+  src/ervr/game_er.cpp
+  ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
+target_include_directories(ERVR PRIVATE src/ervr ${OPENVR_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
 target_link_libraries(ERVR PRIVATE minhook)
 target_compile_definitions(ERVR PRIVATE ERVR_VERSION="${PROJECT_VERSION}")
 set_target_properties(ERVR PROPERTIES OUTPUT_NAME "ERVR" PREFIX "")
