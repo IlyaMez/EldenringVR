@@ -1,0 +1,119 @@
+name: Bug report
+description: Something in ERVR does not work. A debug log is required.
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before filing:** set `LogLevel=debug` in `ERVR\ERVR.ini`, reproduce the problem, then
+        attach `Game\ERVR\ERVR.log`. Reports without a debug log will be closed — the log answers
+        most of what I would otherwise have to ask you one message at a time.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: R.E.A.L. VR works on its own, without ERVR installed.
+          required: true
+        - label: I am playing offline with EAC disabled.
+          required: true
+        - label: I searched existing issues and the pinned Known Issues discussion.
+          required: true
+
+  - type: input
+    id: ervr-version
+    attributes:
+      label: ERVR version
+      description: From the first line of the log, e.g. "ERVR 0.3.0 starting".
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: game-version
+    attributes:
+      label: ELDEN RING version / exe version
+      description: Steam > Properties > Betas shows the patch; the log prints the exe version.
+      placeholder: "1.16.2 / exe 2.6.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: real-version
+    attributes:
+      label: R.E.A.L. VR version
+      placeholder: "e.g. R.E.A.L. ER build 2024-xx"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: VR backend
+      description: The log line "Active VR backend:" tells you which one attached.
+      options:
+        - oculus
+        - openvr
+        - neither / no backend line in the log
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime-path
+    attributes:
+      label: How is the headset connected?
+      options:
+        - Quest via Link (cable)
+        - Quest via Air Link
+        - Quest via Virtual Desktop
+        - Quest via Steam Link
+        - SteamVR headset (Index, Vive, WMR, Pico...)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and controllers
+      placeholder: "Quest 3, Touch Plus"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happens, and what you expected instead
+      description: Be specific about which feature. "Swings do nothing in first person" beats "combat is broken".
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch with these ini settings ...
+        2. Equip ...
+        3. Swing right hand ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: ERVR.log (LogLevel=debug)
+      description: Paste the log, or drag the file into this box. It is auto-formatted as code.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: ini
+    attributes:
+      label: Relevant sections of ERVR.ini
+      description: At minimum the section for the feature that is misbehaving.
+      render: ini
+    validations:
+      required: true

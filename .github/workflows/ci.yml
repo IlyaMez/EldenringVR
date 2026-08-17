@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**/*.md"]
+  pull_request:
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (Release, x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # MinHook and the OpenVR headers are pulled by FetchContent on first configure.
+      # Cache them so PR builds do not clone Valve's repo every time.
+      - name: Cache FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Check the redistributable was assembled
+        shell: pwsh
+        run: |
+          $expected = @(
+            "build/dist/dinput8.dll",
+            "build/dist/ERVR/ERVR.dll",
+            "build/dist/ERVR/ERVR.ini"
+          )
+          $missing = $expected | Where-Object { -not (Test-Path $_) }
+          if ($missing) { throw "missing from dist: $($missing -join ', ')" }
+          Get-ChildItem -Recurse build/dist | Select-Object FullName, Length | Format-Table
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ERVR-dist-${{ github.sha }}
+          path: build/dist/
+
+  signatures:
+    name: AOB signature check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The script needs a game exe to scan, which CI does not have. This only guards against
+      # the script itself breaking (syntax, imports) as it is edited.
+      - name: Smoke-check tools/verify_signatures.py
+        run: python -c "import ast,pathlib; ast.parse(pathlib.Path('tools/verify_signatures.py').read_text())"

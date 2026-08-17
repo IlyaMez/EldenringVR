@@ -7,6 +7,13 @@ and (experimentally) the camera can follow your hand for bows and spells.
 R.E.A.L. already provides stereo rendering and **6DoF head tracking**. ERVR does not touch rendering — it rides on the
 VR runtime R.E.A.L. has open inside the game process and feeds the game input.
 
+> ### ⚠️ Offline play only — EAC must be disabled
+>
+> ERVR injects into `eldenring.exe` and writes game memory. **Never run it with Easy Anti-Cheat
+> enabled or while connected to online play.** Doing so risks a permanent ban on your account, and
+> that is entirely on you. Anti-cheat and multiplayer are not supported, not a roadmap item, and
+> never will be. If R.E.A.L. VR already runs for you, EAC is already off.
+
 ```
                 ┌──────────────────────── eldenring.exe ─────────────────────────┐
   Quest 3 ───►  │ LibOVRRT64_1.dll / openvr_api.dll ◄── RealVR64.dll (stereo, 6DoF)│
@@ -38,6 +45,24 @@ VR runtime R.E.A.L. has open inside the game process and feeds the game input.
 * Meta Quest via Link/Air Link (**Oculus** path, what R.E.A.L. uses by default) *or* SteamVR (**OpenVR** path).
 * To build: Visual Studio 2022+ with "Desktop development with C++" (CMake is bundled), internet on first configure
   (fetches MinHook and the OpenVR headers).
+
+## Download
+
+Grab the latest zip from [**Releases**](../../releases) and unpack it into your `ELDEN RING\Game`
+folder — `dinput8.dll` sits next to `eldenring.exe`, with the `ERVR` folder beside it.
+
+**Your antivirus may flag it.** ERVR is a DLL that injects into a running game process, which is
+behaviourally what a lot of malware does; the detection is generic, not a finding about this code.
+You do not have to take my word for it. Release builds are produced by
+[a public GitHub Actions workflow](.github/workflows/release.yml) from the tagged commit and carry a
+signed provenance attestation, so you can check that the download is exactly what this repository
+built:
+
+```powershell
+gh attestation verify ERVR-v0.3.0.zip --repo <owner>/EldenringVR
+```
+
+Each release also publishes its SHA256. Or skip all of it and build from source — it takes a minute.
 
 ## Build & install
 
@@ -226,6 +251,47 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise — 
 * Luke Ross — R.E.A.L. VR.
 * [MinHook](https://github.com/TsudaKageyu/minhook), [OpenVR](https://github.com/ValveSoftware/openvr).
 
+## Support, bugs, contributing
+
+This is a hobby project, maintained when I have the time and the interest. There is no SLA. If
+something is broken and you need it fixed on a schedule, send a patch.
+
+* **Bug?** Open an issue using the template, with `LogLevel=debug` and `Game\ERVR\ERVR.log`
+  attached. Reports without a log get closed — the log answers in five lines what otherwise takes
+  ten messages.
+* **Question, tuning help, or "should it do this?"** → Discussions, after checking the pinned
+  Known Issues post.
+* **Want to help?** Read [CONTRIBUTING.md](CONTRIBUTING.md). Bindings for headsets I don't own and
+  offsets for newer game versions are the most useful things anyone can send.
+
+**ERVR contains no telemetry, no analytics, no auto-updater, and no network code of any kind.** It
+never phones home. Pull requests adding any of those will be rejected — you are injecting this into
+a process on your own machine and you are entitled to audit every line.
+
+If it made your playthrough better and you feel like buying me a coffee, there's a Sponsor button at
+the top of the repo. Entirely optional and it changes nothing: every feature and every build is
+free, now and later, and nothing here is or will be paywalled.
+
+## License
+
+[GPL‑3.0‑or‑later](LICENSE). You can use, study, modify, and redistribute this — and if you
+distribute a modified version, you have to publish your source too. That's the point of the choice:
+derivative builds of this work stay inspectable and free rather than ending up behind someone's
+subscription.
+
+Third-party components and the research this builds on are credited in
+[THIRD_PARTY.md](THIRD_PARTY.md). **R.E.A.L. VR is not distributed here** — it is a separate,
+closed-source mod by Luke Ross, no part of which appears in this repository. Get it from its author.
+
 ## Disclaimer
 
 Offline / EAC‑disabled use only. Anti‑cheat and online play are not supported and never will be.
+
+Not affiliated with, endorsed by, or connected to FromSoftware, Bandai Namco, Meta, Valve, or the
+author of R.E.A.L. VR. ELDEN RING is a trademark of its respective owners. This mod ships no game
+code or assets. Use it at your own risk, on a game you own, offline.
+
+---
+
+Built by [Your Name](https://your-site.example). I also work on [Startup](https://startup.example),
+which is unrelated to any of this.

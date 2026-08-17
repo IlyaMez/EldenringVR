@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question, tuning help, or "is this supposed to happen?"
+    url: https://github.com/IlyaMez/EldenringVR/discussions
+    about: Anything that is not a reproducible bug goes in Discussions. Check the pinned Known Issues post first.
+  - name: Where do I get R.E.A.L. VR?
+    url: https://github.com/IlyaMez/EldenringVR/blob/main/THIRD_PARTY.md
+    about: R.E.A.L. is a separate mod by Luke Ross and is not distributed here. Please do not open an issue about it.
+  - name: Anti-cheat, online play, or multiplayer
+    url: https://github.com/IlyaMez/EldenringVR/blob/main/README.md
+    about: Out of scope permanently. ERVR is for offline, EAC-disabled play only.

@@ -1,0 +1,44 @@
+name: Controller / hardware support
+description: Bindings or tracking are wrong on a headset I may not own.
+labels: ["hardware", "help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        I develop against Quest 3 on the Oculus path. Anything else depends on reports like this
+        one — and even more on pull requests. If you can build, a PR beats an issue.
+
+  - type: input
+    id: hardware
+    attributes:
+      label: Headset and controllers
+      placeholder: "Valve Index, Knuckles"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: VR backend ERVR attached to
+      options: [oculus, openvr, neither]
+    validations:
+      required: true
+
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: What is wrong
+      description: Which inputs are dead, swapped, inverted, or never fire. Per-button detail helps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: heartbeat
+    attributes:
+      label: Debug heartbeat lines
+      description: >
+        With LogLevel=debug the log prints live trigger/stick values every 5 seconds. Paste a few
+        heartbeats recorded while you press the affected controls.
+      render: text
+    validations:
+      required: true

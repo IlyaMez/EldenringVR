@@ -1,0 +1,84 @@
+name: Release
+
+# Tag a commit to cut a release:  git tag v0.3.0 && git push origin v0.3.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write        # create the release
+  id-token: write        # sign the provenance attestation
+  attestations: write    # record it
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+          "tag=$tag"                        | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+          "name=ERVR-$tag"                  | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Assemble package
+        id: package
+        shell: pwsh
+        run: |
+          $name = "${{ steps.version.outputs.name }}"
+          $stage = "staging/$name"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item -Recurse build/dist/* $stage
+          Copy-Item README.md, LICENSE, THIRD_PARTY.md $stage
+          $zip = "$name.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "zip=$zip"  | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+          "sha=$sha"  | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
+          Write-Host "SHA256($zip) = $sha"
+
+      # Cryptographic proof these binaries were built by this workflow from this commit.
+      # Users can verify with:  gh attestation verify ERVR-vX.Y.Z.zip --repo <owner>/<repo>
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.package.outputs.zip }}
+
+      - name: Write release notes
+        shell: pwsh
+        run: |
+          (Get-Content .github/release-notes-template.md -Raw) `
+            -replace '\{\{SHA256\}\}', '${{ steps.package.outputs.sha }}' `
+            -replace '\{\{ZIP\}\}',    '${{ steps.package.outputs.zip }}' `
+            -replace '\{\{REPO\}\}',   '${{ github.repository }}' `
+            | Set-Content release-notes.md -Encoding utf8
+          Get-Content release-notes.md
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" `
+            "${{ steps.package.outputs.zip }}" `
+            --title "ERVR ${{ steps.version.outputs.tag }}" `
+            --notes-file release-notes.md `
+            --verify-tag
