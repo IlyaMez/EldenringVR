@@ -1,6 +1,7 @@
 #include "virtual_pad.h"
 #include "vr_backend.h"
 #include "gestures.h"
+#include "combat.h"
 #include "config.h"
 #include "log.h"
 #include "game_memory.h"
@@ -252,6 +253,16 @@ void VirtualPadUpdate(double now) {
     }
 
     // ---- gestures ----------------------------------------------------------
+    // Physical combat (swing -> game AttackBehavior event) takes over from button pulses when active.
+    bool physical = CombatHandlesSwings();
+    if (physical && !g_menuMode) CombatPollHands(tr, in, now);
+    else CombatPollHands(VRTracking{}, VRInputState{}, now);   // keeps its state machine idle
+    if (uint32_t hr = CombatTakeHapticRequests(); hr && c.gestureHaptics) {
+        for (int h = 0; h < 2; ++h) {
+            if (hr & (4u << h)) Haptic((Hand)h, 1.0f, now, 0.25);          // rejected (no stamina): long buzz
+            else if (hr & (1u << h)) Haptic((Hand)h, 0.35f, now, 0.05);    // swing armed: short tick
+        }
+    }
     Swing sr = g_gest.Update(HandRight, tr.hand[HandRight], rGrip, now);
     Swing sl = g_gest.Update(HandLeft,  tr.hand[HandLeft],  lGrip, now);
     auto fire = [&](uint16_t mask, Hand h, float amp) {
@@ -259,9 +270,10 @@ void VirtualPadUpdate(double now) {
             // analog pulse: represent as a pulse on the pseudo mask; resolved below
             AddPulse(mask, now, c.gesturePressDuration);
         } else AddPulse(mask, now, c.gesturePressDuration);
+        CombatNotifyButton(mask, now);
         if (c.gestureHaptics) Haptic(h, amp, now, 0.08);
     };
-    if (!g_menuMode) {   // muted in menus: a swing there would press RB/RT/LB = tab switching / item use
+    if (!g_menuMode && !physical) {   // muted in menus: a swing there would press RB/RT/LB = tab switching / item use
         if (sr == Swing::Light) fire(g_map.light, HandRight, 0.5f);
         if (sr == Swing::Heavy) fire(g_map.heavy, HandRight, 1.0f);
         if (sl == Swing::LeftSwing) fire(g_map.leftSwing, HandLeft, 0.6f);
@@ -271,6 +283,10 @@ void VirtualPadUpdate(double now) {
     uint16_t pulses = ActivePulses(now);
     if (pulses & VP_LT) lt = 255;
     if (pulses & VP_RT) rt = 255;
+    if (!g_menuMode) {   // physical combat: trigger/grip must not start attack animations (menus still need RB/RT tabs)
+        uint16_t blocked = CombatBlockedButtons();
+        if (blocked) { held &= ~blocked; pulses &= ~blocked; if (blocked & VP_RT) rt = 0; if (blocked & VP_LT) lt = 0; }
+    }
     pulses &= ~(VP_LT | VP_RT);
     held &= ~(VP_LT | VP_RT);
 

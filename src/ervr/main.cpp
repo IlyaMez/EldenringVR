@@ -12,6 +12,7 @@
 #include "game_memory.h"
 #include "midhook.h"
 #include "game_er.h"
+#include "combat.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -106,6 +107,9 @@ DWORD WINAPI Worker(LPVOID) {
             GameERStatus gs = GameERGetStatus();
             LOGD("hb: game: version %d camHook %d skelHook %d player %d bones %d arms %d | 5s: camStep %ld calls %.1f ms, hk %ld calls / %ld solves %.1f ms",
                  gs.versionOk, gs.cameraHooked, gs.skeletonHooked, gs.playerFound, gs.boneCount, gs.armsActive, gs.camCalls, gs.camMs, gs.hkCalls, gs.hkSolves, gs.hkMs);
+            CombatStatus cs = CombatGetStatus();
+            LOGD("hb: combat: taeHook %d physical %d learned L%d H%d Left%d stamina %d | 5s: swings %ld, injected %ld",
+                 cs.taeHooked, cs.physical, cs.learnedLight, cs.learnedHeavy, cs.learnedLeft, cs.stamina, cs.swings, cs.injected);
         }
         double spent = Now() - t;
         DWORD sleepMs = (DWORD)((period - spent) * 1000.0);

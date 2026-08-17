@@ -12,6 +12,7 @@
 #include "vr_backend.h"
 #include "midhook.h"
 #include "rtti.h"
+#include "combat.h"
 #include <windows.h>
 #include <MinHook.h>
 #pragma comment(lib, "version.lib")
@@ -78,6 +79,7 @@ using FnGetDmyPos  = float* (__fastcall*)(void* chrIns, float* outMtx4x4, const 
 uint8_t* g_base = nullptr;
 uint8_t** g_worldChrManPtr = nullptr;    // address of the WorldChrMan* global
 uint8_t** g_fieldAreaPtr = nullptr;      // address of the FieldArea* global
+uint8_t** g_gameDataManPtr = nullptr;    // address of the GameDataMan* global (stats cheat)
 FnCameraStep g_origCameraStep = nullptr;
 using FnMmsUpdate = void (__fastcall*)(void*);
 using FnFollow = void (__fastcall*)(void* followCam, float dt, void* c);
@@ -424,6 +426,28 @@ void UpdateArms(uint8_t* player, const FrameInfo& f) {
     WorldPose w; if (!ComputeWorld(g_skel, pose, rootPos, rootQ, w, local)) return;
 
     Quat baseQ = Quat::YawQ(f.baseYaw);
+    // Body follows head: shift the whole skeleton (root bones) by the HMD offset so the shoulders stay under the
+    // headset when you lean/step, like a normal VR body. The physics root does not move (no collision cheating);
+    // the shift is clamped. Hands get the unclamped offset so they stay where you see them.
+    Vec3 headOff = baseQ.Rotate(f.headP), bodyOff{};
+    if (c.bodyFollowsHead) {
+        bodyOff = headOff;
+        float horiz = std::sqrt(bodyOff.x * bodyOff.x + bodyOff.z * bodyOff.z);
+        if (horiz > c.bodyFollowMaxHorizontal && horiz > 1e-4f) { float k = c.bodyFollowMaxHorizontal / horiz; bodyOff.x *= k; bodyOff.z *= k; }
+        bodyOff.y = Clamp(bodyOff.y, -c.bodyFollowMaxDown, c.bodyFollowMaxUp);
+        Vec3 lo = rootQ.Conj().Rotate(bodyOff);
+        for (int i = 0; i < g_skel.boneCount; ++i) {
+            int p = g_skel.parents[i]; if (p >= 0 && p < i) continue;
+            HkQsTransform& t = local[i]; t.t[0] += lo.x; t.t[1] += lo.y; t.t[2] += lo.z;
+            SafeWrite(&pose[i].t[0], t.t, 16);
+            w.pos[i] = rootPos + rootQ.Rotate(Vec3{t.t[0], t.t[1], t.t[2]});
+        }
+        for (int i = 0; i < g_skel.boneCount; ++i) {   // propagate to children
+            int p = g_skel.parents[i]; if (p < 0 || p >= i) continue;
+            const HkQsTransform& lt = local[i];
+            w.pos[i] = w.pos[p] + w.q[p].Rotate(Vec3{lt.t[0], lt.t[1], lt.t[2]});
+        }
+    }
     // Torso twist: rotate the Spine bone about world Y so the shoulder line faces the camera yaw.
     if (c.torsoFaceCamera && g_skel.torso >= 0 && g_skel.L_clav >= 0 && g_skel.R_clav >= 0 && (f.handValid[0] || f.handValid[1])) {
         Vec3 right = w.pos[g_skel.R_clav] - w.pos[g_skel.L_clav]; right.y = 0.f;
@@ -454,6 +478,7 @@ void UpdateArms(uint8_t* player, const FrameInfo& f) {
         Quat q = cq;
         if (g_skel.handAxesOk[h]) q = Quat::MapPairs(g_skel.handFwd[h], g_skel.handThumb[h], cf, cu);   // hand-local -> world
         Vec3 p = f.anchor + baseQ.Rotate(f.handP[h] * c.handScale) - cf * c.handBackOffset;
+        if (c.bodyFollowsHead && c.handOrigin == "head") p = p + headOff;   // hands are head-relative: re-add the HMD offset
         float side = h == HandLeft ? -1.f : 1.f;
         Vec3 pole = baseQ.Rotate(Vec3{side * c.elbowPoleOut, -c.elbowPoleDown, -c.elbowPoleBack});
         if (h == HandLeft) SolveArm(g_skel, pose, local, w, g_skel.L_ua, g_skel.L_fa, g_skel.L_hand, p, q, pole);
@@ -551,9 +576,13 @@ void HkBody() {
 }
 void HkHandler(MidHookRegs*, void*) {
     InterlockedIncrement(&g_hkCalls);
-    if (g_tripped || !Cfg().fpEnabled || !Cfg().handTracking) return;
-    __try { HkBody(); }
-    __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
+    if (g_tripped || !Cfg().fpEnabled) return;
+    if (Cfg().handTracking) {
+        __try { HkBody(); }
+        __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
+    }
+    // Physical combat: inject the AttackBehavior event once per frame after the arm pose is written.
+    if (g_status.cameraHooked) CombatGameFrame(MainPlayer(), g_frame);
 }
 
 // ---------------------------------------------------------------- init
@@ -589,6 +618,7 @@ bool GameERInit() {
     // Globals via classic AOBs.
     if (uint8_t* hit = AobScan("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88")) g_worldChrManPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
     if (uint8_t* hit = AobScan("48 8B 3D ?? ?? ?? ?? 49 8B D8 48 8B F2 4C 8B F1 48 85 FF")) g_fieldAreaPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
+    if (uint8_t* hit = AobScan("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 05 48 8B 40 58 C3 C3")) g_gameDataManPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
     LOGI("[game] WorldChrMan* @ %p, FieldArea* @ %p", (void*)g_worldChrManPtr, (void*)g_fieldAreaPtr);
     if (!g_worldChrManPtr || !g_fieldAreaPtr) { LOGW("[game] core globals not found; first person disabled"); return false; }
 
@@ -625,14 +655,35 @@ bool GameERInit() {
         }
         LOGI("[game] NoUpdateInterface[10] = %p, vtable hook %s", fn, g_status.skeletonHooked ? "installed" : "FAILED");
     }
+    if (Cfg().combatEnabled) CombatInit(g_base, g_status.versionOk);
     return g_status.cameraHooked;
+}
+
+// [Cheats] SetAllStats: PlayerGameData (GameDataMan+0x8) stats at +0x3C..+0x58 (vigor..arcane), level +0x68
+// (fromsoftware-rs PlayerGameData). Applied once per configured value, only raising stats; level = sum - 79.
+void ApplyStatCheat() {
+    static int applied = 0;
+    int want = Cfg().cheatSetAllStats;
+    if (want <= 0 || want == applied || !g_gameDataManPtr || !MainPlayer()) return;
+    uint8_t* gdm = Deref(g_gameDataManPtr); if (!gdm) return;
+    uint8_t* pgd = Deref(gdm + 0x8); if (!pgd) return;
+    int stats[8]; if (!SafeRead(pgd + 0x3C, stats, sizeof(stats))) return;
+    for (int& s : stats) if (s < 1 || s > 99) return;   // sanity: not a PlayerGameData we understand
+    int sum = 0, changed = 0;
+    for (int& s : stats) { if (s < want) { s = want; ++changed; } sum += s; }
+    if (changed) {
+        SafeWrite(pgd + 0x3C, stats, sizeof(stats));
+        int level = sum - 79; SafeWrite(pgd + 0x68, &level, 4);
+        LOGI("[cheat] raised %d stats to %d (level -> %d)", changed, want, level);
+    }
+    applied = want;
 }
 
 void GameERTick() {
     VRTracking tr; VRInputState in;
     bool ok = GetLatestVRState(tr, in);
-    std::lock_guard<std::mutex> g(g_vrMtx);
-    g_vrValid = ok; if (ok) { g_vrTr = tr; g_vrIn = in; }
+    { std::lock_guard<std::mutex> g(g_vrMtx); g_vrValid = ok; if (ok) { g_vrTr = tr; g_vrIn = in; } }
+    ApplyStatCheat();
 }
 
 GameERStatus GameERGetStatus() {

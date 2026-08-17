@@ -24,6 +24,7 @@ VR runtime R.E.A.L. has open inside the game process and feeds the game input.
 |---|---|
 | Controllers → gamepad | Every Touch control mapped to XInput (configurable). Works with **no physical gamepad** plugged in. |
 | Motion attacks | Swing right hand → light (RB) or heavy (RT) attack by swing speed. Swing left hand → LB (parry/shield bash/offhand). |
+| Physical melee (v0.3) | With first person on, swings no longer press buttons: ERVR fires the game's own attack event on your character while the controller moves, so the weapon in your hand *is* the hitbox — damage, poise, status, stamina cost all come from the game. See below. |
 | Haptics | Game rumble (`XInputSetState`) forwarded to the controllers; hit‑confirm pulses on gesture attacks. |
 | Tap/hold layers | Menu tap = START, hold = BACK (map). Left‑stick click tap = crouch, hold+tilt = D‑pad (quick slots). |
 | Movement options | Hand‑relative locomotion (move where the left controller points), snap‑turn pulses. |
@@ -122,8 +123,53 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
   Each call: read pose, compute world transforms from the physics module root (`+0x70` pos, `+0x50` quat), solve
   2-bone IK per arm toward the controller (VR -> game frame: mirror Z; hand rotation = controller * calibration),
   write the three local quaternions back. Weapons/hitboxes hang off the hand bones and follow.
+  `BodyFollowsHead` shifts the root bones by the (clamped) HMD offset so shoulders stay under the headset when you
+  lean or step; the physics root stays put, hands get the unclamped offset.
 * Version gate: RVAs are used only when the exe is 2.6.2.0; otherwise erfps2's AOBs are tried. AOB check script:
   see `tools/verify_signatures.py`.
+
+## Physical melee (v0.3) — swings invoke the game's attack event
+
+`[Combat]` in `ERVR.ini`. Elden Ring's melee is animation-driven: an attack animation carries a TAE event
+(`AttackBehavior`, event id 1) that, every frame it is active, makes the game look up
+`BehaviorParam_PC[1_0000_0000 + weaponVariationId*1000 + judgeId] -> AtkParam_Pc`, sweep the AtkParam's capsule
+between two dummy-polys on the weapon model, and apply damage/poise/status/hitstop with a per-attack hit list.
+The hitbox is not "on the weapon"; the event creates it. Since ERVR already moves the arm bones (and thus the weapon
+dummy-polys) with the controllers, physical combat is:
+
+1. **Never press R1/R2** (no attack animation), and
+2. **call the AttackBehavior event ourselves** every frame while a swing is in progress.
+
+Implementation (`src/ervr/combat.cpp`):
+
+* Player TAE object: `ChrIns+0x190 -> +0x18 (CSChrTimeActModule) -> +0x18 = CS::CSChrTaeAnimEvent*` (fromsoftware-rs
+  layouts; the object's vtable is checked against RTTI `CS::CSChrTaeAnimEvent` / RVA `0x2a34280` before use).
+* Event execution: `CSChrTaeAnimEvent` vtable — slot 1 runs slot 2 then slot 3; slot 2 handles generic events and
+  is a **no-op for events 1/2/5**; slot 3 dispatches the behavior events (event 1 → handler RVA `0x4266d0`, found by
+  disassembling the exe). ERVR hooks and calls slot 3. Args = `{event_id, args*, from, to, is_first_execution,
+  +0x1a u16 "tae version" (must be ≥ 0x1a or `Source` is ignored), +0x20 float* animation time}`; the
+  `AttackBehaviorArgs` pointer is passed into the damage module as the attack-instance key, so it is kept in
+  stable per-hand storage for the whole swing. For event 1 `args` is
+  `{AttackType s32, AttackIndex s32, BehaviorJudgeID s32, DirectionType u8, Source u8 (1 = right hand, 2 = left), StateInfo s16}`
+  (DSAnimStudio `TAE.Template.ER.xml`). ERVR calls the original slot-2 function once per rendered frame from the
+  skeleton hook (`CS::NoUpdateInterface[10]`, after the arm pose is written) with `is_first_execution=1` on the
+  first frame of a swing (new attack instance: hit list reset, BehaviorParam stamina cost) and 0 afterwards.
+* Judge ids observed in 1.16 (from the learn log): R1 chain `0/10/20`, R2 `100` (`105` on some charged
+  variants), left hand `0` with `Source=2` — these are the defaults, so nothing needs learning. `Source` is always
+  forced to the swinging hand (the game's "default" source follows whichever hand HKS last attacked with, which
+  goes stale after weapon swaps). While physical combat is active RB/RT are never sent (trigger/grip would play
+  attack animations that move your arms); menus still get them.
+* Judge ids can still be **learned** (`Learn=true`, opt-in `SaveLearned=true` writes them to the ini): slot 2 is MinHooked; while in `Mode=buttons` (or `auto` before anything is learned) a
+  swing still presses RB/RT/LB, and the first `AttackBehavior` the game fires for the player within a second of that
+  press is captured verbatim (all six fields) as the light/heavy/left template. `auto` then switches to physical.
+  Values are logged (`[combat] learned ...`) so they can be pinned in the ini (`LightJudgeId=` etc.).
+* Swing detection (worker thread, 250 Hz): weapon **tip** speed = |v + ω × (forward · reach)|. `Idle -> Armed`
+  when tip ≥ `SwingOnSpeed` and hand speed ≥ `MinHandSpeed` (rejects wrist flicks); after `ArmWindow` the peak
+  picks light vs heavy (`HeavySwingSpeed`), `Swinging` while tip ≥ `SwingOffSpeed` (max `MaxSwingSeconds`), then
+  `Cooldown`. Left hand swings use `Source=2` (left weapon). No stamina (`ChrDataModule+0x154`) → swing rejected
+  with a long haptic buzz. One attack instance per swing, so the game's own hit list prevents multi-hits.
+* Not done yet: speed-scaled damage, hit-confirm haptics (needs the hit callback), guard-by-posture, per-stance
+  judge ids (two-handing has its own animations; re-learn via `Mode=buttons`), directional thrust vs slash.
 
 ## Troubleshooting notes (learned the hard way)
 
@@ -163,8 +209,9 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise — 
   R.E.A.L.'s menu, not here. ERVR cannot show your hands or weapons in‑world; the character animates as with a pad.
 * Oculus path requires R.E.A.L. to actually have created its session (log shows "Captured ovrSession"). If R.E.A.L.
   runs in a mode that never loads `LibOVRRT64_1.dll` or `openvr_api.dll` in‑process, ERVR has nothing to attach to.
-* Motion attacks map to button presses; the game decides the animation. Directional swings → directional attacks would
-  need animation‑graph hooks (v2 idea).
+* Physical melee has no attack animation at all: enemy AI/hitstop cues that key off the player's *attack state*
+  (not the hit) are absent, and the game may still allow rolling mid-swing. Damage numbers are the weapon's real
+  R1/R2 values regardless of how hard you swing (speed scaling is a planned hook).
 * Planned: hand‑aim presets per game version, weapon‑bone tracking (draw the weapon where your hand is via `ChrIns`
   bone overrides), a small in‑headset status overlay.
 
@@ -173,6 +220,9 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise — 
 * [Halo‑MCC‑VR](https://github.com/pancreations/Halo-MCC-VR) and
   [cyberpunk‑vr‑port](https://github.com/dariulone/cyberpunk-vr-port) for the "controllers → engine input, gestures →
   actions" structure. Those projects also *render* natively; here rendering is intentionally left to R.E.A.L.
+* [DSAnimStudio](https://github.com/Meowmaritus/DSAnimStudio) (Meowmaritus) — TAE event templates (`AttackBehavior`
+  argument layout); [fromsoftware-rs](https://github.com/vswarte/fromsoftware-rs) / erfps2 (Dasaav) — `CSChrTaeAnimEvent`
+  and ChrIns module layouts; Souls Modding wiki (Muffin) — BehaviorParam row scheme.
 * Luke Ross — R.E.A.L. VR.
 * [MinHook](https://github.com/TsudaKageyu/minhook), [OpenVR](https://github.com/ValveSoftware/openvr).
 

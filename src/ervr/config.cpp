@@ -74,6 +74,7 @@ const char* XInputButtonName(uint16_t m) {
 }
 
 void Config::Load(const std::wstring& path) {
+    this->iniPath = path;
     const wchar_t* ini = path.c_str();
     logLevel   = GetS(ini, L"General", L"LogLevel", logLevel);
     vrRuntime  = GetS(ini, L"General", L"VRRuntime", vrRuntime);
@@ -118,6 +119,34 @@ void Config::Load(const std::wstring& path) {
     rumbleToControllers = GetB(ini, L"Haptics", L"RumbleToControllers", rumbleToControllers);
     rumbleScale = GetF(ini, L"Haptics", L"RumbleScale", rumbleScale);
 
+    combatEnabled = GetB(ini, L"Combat", L"Enabled", combatEnabled);
+    combatMode = GetS(ini, L"Combat", L"Mode", combatMode);
+    swingOnSpeed = GetF(ini, L"Combat", L"SwingOnSpeed", swingOnSpeed);
+    swingOffSpeed = GetF(ini, L"Combat", L"SwingOffSpeed", swingOffSpeed);
+    heavySwingSpeed = GetF(ini, L"Combat", L"HeavySwingSpeed", heavySwingSpeed);
+    minHandSpeed = GetF(ini, L"Combat", L"MinHandSpeed", minHandSpeed);
+    weaponReachRight = GetF(ini, L"Combat", L"WeaponReachRight", weaponReachRight);
+    weaponReachLeft = GetF(ini, L"Combat", L"WeaponReachLeft", weaponReachLeft);
+    swingArmWindow = GetF(ini, L"Combat", L"ArmWindow", swingArmWindow);
+    swingMaxSeconds = GetF(ini, L"Combat", L"MaxSwingSeconds", swingMaxSeconds);
+    swingCooldown = GetF(ini, L"Combat", L"Cooldown", swingCooldown);
+    combatLeftHand = GetB(ini, L"Combat", L"LeftHand", combatLeftHand);
+    combatRequireStamina = GetB(ini, L"Combat", L"RequireStamina", combatRequireStamina);
+    combatMinStamina = GetI(ini, L"Combat", L"MinStamina", combatMinStamina);
+    lightJudgeId = GetI(ini, L"Combat", L"LightJudgeId", lightJudgeId);
+    heavyJudgeId = GetI(ini, L"Combat", L"HeavyJudgeId", heavyJudgeId);
+    leftJudgeId = GetI(ini, L"Combat", L"LeftJudgeId", leftJudgeId);
+    combatLearn = GetB(ini, L"Combat", L"Learn", combatLearn);
+    combatSaveLearned = GetB(ini, L"Combat", L"SaveLearned", combatSaveLearned);
+    combatBlockAttackButtons = GetB(ini, L"Combat", L"BlockAttackButtons", combatBlockAttackButtons);
+    combatAttackIndexRotate = GetI(ini, L"Combat", L"AttackIndexRotate", combatAttackIndexRotate);
+    combatExtraStamina[0] = GetI(ini, L"Combat", L"ExtraStaminaLight", combatExtraStamina[0]);
+    combatExtraStamina[1] = GetI(ini, L"Combat", L"ExtraStaminaHeavy", combatExtraStamina[1]);
+    combatExtraStamina[2] = GetI(ini, L"Combat", L"ExtraStaminaLeft", combatExtraStamina[2]);
+    combatSuppressAnimAttacks = GetB(ini, L"Combat", L"SuppressAnimAttacks", combatSuppressAnimAttacks);
+    cheatSetAllStats = GetI(ini, L"Cheats", L"SetAllStats", cheatSetAllStats);
+    combatDebug = GetB(ini, L"Combat", L"Debug", combatDebug);
+
     fpEnabled = GetB(ini, L"FirstPerson", L"Enabled", fpEnabled);
     fpEyeHeight = GetF(ini, L"FirstPerson", L"EyeHeight", fpEyeHeight);
     fpCameraMode = GetS(ini, L"FirstPerson", L"CameraMode", fpCameraMode);
@@ -140,6 +169,10 @@ void Config::Load(const std::wstring& path) {
     armStretch = GetF(ini, L"FirstPerson", L"ArmStretch", armStretch);
     handScale = GetF(ini, L"FirstPerson", L"HandScale", handScale);
     torsoFaceCamera = GetB(ini, L"FirstPerson", L"TorsoFaceCamera", torsoFaceCamera);
+    bodyFollowsHead = GetB(ini, L"FirstPerson", L"BodyFollowsHead", bodyFollowsHead);
+    bodyFollowMaxHorizontal = GetF(ini, L"FirstPerson", L"BodyFollowMaxHorizontal", bodyFollowMaxHorizontal);
+    bodyFollowMaxDown = GetF(ini, L"FirstPerson", L"BodyFollowMaxDown", bodyFollowMaxDown);
+    bodyFollowMaxUp = GetF(ini, L"FirstPerson", L"BodyFollowMaxUp", bodyFollowMaxUp);
     boneTorso = GetS(ini, L"FirstPerson", L"BoneTorso", boneTorso);
     boneLUpperArm = GetS(ini, L"FirstPerson", L"BoneLeftUpperArm", boneLUpperArm);
     boneLForearm = GetS(ini, L"FirstPerson", L"BoneLeftForearm", boneLForearm);
