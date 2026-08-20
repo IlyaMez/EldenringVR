@@ -14,6 +14,15 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist = Join-Path $root "build\dist"
+$release = Join-Path $root "build\Release"
+
+# The `dist` custom target only refreshes on a full build, so a `--target ERVR` build
+# leaves dist stale. Always take the freshest DLLs from build\Release when they exist.
+function Freshest([string]$name) {
+    $d = Join-Path $dist $name; $r = Join-Path $release (Split-Path $name -Leaf)
+    if ((Test-Path $r) -and (-not (Test-Path $d) -or (Get-Item $r).LastWriteTime -ge (Get-Item $d).LastWriteTime)) { return $r }
+    return $d
+}
 
 if (-not (Test-Path (Join-Path $GameDir "eldenring.exe"))) { throw "eldenring.exe not found in '$GameDir' - pass -GameDir." }
 
@@ -40,8 +49,8 @@ if (Test-Path $existingProxy) {
 }
 
 New-Item -ItemType Directory -Force (Join-Path $GameDir "ERVR") | Out-Null
-Copy-Item -Force (Join-Path $dist "dinput8.dll") $GameDir
-Copy-Item -Force (Join-Path $dist "ERVR\ERVR.dll") (Join-Path $GameDir "ERVR")
+Copy-Item -Force (Freshest "dinput8.dll") $GameDir
+Copy-Item -Force (Freshest "ERVR\ERVR.dll") (Join-Path $GameDir "ERVR")
 $ini = Join-Path $GameDir "ERVR\ERVR.ini"
 if (Test-Path $ini) { Write-Host "Keeping existing ERVR.ini (new defaults in build\dist\ERVR\ERVR.ini)" }
 else { Copy-Item (Join-Path $dist "ERVR\ERVR.ini") $ini }

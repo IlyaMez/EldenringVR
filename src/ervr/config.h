@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <string>
 #include <cstdint>
 
@@ -16,9 +16,29 @@ const char* XInputButtonName(uint16_t mask);
 struct Config {
     // [General]
     std::string logLevel = "info";
-    std::string vrRuntime = "auto";        // auto | oculus | openvr
+    std::string vrRuntime = "openxr";      // openxr (ERVR owns its own session)
     bool enabled = true;
     int  pollHz = 250;
+
+    // [VR]  ERVR's own OpenXR session + stereo rendering (ReShade add-on supplies D3D12).
+    std::string vrStereoMode = "cinema";   // off | cinema (flat game on a head-locked quad) | debugalt | full
+    float vrRenderScale = 1.0f;            // supersampling of the per-eye images, relative to delivered game pixels
+    float vrWorldScale = 1.0f;             // 1.0 = metric; scales the per-eye separation
+    int   vrPairRateHz = 0;                // 0 = headset refresh / 2
+    float vrCinemaDistance = 2.5f;         // m in front of the head
+    float vrCinemaWidth = 4.0f;            // m; height follows the back buffer's aspect
+    bool  vrMirrorWindow = true;           // keep presenting to the monitor as well
+    bool  vrXrDebug = false;               // enable XR_EXT_debug_utils when the runtime offers it
+    // Vertical FOV in degrees to force into the camera so one image covers a whole eye.
+    // The render thread crops back down to the runtime's exact FOV, so too wide only costs
+    // resolution while too narrow costs field of view. 0 = derive it from the headset.
+    float vrFovDeg = 0.f;
+    std::string vrFovAxis = "vertical";    // which axis Cam_Fov means: vertical | horizontal
+    float vrIpdMm = 0.f;                   // override the eye separation the runtime reports; 0 = trust it
+    // Back-buffer colour encoding. auto = convert when the format is an LDR UNORM (which is
+    // gamma encoded) and the XR swapchain is read as linear. "none" if the picture looks
+    // too dark, "srgb" to force the conversion on.
+    std::string vrColorFix = "auto";       // auto | srgb | none
 
     // [Buttons]  Touch -> XInput. Values are XInput button names or "none".
     std::string btnA = "A", btnB = "B", btnX = "X", btnY = "Y";
@@ -75,13 +95,10 @@ struct Config {
     float locoRunSpeed = 4.5f, locoSprintSpeed = 6.5f;   // m/s for Locomotion=direct
     bool  locoFeedStick = true;           // direct: still hand the stick to the game so run/strafe animations play (its own motion is discarded)
     std::string fpCameraMode = "pre";     // pre | post | block | passthrough (how we hand the camera to the game)
-    std::string fpCameraRotation = "yaw"; // yaw | game | hmd  -> what rotation we write into the game camera
+    std::string fpCameraRotation = "hmd"; // yaw | game | hmd  -> what rotation we write into the game camera.
+                                          // hmd is required now that ERVR renders: nothing else applies head rotation.
     std::string fpCameraYawSource = "ervr"; // ervr (our own yaw, stick-integrated; the game's chr-cam update is replaced so nothing else can move it) | game (read the game camera's yaw back)
     bool  fpOwnChrCam = true;             // replace the game's chr-cam (follow cam) update while first person is on, instead of writing on top of it
-    bool  fpOwnHeadPosition = false;      // hide the HMD position from R.E.A.L. (it keeps rotation) and place the eye ourselves (breaks 6DoF feel: off)
-    bool  fpAddHmdPosition = false;       // (only when OwnHeadPosition is off/unsupported) add the HMD offset ourselves
-    bool  fpHmdYawInGameCamera = false;   // set true if R.E.A.L. writes HMD yaw into the game camera (hands double-turn otherwise)
-    float fpRealHmdPositionScale = 1.0f;  // how much of the raw HMD position R.E.A.L. adds to our camera (we subtract it back out)
     bool  fpRecenter = true;              // slow play-space re-centring: without it, standing off the runtime origin makes the eye orbit the body on every stick turn
     float fpRecenterSeconds = 2.0f;       // time constant of the slow re-centring (0 = hard lock, no positional head tracking)
     float fpRecenterSnapRadius = 0.35f;   // m: residual beyond this snaps the play-space origin to your head instead of easing (a runtime origin metres away otherwise parks the body away from the camera and slides it back for seconds)
@@ -174,6 +191,30 @@ struct Config {
     int   cameraYawOffset = 0;            // offset of float yaw (radians) inside the camera struct
     int   cameraPitchOffset = 4;
     float handAimStrength = 1.0f;
+    // M2 spike: dump the frame task-group table once at startup. Read-only, but it scans
+    // process memory, so it costs a second or two and is off by default.
+    // [Patches] - in-process .text patches (uberhalit's EldenRingFpsUnlockAndMore, MIT)
+    int   patchFpsTarget = 0;         // 0 = leave the 60 fps cap; 30..360 = unlock to this
+
+    bool  m2TaskProbe = false;
+    // M2 experiment: temporarily clear the `active` byte of one named task group and watch
+    // what stops happening. Empty = off. Auto-restores.
+    bool  taskRegisterTest = false;   // register no-op probe tasks into FrameBegin/GameSceneDraw/DrawEnd
+    bool  taskQueueProbe = false;     // hook CSTask::queue_tasks: caller stack, thread, synchronicity
+    bool  taskDumpLists = false;      // dump every group's registered tasks with RTTI names (needs TaskQueueProbe)
+    bool  taskDoublePumpTest = false; // A/B: run a draw-only second engine frame per frame (needs TaskQueueProbe)
+    std::string taskToggle;
+    float taskToggleDelay = 45.f;
+    float taskToggleSeconds = 3.f;
+    std::string taskToggleMode = "api";   // api = call set_task_group_state | byte = write cstg_control.active
+    int   taskToggleCycles = 4;   // A/B repeats; one before/after cannot separate cause from weather
+    // Unattended test runs: press a button repeatedly so the game walks itself into the world
+    // without a human. 0 seconds = off, which is the default - this presses buttons for real.
+    int   autoPilotSeconds = 0;
+    float autoPilotDelay = 20.f;      // let the game reach the title screen first
+    float autoPilotPeriod = 0.6f;     // press/release cycle; menus must see the release
+    std::string autoPilotButton = "A";
+    int   autoPilotWiggleSeconds = 0; // after spawn: pan the camera (right stick only) this long
 
     void Load(const std::wstring& iniPath);
 };

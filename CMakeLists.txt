@@ -19,36 +19,66 @@ FetchContent_Declare(minhook
   GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(minhook)
 
-# ---- OpenVR headers (we bind to the openvr_api.dll R.E.A.L. already loads) --
-FetchContent_Declare(openvr
-  GIT_REPOSITORY https://github.com/ValveSoftware/openvr.git
-  GIT_TAG        v1.16.8
+# ---- ReShade headers (add-on API; ERVR.dll registers itself as a ReShade add-on) ----
+# Header-only: reshade.hpp finds ReShade at runtime by scanning loaded modules, so we
+# link nothing. BSD 3-clause - see THIRD_PARTY.md.
+FetchContent_Declare(reshade
+  GIT_REPOSITORY https://github.com/crosire/reshade.git
+  GIT_TAG        v6.8.0
   GIT_SHALLOW    TRUE
-  SOURCE_SUBDIR  headers_only_do_not_build)   # non-existent subdir => headers only, no targets
-FetchContent_MakeAvailable(openvr)
-set(OPENVR_INCLUDE_DIR "${openvr_SOURCE_DIR}/headers")
+  GIT_SUBMODULES ""                            # skip deps/, we only want include/
+  SOURCE_SUBDIR  headers_only_do_not_build)    # non-existent subdir => headers only, no targets
+FetchContent_MakeAvailable(reshade)
+set(RESHADE_INCLUDE_DIR "${reshade_SOURCE_DIR}/include")
+
+# ---- OpenXR loader (our own XrSession; static so the dist stays a single DLL) ----
+set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+set(JSONCPP_STATIC_WINDOWS_RUNTIME ON CACHE BOOL "" FORCE)   # loader vendors jsoncpp
+FetchContent_Declare(openxr
+  GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK.git
+  GIT_TAG        release-1.1.62
+  GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(openxr)
+# The loader sets its own MSVC runtime, which would collide with ERVR's /MT (LNK2038).
+foreach(_xr openxr_loader jsoncpp_object jsoncpp_static jsoncpp_lib)
+  if(TARGET ${_xr})
+    set_property(TARGET ${_xr} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  endif()
+endforeach()
 
 # ---- ERVR.dll: the mod --------------------------------------------------------
 add_library(ERVR SHARED
   src/ervr/main.cpp
   src/ervr/log.cpp
   src/ervr/config.cpp
-  src/ervr/vr_oculus.cpp
-  src/ervr/vr_openvr.cpp
+  src/ervr/vr_openxr.cpp
   src/ervr/vr_backend.cpp
+  src/ervr/reshade_addon.cpp
+  src/ervr/dx12_blit.cpp
+  src/ervr/stereo.cpp
   src/ervr/xinput_hook.cpp
   src/ervr/virtual_pad.cpp
   src/ervr/gestures.cpp
   src/ervr/game_memory.cpp
   src/ervr/midhook.cpp
   src/ervr/rtti.cpp
+  src/ervr/frame_probe.cpp
+  src/ervr/autopilot.cpp
   src/ervr/game_er.cpp
+  src/ervr/patches_er.cpp
   src/ervr/combat.cpp
   ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
-target_include_directories(ERVR PRIVATE src/ervr ${OPENVR_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
-target_link_libraries(ERVR PRIVATE minhook)
+target_include_directories(ERVR PRIVATE src/ervr ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
+target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi)
 target_compile_definitions(ERVR PRIVATE ERVR_VERSION="${PROJECT_VERSION}")
 set_target_properties(ERVR PROPERTIES OUTPUT_NAME "ERVR" PREFIX "")
+
+# ---- xrprobe.exe: standalone OpenXR/D3D12 diagnostic -------------------------
+add_executable(xrprobe tools/xrprobe.cpp)
+target_link_libraries(xrprobe PRIVATE openxr_loader d3d12 dxgi)
+set_target_properties(xrprobe PROPERTIES OUTPUT_NAME "xrprobe")
 
 # ---- dinput8.dll: proxy loader ----------------------------------------------
 add_library(dinput8_proxy SHARED

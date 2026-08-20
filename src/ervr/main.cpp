@@ -13,6 +13,10 @@
 #include "midhook.h"
 #include "game_er.h"
 #include "combat.h"
+#include "reshade_addon.h"
+#include "stereo.h"
+#include "patches_er.h"
+#include "frame_probe.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -66,10 +70,12 @@ DWORD WINAPI Worker(LPVOID) {
     MidHookSelfTest();
     BackendsInit(Cfg().vrRuntime.c_str());
     VirtualPadInit();
+    StereoInit();
     if (Cfg().fpEnabled) GameERInit();
+    PatchesInit();   // [Patches] FpsTarget etc.; no-op when unset
 
     FILETIME iniTime = IniWriteTime(ini);
-    bool xinputHooked = false;
+    bool xinputHooked = false, addonInstalled = false;
     double lastModuleScan = 0, lastIniCheck = 0;
     const double period = 1.0 / (Cfg().pollHz > 0 ? Cfg().pollHz : 250);
     int tick = 0;
@@ -81,6 +87,12 @@ DWORD WINAPI Worker(LPVOID) {
             lastModuleScan = t;
             bool h = XInputHooksInstall();
             if (h && !xinputHooked) { xinputHooked = true; LOGI("XInput hooks live"); }
+            // ReShade loads as the game's dxgi.dll; it may appear after us, so keep trying.
+            if (!addonInstalled && ReShadeAddonInstall(g_self)) {
+                addonInstalled = true;
+                LOGI("ReShade add-on live (D3D12 capture + XR submission active)");
+            }
+            FrameProbeTick();   // M2 spike; no-op unless [Experimental] TaskProbe=true
         }
         // Hot-reload the ini (any key except VRRuntime/LogLevel/PollHz takes effect immediately).
         if (t - lastIniCheck > 1.0) {
@@ -107,6 +119,12 @@ DWORD WINAPI Worker(LPVOID) {
             GameERStatus gs = GameERGetStatus();
             LOGD("hb: game: version %d camHook %d skelHook %d player %d bones %d arms %d | 5s: camStep %ld calls %.1f ms, hk %ld calls / %ld solves %.1f ms",
                  gs.versionOk, gs.cameraHooked, gs.skeletonHooked, gs.playerFound, gs.boneCount, gs.armsActive, gs.camCalls, gs.camMs, gs.hkCalls, gs.hkSolves, gs.hkMs);
+            ReShadeStats rs = ReShadeAddonGetStats();
+            StereoStats ss = StereoGetStats();
+            LOGD("hb: xr: addon %d d3d12 %d bound %d | 5s: presents %ld, submitted %ld (stereo %ld), submitFails %ld, blitFails %ld | back buffer %ux%u fmt %u | crop %.0f%%x%.0f%% | submit %.2f ms | pump: %ld passes, %.1f ms",
+                 rs.registered, rs.d3d12, ss.graphicsBound, rs.presents, ss.frames, ss.stereoFrames, ss.submitFails, ss.blitFails,
+                 rs.width, rs.height, (unsigned)rs.format, ss.cropU * 100.f, ss.cropV * 100.f, ss.lastSubmitMs,
+                 FramePumpTakePasses(), FramePumpLastMs());
             CombatStatus cs = CombatGetStatus();
             LOGD("hb: combat: taeHook %d physical %d learned L%d H%d Left%d stamina %d | 5s: swings %ld, injected %ld",
                  cs.taeHooked, cs.physical, cs.learnedLight, cs.learnedHeavy, cs.learnedLeft, cs.stamina, cs.swings, cs.injected);

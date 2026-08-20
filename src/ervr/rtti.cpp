@@ -1,6 +1,7 @@
 #include "rtti.h"
 #include "log.h"
 #include <windows.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <cstring>
@@ -97,5 +98,102 @@ void** FindVTable(const char* className) {
     }
     LOGW("[rtti] vtable for %s not found", className);
     return nullptr;
+}
+
+namespace {
+// ".?AVCSTask@CS@@" -> "CS::CSTask"
+std::string Demangle(const char* mangled) {
+    std::string s(mangled);
+    if (s.rfind(".?AV", 0) != 0 && s.rfind(".?AU", 0) != 0) return {};
+    s = s.substr(4);
+    if (s.size() >= 2 && s.compare(s.size() - 2, 2, "@@") == 0) s = s.substr(0, s.size() - 2);
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : s) {
+        if (c == '@') { parts.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    if (!cur.empty()) parts.push_back(cur);
+    std::string out;
+    for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+        if (!out.empty()) out += "::";
+        out += *it;
+    }
+    return out;
+}
+} // namespace
+
+std::vector<std::string> FindTypeNames(const char* substr) {
+    std::vector<std::string> out;
+    for (auto& s : Sections()) {
+        if (s.exec) continue;
+        for (size_t off = 0; off + 8 < s.size; ++off) {
+            const char* p = (const char*)(s.start + off);
+            if (p[0] != '.' || p[1] != '?' || p[2] != 'A' || (p[3] != 'V' && p[3] != 'U')) continue;
+            size_t len = 0;
+            while (len < 512 && off + len < s.size && p[len]) ++len;
+            if (len == 0 || len >= 512) continue;
+            if (!strstr(p, substr)) { off += len; continue; }
+            std::string d = Demangle(p);
+            if (!d.empty()) out.push_back(d);
+            off += len;
+        }
+    }
+    return out;
+}
+
+std::string RttiNameOfVTable(void** vt) {
+    // MSVC puts a pointer to the CompleteObjectLocator immediately BEFORE the vtable.
+    if (!vt) return {};
+    auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    auto inModule = [&](const void* p) { return p >= base && p < base + 0x10000000ull; };
+    void* colp = *((void**)vt - 1);
+    if (!inModule(colp)) return {};
+    const uint32_t* col = (const uint32_t*)colp;
+    if (col[0] != 1) return {};                       // signature: 1 = 64-bit COL
+    const uint8_t* td = base + col[3];                // type descriptor RVA
+    if (!inModule(td)) return {};
+    const char* name = (const char*)(td + 0x10);
+    for (int i = 0; i < 4; ++i) if (name[i] == 0) return {};
+    return Demangle(name);
+}
+
+std::vector<void*> ModuleStaticPointers() {
+    std::vector<void*> out;
+    for (auto& s : Sections()) {
+        if (s.exec) continue;
+        for (size_t off = 0; off + 8 <= s.size; off += 8) {
+            void* cand = *(void* const*)(s.start + off);
+            auto v = (uintptr_t)cand;
+            if (v < 0x10000 || v >= 0x7FFFFFFFFFFFull || (v & 7)) continue;
+            out.push_back(cand);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+std::vector<void*> FindInstancesOfVTable(void** vt, int maxHits) {
+    std::vector<void*> out;
+    if (!vt) return out;
+    for (auto& s : Sections()) {
+        if (s.exec) continue;
+        for (size_t off = 0; off + 8 <= s.size; off += 8) {
+            void* cand = *(void* const*)(s.start + off);
+            // Cheap filters first: a heap object pointer is aligned and in user space. This
+            // rejects almost everything before the expensive VirtualQuery.
+            auto v = (uintptr_t)cand;
+            if (v < 0x10000 || v >= 0x7FFFFFFFFFFFull || (v & 7)) continue;
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (!VirtualQuery(cand, &mbi, sizeof(mbi))) continue;
+            if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) continue;
+            if ((uint8_t*)cand + 8 > (uint8_t*)mbi.BaseAddress + mbi.RegionSize) continue;
+            if (*(void* const*)cand != (void*)vt) continue;
+            out.push_back(cand);
+            if ((int)out.size() >= maxHits) return out;
+        }
+    }
+    return out;
 }
 }

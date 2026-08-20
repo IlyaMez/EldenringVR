@@ -1,6 +1,11 @@
 #pragma once
 #include "vrmath.h"
 #include <cstdint>
+#include <dxgiformat.h>
+
+struct ID3D12Device;
+struct ID3D12CommandQueue;
+struct ID3D12Resource;
 
 namespace ervr {
 
@@ -35,36 +40,90 @@ struct VRTracking {
     double time = 0;   // runtime time in seconds
 };
 
+// ---- frame plane -------------------------------------------------------------
+// Only stereo.cpp calls any of this; the game-side subsystems never see it.
+
+enum VREye { EyeLeft = 0, EyeRight = 1 };
+
+// Signed half-angles from the view axis, radians - XrFovf's shape (left/down negative).
+struct VRFov { float angleLeft = 0, angleRight = 0, angleUp = 0, angleDown = 0; };
+
+// One eye's view, in the ervr convention (right-handed, Y-up, -Z forward), in stage space.
+struct VREyeView { Pose pose; VRFov fov; };
+
+struct VRFrameInfo {
+    int64_t  displayTimeNs = 0;    // XrTime: what LocateViews and the camera must predict to
+    double   displayTimeSec = 0;
+    bool     shouldRender = false; // XrFrameState::shouldRender
+    uint64_t pairIndex = 0;
+};
+
+// What EndFrame composes. A frame may carry a projection layer, a quad layer, or both.
+struct VRSubmitLayer {
+    bool projectionValid = false;   // stereo: views[] are the poses/fovs the eyes were RENDERED with
+    VREyeView views[2];
+    bool  quadValid = false;        // flat layer: cinema mode, menus, HUD
+    float quadDistanceM = 2.5f;
+    float quadWidthM = 4.0f;        // height follows the quad image's aspect
+};
+
 class IVRBackend {
 public:
     virtual ~IVRBackend() = default;
     virtual const char* Name() const = 0;
-    // Try to attach to the runtime already living in this process (R.E.A.L. VR's).
-    // Returns true once ready. Called repeatedly from a worker thread until it succeeds.
-    virtual bool TryAttach() = 0;
+
+    // -- lifecycle (worker thread; retried until it succeeds, like XInputHooksInstall) --
+    virtual bool TryAttach() = 0;      // instance + system only; no graphics yet
     virtual bool IsReady() const = 0;
+    virtual void Detach() = 0;
+
+    // -- graphics binding (render thread, once the D3D12 device is known) --
+    // Creates the session and swapchains. Safe to call repeatedly; a no-op once bound.
+    virtual bool BindGraphics(ID3D12Device* device, ID3D12CommandQueue* queue) = 0;
+    virtual bool GraphicsBound() const = 0;
+    virtual bool GetRecommendedEyeSize(uint32_t& w, uint32_t& h) const = 0;
+    // The formats the swapchains were CREATED with. The D3D12 images the runtime hands back
+    // are typically TYPELESS, so these are the only authority on sRGB-ness and the blitter
+    // needs them to build a correct render-target view.
+    virtual DXGI_FORMAT EyeFormat() const = 0;
+    virtual DXGI_FORMAT QuadFormat() const = 0;
+    // Per-eye images, sized to what we can actually deliver rather than to the runtime's
+    // recommendation: the game renders one wide frustum and only a sub-rectangle of it
+    // belongs to an eye, so asking for the recommended size would upscale a crop and pay
+    // for pixels that carry no information. No-op unless the size really changed.
+    virtual bool EnsureEyeSwapchains(uint32_t w, uint32_t h) = 0;
+    // Cinema/HUD quad, sized to the game window. No-op once created.
+    virtual bool EnsureQuadSwapchain(uint32_t w, uint32_t h, DXGI_FORMAT backBufferFormat) = 0;
+
+    // -- frame loop (render thread only; stereo.cpp is the sole caller) --
+    virtual bool WaitBeginFrame(VRFrameInfo& out) = 0;                       // xrWaitFrame + xrBeginFrame + event pump
+    virtual bool LocateViews(int64_t displayTimeNs, VREyeView out[2]) = 0;   // BOTH eyes at the SAME time: the true-stereo contract
+    // The same two views expressed RELATIVE TO THE HEAD (VIEW space) - i.e. the headset's
+    // IPD geometry, with where the head happens to be divided out. This is what the game
+    // thread needs: it owns its own head pose (latched on its own cycle) and just has to
+    // displace the camera by the eye offset, so the two threads never have to agree on an
+    // instant in time.
+    virtual bool LocateEyeOffsets(int64_t displayTimeNs, VREyeView out[2]) = 0;
+    virtual ID3D12Resource* AcquireEyeImage(VREye eye) = 0;                  // acquire + wait; null on failure
+    virtual void ReleaseEyeImage(VREye eye) = 0;
+    virtual ID3D12Resource* AcquireQuadImage() = 0;
+    virtual void ReleaseQuadImage() = 0;
+    virtual bool EndFrame(const VRSubmitLayer& layer) = 0;
+
+    // -- pose/input plane (worker thread; unchanged, consumers untouched) --
     virtual bool Poll(VRTracking& tracking, VRInputState& input) = 0;
     // amplitude 0..1, duration in seconds (best-effort; some runtimes only expose on/off).
     virtual void Haptic(Hand hand, float amplitude, float durationSec) = 0;
-    virtual void Detach() = 0;
 };
 
-IVRBackend* CreateOculusBackend();
-IVRBackend* CreateOpenVRBackend();
+IVRBackend* CreateOpenXRBackend();
 
 // Owned singleton picked from config; may be null until a runtime shows up.
 IVRBackend* ActiveBackend();
-void BackendsInit(const char* preference);   // "auto" | "oculus" | "openvr"
+void BackendsInit(const char* preference);   // "openxr" (only value today; "auto" accepted)
 void BackendsTick();                          // called from worker thread
 void BackendsShutdown();
 
 // Thread-safe snapshot for consumers (XInput hook runs on the game's input thread).
 bool GetLatestVRState(VRTracking& tracking, VRInputState& input);
-
-// Head-position ownership. When enabled, the backend hides the HMD *position* from the host (R.E.A.L.) - it keeps
-// receiving orientation, but sees the head sitting at the tracking origin - so the only positional offset in the
-// rendered view is the one ERVR writes into the game camera. ERVR's own polling always sees the raw position.
-// Returns false if the active backend cannot intercept the host's pose reads (then the host still adds its own offset).
-void VRSetHostHeadPositionHidden(bool hidden);
-bool VRHostHeadPositionHideSupported();
 }

@@ -18,19 +18,13 @@ int g_failStreak = 0;
 
 IVRBackend* ActiveBackend() { return g_active; }
 
-void OculusSetHostHeadPositionHidden(bool hidden);   // vr_oculus.cpp
-bool OculusHooksInstalled();
-void VRSetHostHeadPositionHidden(bool hidden) { OculusSetHostHeadPositionHidden(hidden); }
-bool VRHostHeadPositionHideSupported() { return g_active && g_active == CreateOculusBackend() && OculusHooksInstalled(); }
-
 void BackendsInit(const char* pref) {
-    std::string p = pref ? pref : "auto";
+    std::string p = pref ? pref : "openxr";
     for (auto& c : p) c = (char)tolower((unsigned char)c);
-    g_candidates.clear();
-    if (p == "oculus")      g_candidates = { CreateOculusBackend() };
-    else if (p == "openvr") g_candidates = { CreateOpenVRBackend() };
-    else                    g_candidates = { CreateOculusBackend(), CreateOpenVRBackend() };
-    LOGI("VR runtime preference: %s (%zu candidate backend(s))", p.c_str(), g_candidates.size());
+    if (p != "openxr" && p != "auto")
+        LOGW("VRRuntime=%s is no longer supported (ERVR owns its own OpenXR session); using openxr", p.c_str());
+    g_candidates = { CreateOpenXRBackend() };
+    LOGI("VR runtime: openxr");
 }
 
 void BackendsTick() {

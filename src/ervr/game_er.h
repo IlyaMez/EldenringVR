@@ -24,6 +24,12 @@ struct GameERStatus {
     double hkMs = 0, camMs = 0;                     // total ms spent in the hooks since last query
 };
 GameERStatus GameERGetStatus();
+// Cheap "are we actually in the world?" check. Unlike GameERGetStatus it resets no counters,
+// so it is safe to call from the input hook every frame.
+bool GameERPlayerActive();
+// Full stereo: write the second eye's camera between the two engine passes of one frame.
+// No-op (false) unless UpdateCamera stashed a second-eye request this frame.
+bool GameERApplySecondEyeCamera();
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

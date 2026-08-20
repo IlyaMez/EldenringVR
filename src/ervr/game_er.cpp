@@ -13,6 +13,7 @@
 #include "midhook.h"
 #include "rtti.h"
 #include "combat.h"
+#include "stereo.h"
 #include <windows.h>
 #include <MinHook.h>
 #include "virtual_pad.h"
@@ -642,6 +643,7 @@ struct FrameInfo {
     Vec3 anchor;         // eye anchor in game world (no HMD offset)
     float baseYaw = 0;   // game camera yaw the HMD is relative to
     float basePitch = 0; // game camera pitch (from chr cam)
+    bool  headValid = false; // HMD tracking is live (otherwise eye == anchor and there is no stereo)
     Quat  headQ;         // HMD orientation in game frame (relative to tracking origin)
     Vec3  headP;         // HMD position in game frame (relative to the *tracking* origin)
     Vec3  headRel;       // HMD position relative to our own play-space origin (drift removed)
@@ -753,10 +755,8 @@ float GameCamYaw() {
     return std::atan2(fwd[0], fwd[2]);
 }
 
-// Whether R.E.A.L. currently sees a zero head position (see VRSetHostHeadPositionHidden). Decided once per tick in
-// GameERTick and cached so the camera and arm paths agree within a frame.
-std::atomic<bool> g_ownHeadPos{false};
-bool OwnHeadPositionActive() { return g_ownHeadPos.load(std::memory_order_relaxed); }
+// ERVR now owns rendering, so it is unconditionally the sole owner of where the eye sits.
+// (This used to negotiate with R.E.A.L. over who applied the HMD offset.)
 
 bool BuildFrame(uint8_t* player, FrameInfo& f) {
     const Config& c = Cfg();
@@ -837,12 +837,12 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
     f.bodyYaw = f.baseYaw;
     if (vr && tr.head.valid) {
         Quat hq = ToGame(tr.head.rot); Vec3 hp = ToGame(tr.head.pos);
-        if (c.fpHmdYawInGameCamera) { float y = -tr.head.rot.Yaw(); hq = Quat::YawQ(-y) * hq; hp = Quat::YawQ(-y).Rotate(hp); }
         // Pivot stick turns about the head: baseYaw already contains the new yaw, so shift the play-space origin
         // such that R(baseYaw)*headRel - and with it the eye - is unchanged by the turn itself.
         float dy = g_pendingYawPivot.exchange(0.f);
         if (dy != 0.f) { g_psOrigin = hp - Quat::YawQ(-dy).Rotate(hp - g_psOrigin); g_psInit = true; }
         Vec3 psOrigin = UpdateRecenter(hp, NowSec());
+        f.headValid = true;
         f.headQ = hq; f.headP = hp; f.headRel = hp - psOrigin;
         f.eye = f.anchor + Quat::YawQ(f.baseYaw).Rotate(f.headRel);
         { Vec3 hf = hq.Rotate({0, 0, 1}); f.headYaw = std::atan2(hf.x, hf.z); }
@@ -859,7 +859,6 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
             f.handValid[h] = hand.valid && in.controllerConnected[h];
             if (!f.handValid[h]) continue;
             Vec3 p = ToGame(hand.pos); Quat q = ToGame(hand.rot);
-            if (c.fpHmdYawInGameCamera) { float y = -tr.head.rot.Yaw(); p = Quat::YawQ(-y).Rotate(p); q = Quat::YawQ(-y) * q; }
             // All three origins end up drift-free: "head" is head-relative by construction (the head offset is
             // added back at the target), the other two are measured from our own play-space origin.
             if (c.handOrigin == "head") p = p - hp;
@@ -920,26 +919,80 @@ void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw) {
     SafeWrite(player + off::Chr_LockOnTarget, t4, 16);
 }
 
+// One eye per game frame, latched once so that the several UpdateCamera calls a frame makes
+// (camera step, camera finalize, post-model-pos) all agree on which eye they are drawing.
+struct EyeLatch { bool active = false; StereoEyeRequest req; };
+EyeLatch g_eyeLatch;
+std::atomic<uint32_t> g_eyeLatchFrame{0xFFFFFFFFu};
+
+const EyeLatch& LatchEyeForFrame() {
+    uint32_t fr = g_frame;
+    if (g_eyeLatchFrame.exchange(fr) != fr) {
+        StereoEyeRequest r;
+        g_eyeLatch.active = StereoTakeEyeRequest(r);
+        g_eyeLatch.req = r;
+    }
+    return g_eyeLatch;
+}
+
+// Full stereo: everything the draw-only second pass needs to place the OTHER eye's camera.
+// Written by UpdateCamera during the real pass; consumed between passes by the frame pump
+// (the camera step is gated in pass 2, so the pump's write is what that pass renders from).
+struct SecondEyeStash {
+    std::mutex mtx;
+    bool  valid = false;
+    bool  haveHeadBasis = false;
+    Quat  qHead;                 // head orientation, game convention (basis when haveHeadBasis)
+    Vec3  r, u, fw;              // fallback basis when !haveHeadBasis
+    Vec3  posBase;               // the head-centre eye position before any eye offset
+    Vec3  offset;                // other eye, head-frame, game convention
+    Quat  rot;                   // other eye's cant
+    int   eye = 1;
+    uint64_t pair = 0;
+    float fovY = 0;              // what pass 1 read back from Cam_Fov (pass 2 renders the same)
+    Vec3  headPos; Quat headRot; // XR convention, for the report
+};
+SecondEyeStash g_secondEye;
+
 void UpdateCamera(uint8_t* player, const FrameInfo& f) {
     const Config& c = Cfg();
     float yaw = f.baseYaw, pitch = 0.f;
     Vec3 r, u, fw;
+    // Which eye this frame renders, if the render thread is driving stereo.
+    const EyeLatch& el = LatchEyeForFrame();
+    const bool stereo = el.active && f.headValid;
     if (c.fpCameraRotation == "game") pitch = f.basePitch;
+    bool haveHeadBasis = false;
+    Quat qHead;
     if (c.fpCameraRotation == "hmd") {
         // full HMD orientation composed onto the base yaw
-        Quat q = Quat::YawQ(f.baseYaw) * f.headQ;
+        qHead = Quat::YawQ(f.baseYaw) * f.headQ;
+        haveHeadBasis = true;
+        Quat q = stereo ? qHead * el.req.rot : qHead;   // per-eye cant; identity on most headsets
         fw = q.Rotate({0, 0, 1}); r = q.Rotate({1, 0, 0}); u = q.Rotate({0, 1, 0});
     } else CamBasis(yaw, pitch, r, u, fw);
-    // Positional head tracking. The eye must end up at f.eye = anchor + R(yaw)*headRel (drift removed).
-    //  - OwnHeadPosition (default, Oculus): the backend hides the HMD position from R.E.A.L., so it adds nothing and
-    //    we write the eye directly. Nothing to guess, nothing to cancel.
-    //  - otherwise R.E.A.L. adds RealHmdPositionScale * R(yaw) * rawHmdPos on top of what we write, so we subtract
-    //    that much back out (AddHmdPosition=true: it adds nothing, we write the eye).
-    float realAdds = (OwnHeadPositionActive() || c.fpAddHmdPosition) ? 0.f : c.fpRealHmdPositionScale;
-    Vec3 pos = f.eye - Quat::YawQ(f.baseYaw).Rotate(f.headP * realAdds);
+    // Positional head tracking: nothing downstream adds an HMD offset any more, so the eye
+    // we compute is the eye that gets rendered.
+    Vec3 pos = f.eye;
+    // Stereo: displace to this frame's eye. The offset is measured in the HEAD's frame, so it
+    // is rotated by the head basis - not by the per-eye canted one, which would shear the two
+    // eyes apart by the cant angle.
+    if (stereo) {
+        const Vec3& o = el.req.offset;
+        pos = pos + (haveHeadBasis ? qHead.Rotate(o) : (r * o.x + u * o.y + fw * o.z));
+    }
 
     uint8_t* pcs[4]; int npc = AllPersCams(pcs);
     for (int i = 0; i < npc; ++i) WriteCamMatrix(pcs[i] + off::Cam_Matrix, r, u, fw, pos);
+    // Widen the frustum so one rendered image can contain a whole eye's field of view. The
+    // value comes from the render thread, which is the only side that knows what the headset
+    // needs; it then crops back down to the runtime's exact asymmetric FOV, so too wide only
+    // costs resolution while too narrow costs field of view.
+    if (stereo && el.req.fovWrite > 0.01f) {
+        float fov = el.req.fovWrite;
+        for (int i = 0; i < npc; ++i) SafeWrite(pcs[i] + off::Cam_Fov, &fov, 4);
+        if (uint8_t* cc = ChrCam()) SafeWrite(cc + off::Cam_Fov, &fov, 4);
+    }
     g_lastWrittenPos = pos; g_lastCamRoot = f.root;
     { std::lock_guard<std::mutex> g(g_camMtxLock);
       float m[16] = { r.x, r.y, r.z, 0.f, u.x, u.y, u.z, 0.f, fw.x, fw.y, fw.z, 0.f, pos.x, pos.y, pos.z, 1.f };
@@ -951,6 +1004,40 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
         Quat q = Quat::YawQ(f.baseYaw) * f.headQ;
         Vec3 ar = q.Rotate({1, 0, 0}), au = q.Rotate({0, 1, 0}), af = q.Rotate({0, 0, 1});
         WriteCamMatrix(player + off::Chr_AimViewMtx, ar, au, af, f.eye);   // nobody adds to this one: use the real eye
+    }
+    // Tell the render thread what this frame actually is. The FOV is READ BACK rather than
+    // assumed: whatever the game (or the override above) left in Cam_Fov is what the image
+    // gets rasterised with, and the crop has to match it or the world comes out the wrong
+    // size. The head pose goes back in XR/stage convention - ToGame is its own inverse -
+    // because that is the frame the compositor reprojects in.
+    if (stereo) {
+        float fov = 0.f;
+        if (npc > 0) SafeRead(pcs[0] + off::Cam_Fov, &fov, 4);
+        StereoEyeReport rep;
+        rep.eye = el.req.eye;
+        rep.pair = el.req.pair;
+        rep.fovY = (fov > 0.05f && fov < 3.2f) ? fov : 0.f;
+        rep.headPos = ToGame(f.headP);
+        rep.headRot = ToGame(f.headQ);
+        StereoReportEye(rep);
+        // Full mode: stash the second eye for the pump. Overwritten by every UpdateCamera
+        // call in the frame, so the pump gets the LAST (freshest) camera state, exactly
+        // like the report queue does.
+        std::lock_guard<std::mutex> g(g_secondEye.mtx);
+        g_secondEye.valid = el.req.haveOther;
+        if (el.req.haveOther) {
+            g_secondEye.haveHeadBasis = haveHeadBasis;
+            g_secondEye.qHead = qHead;
+            g_secondEye.r = r; g_secondEye.u = u; g_secondEye.fw = fw;
+            g_secondEye.posBase = f.eye;
+            g_secondEye.offset = el.req.otherOffset;
+            g_secondEye.rot = el.req.otherRot;
+            g_secondEye.eye = el.req.otherEye;
+            g_secondEye.pair = el.req.pair;
+            g_secondEye.fovY = rep.fovY;
+            g_secondEye.headPos = rep.headPos;
+            g_secondEye.headRot = rep.headRot;
+        }
     }
 }
 
@@ -1326,10 +1413,10 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
                  rootPos.x, rootPos.y, rootPos.z, dRoot.x, dRoot.y, dRoot.z, f.anchor.x, f.anchor.y, f.anchor.z, headW.x, headW.y, headW.z, f.anchor.x - headW.x, f.anchor.y - headW.y, f.anchor.z - headW.z, dmyP.x, dmyP.y, dmyP.z,
                  Rad2Deg(f.baseYaw), (f.anchor + headOff + baseQ.Rotate(f.handP[1])).x, (f.anchor + headOff + baseQ.Rotate(f.handP[1])).y, (f.anchor + headOff + baseQ.Rotate(f.handP[1])).z,
                  (int)f.handValid[0], (int)f.handValid[1]);
-            LOGD("[fp] hmd raw(%.2f,%.2f,%.2f) origin(%.2f,%.2f,%.2f) rel(%.2f,%.2f,%.2f) bodyShift(%.2f,%.2f,%.2f) | chr-cam yaw %.1f, body-cam yaw %.1f, head-cam yaw %.1f deg | root facing-cam %.1f, shoulder-line-cam %.1f (flip %d) | ownHeadPos %d, locked %d",
+            LOGD("[fp] hmd raw(%.2f,%.2f,%.2f) origin(%.2f,%.2f,%.2f) rel(%.2f,%.2f,%.2f) bodyShift(%.2f,%.2f,%.2f) | chr-cam yaw %.1f, body-cam yaw %.1f, head-cam yaw %.1f deg | root facing-cam %.1f, shoulder-line-cam %.1f (flip %d) | locked %d",
                  f.headP.x, f.headP.y, f.headP.z, g_psOrigin.x, g_psOrigin.y, g_psOrigin.z, f.headRel.x, f.headRel.y, f.headRel.z, bodyOff.x, bodyOff.y, bodyOff.z,
                  Rad2Deg(WrapPi(f.chrYaw - f.baseYaw)), Rad2Deg(WrapPi(f.bodyYaw - f.baseYaw)), Rad2Deg(f.headYaw),
-                 Rad2Deg(WrapPi(BodyFacingYaw(rootQ, w) - f.baseYaw)), Rad2Deg(WrapPi(ShoulderLineYaw(w) - f.baseYaw)), (int)g_shoulderFlip, (int)OwnHeadPositionActive(), (int)f.lockedOn);
+                 Rad2Deg(WrapPi(BodyFacingYaw(rootQ, w) - f.baseYaw)), Rad2Deg(WrapPi(ShoulderLineYaw(w) - f.baseYaw)), (int)g_shoulderFlip, (int)f.lockedOn);
         }
     }
 }
@@ -1646,6 +1733,41 @@ uint8_t* ResolveCallTarget(const char* pattern, const char* name) {
 
 } // namespace
 
+// Full stereo, pass 2: write the OTHER eye's camera into every slot the real pass wrote.
+// Called by the frame pump between the two engine passes, on the main-loop thread, while
+// every camera writer is quiescent (the camera step is gated for the pass that follows).
+bool GameERApplySecondEyeCamera() {
+    bool haveHeadBasis; Quat qHead, rot; Vec3 br, bu, bf, posBase, offset;
+    StereoEyeReport rep;
+    {
+        std::lock_guard<std::mutex> g(g_secondEye.mtx);
+        if (!g_secondEye.valid) return false;
+        g_secondEye.valid = false;   // consumed; UpdateCamera refills next frame
+        haveHeadBasis = g_secondEye.haveHeadBasis;
+        qHead = g_secondEye.qHead; rot = g_secondEye.rot;
+        br = g_secondEye.r; bu = g_secondEye.u; bf = g_secondEye.fw;
+        posBase = g_secondEye.posBase; offset = g_secondEye.offset;
+        rep.eye = g_secondEye.eye; rep.pair = g_secondEye.pair;
+        rep.fovY = g_secondEye.fovY;
+        rep.headPos = g_secondEye.headPos; rep.headRot = g_secondEye.headRot;
+    }
+    Vec3 r, u, fw, pos;
+    if (haveHeadBasis) {
+        const Quat q = qHead * rot;   // per-eye cant, identity on most headsets
+        r = q.Rotate({1, 0, 0}); u = q.Rotate({0, 1, 0}); fw = q.Rotate({0, 0, 1});
+        pos = posBase + qHead.Rotate(offset);   // offset lives in the HEAD frame, not the canted one
+    } else {
+        r = br; u = bu; fw = bf;
+        pos = posBase + r * offset.x + u * offset.y + fw * offset.z;
+    }
+    uint8_t* pcs[4]; const int npc = AllPersCams(pcs);
+    for (int i = 0; i < npc; ++i) WriteCamMatrix(pcs[i] + off::Cam_Matrix, r, u, fw, pos);
+    if (uint8_t* cc = ChrCam()) WriteCamMatrix(cc + off::Cam_Matrix, r, u, fw, pos);
+    if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
+    StereoReportEye(rep);
+    return true;
+}
+
 bool GameERInit() {
     g_base = (uint8_t*)GetModuleHandleW(nullptr);
     g_status.versionOk = VersionIs(L"2.6.2.0");
@@ -1735,21 +1857,6 @@ void GameERTick() {
     bool ok = GetLatestVRState(tr, in);
     { std::lock_guard<std::mutex> g(g_vrMtx); g_vrValid = ok; if (ok) { g_vrTr = tr; g_vrIn = in; } }
     if (!MainPlayer() || !Cfg().fpEnabled) { g_moveActive.store(false); g_camYawInit = false; g_bodyYawInit = false; }
-    // Head-position ownership: hide the HMD position from R.E.A.L. while first person is on (and the backend can).
-    {
-        static int s_last = -1;
-        bool want = Cfg().fpEnabled && Cfg().fpOwnHeadPosition;
-        bool supported = VRHostHeadPositionHideSupported();
-        bool on = want && supported;
-        VRSetHostHeadPositionHidden(on);
-        g_ownHeadPos.store(on);
-        int state = want ? (supported ? 1 : 2) : 0;
-        if (state != s_last) {
-            s_last = state;
-            if (state == 1) LOGI("[fp] OwnHeadPosition: R.E.A.L. now sees a zero head position; ERVR places the eye");
-            else if (state == 2) LOGW("[fp] OwnHeadPosition requested but the active VR backend cannot intercept the host pose reads; falling back to AddHmdPosition/RealHmdPositionScale");
-        }
-    }
     ApplyStatCheat();
 }
 
@@ -1787,6 +1894,8 @@ GameERStatus GameERGetStatus() {
     s.camMs = (double)InterlockedExchange64(&g_camTicks, 0) * 1000.0 / (double)f.QuadPart;
     return s;
 }
+
+bool GameERPlayerActive() { return g_status.playerFound; }
 
 void GameERShutdown() {
     if (g_hkSlot && g_hkOrig) {

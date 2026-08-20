@@ -1,0 +1,163 @@
+#include "reshade_addon.h"
+#include "stereo.h"
+#include "log.h"
+#include <windows.h>
+#include <d3d12.h>
+#include <atomic>
+#include <reshade.hpp>
+
+namespace ervr {
+namespace {
+
+std::atomic<bool> g_registered{false};
+std::atomic<bool> g_eventsUp{false};
+HMODULE g_self = nullptr;
+
+// Written on the render thread inside ReShade callbacks, read for logging elsewhere.
+std::atomic<ID3D12Device*>       g_device{nullptr};
+std::atomic<ID3D12CommandQueue*> g_queue{nullptr};
+std::atomic<bool> g_isD3D12{false};
+std::atomic<long> g_presents{0};
+std::atomic<uint32_t> g_width{0}, g_height{0};
+std::atomic<uint32_t> g_format{0};
+
+std::atomic<bool> g_trace{false};
+PresentSample g_traceBuf[512];
+std::atomic<int> g_traceN{0};
+
+void OnInitDevice(reshade::api::device* dev) {
+    const bool d12 = dev->get_api() == reshade::api::device_api::d3d12;
+    g_isD3D12.store(d12);
+    if (!d12) {
+        LOGW("[reshade] device is not D3D12 (api=%d); ERVR rendering stays idle", (int)dev->get_api());
+        return;
+    }
+    auto* native = reinterpret_cast<ID3D12Device*>(dev->get_native());
+    g_device.store(native);
+    LOGI("[reshade] D3D12 device %p", (void*)native);
+}
+
+void OnDestroyDevice(reshade::api::device*) {
+    g_device.store(nullptr);
+    g_queue.store(nullptr);
+    StereoOnDeviceLost();
+}
+
+void OnInitSwapchain(reshade::api::swapchain* sc, bool resize) {
+    reshade::api::device* dev = sc->get_device();
+    if (dev->get_api() != reshade::api::device_api::d3d12) return;
+    g_isD3D12.store(true);
+    const reshade::api::resource bb = sc->get_current_back_buffer();
+    const reshade::api::resource_desc d = dev->get_resource_desc(bb);
+    g_width.store(d.texture.width);
+    g_height.store(d.texture.height);
+    g_format.store((uint32_t)d.texture.format);
+    LOGI("[reshade] swapchain %ux%u fmt %u buffers %u%s", d.texture.width, d.texture.height,
+         (unsigned)d.texture.format, sc->get_back_buffer_count(), resize ? " (resize)" : "");
+    if (resize) StereoOnSwapchainResize();
+}
+
+void OnDestroySwapchain(reshade::api::swapchain*, bool resize) {
+    if (!resize) StereoOnDeviceLost();
+}
+
+// The render thread. ReShade hands us the queue it is presenting on - exactly the queue
+// OpenXR must be bound to - so there is no queue-guessing heuristic to get wrong.
+void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* sc,
+               const reshade::api::rect*, const reshade::api::rect*, uint32_t, const reshade::api::rect*) {
+    reshade::api::device* dev = sc->get_device();
+    // Determine D3D12-ness from the live device, NOT from a flag set in init_device:
+    // ERVR registers as an add-on after the game already created its device, so
+    // init_device never fires for us and that flag would stay false forever.
+    if (!g_isD3D12.load(std::memory_order_relaxed)) {
+        if (dev->get_api() != reshade::api::device_api::d3d12) return;
+        g_isD3D12.store(true);
+        LOGI("[reshade] D3D12 detected at present (init_device was missed - registered mid-run)");
+    }
+
+    Dx12Frame f;
+    f.device = reinterpret_cast<ID3D12Device*>(dev->get_native());
+    f.queue  = reinterpret_cast<ID3D12CommandQueue*>(queue->get_native());
+    const reshade::api::resource bb = sc->get_current_back_buffer();
+    f.backBuffer = reinterpret_cast<ID3D12Resource*>(bb.handle);   // D3D12: the handle is the native pointer
+    if (!f.device || !f.queue || !f.backBuffer) return;
+
+    const reshade::api::resource_desc d = dev->get_resource_desc(bb);
+    f.width  = d.texture.width;
+    f.height = d.texture.height;
+    f.format = (DXGI_FORMAT)d.texture.format;   // reshade::api::format values match DXGI_FORMAT
+
+    if (g_queue.exchange(f.queue) != f.queue)
+        LOGI("[reshade] present queue %p (type %u)", (void*)f.queue, (unsigned)queue->get_type());
+    g_device.store(f.device);
+    g_presents.fetch_add(1, std::memory_order_relaxed);
+
+    if (g_trace.load(std::memory_order_relaxed)) {
+        const int i = g_traceN.fetch_add(1, std::memory_order_relaxed);
+        if (i < 512) {
+            LARGE_INTEGER q; QueryPerformanceCounter(&q);
+            g_traceBuf[i] = {q.QuadPart, GetCurrentThreadId()};
+        }
+    }
+
+    StereoOnPresent(f);
+}
+
+} // namespace
+
+bool ReShadeAddonInstall(void* selfModule) {
+    if (g_registered.load()) return true;
+    g_self = (HMODULE)selfModule;
+    if (!reshade::register_addon(g_self)) return false;   // ReShade not loaded (yet)
+    g_registered.store(true);
+    LOGI("[reshade] registered as add-on (API version %d)", RESHADE_API_VERSION);
+
+    reshade::register_event<reshade::addon_event::init_device>(&OnInitDevice);
+    reshade::register_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
+    reshade::register_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
+    reshade::register_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
+    reshade::register_event<reshade::addon_event::present>(&OnPresent);
+    g_eventsUp.store(true);
+    return true;
+}
+
+bool ReShadeAddonInstalled() { return g_registered.load(); }
+
+void ReShadeAddonShutdown() {
+    if (!g_registered.exchange(false)) return;
+    if (g_eventsUp.exchange(false)) {
+        reshade::unregister_event<reshade::addon_event::init_device>(&OnInitDevice);
+        reshade::unregister_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
+        reshade::unregister_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
+        reshade::unregister_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
+        reshade::unregister_event<reshade::addon_event::present>(&OnPresent);
+    }
+    reshade::unregister_addon(g_self);
+    LOGI("[reshade] add-on unregistered");
+}
+
+void ReShadeAddonPresentTraceStart() {
+    g_traceN.store(0);
+    g_trace.store(true);
+}
+
+int ReShadeAddonPresentTraceStop(PresentSample* out, int maxOut) {
+    g_trace.store(false);
+    int n = g_traceN.load();
+    if (n > 512) n = 512;
+    if (n > maxOut) n = maxOut;
+    for (int i = 0; i < n; ++i) out[i] = g_traceBuf[i];
+    return n;
+}
+
+ReShadeStats ReShadeAddonGetStats() {
+    ReShadeStats s;
+    s.registered = g_registered.load();
+    s.d3d12  = g_isD3D12.load();
+    s.presents = g_presents.exchange(0);
+    s.width  = g_width.load();
+    s.height = g_height.load();
+    s.format = (DXGI_FORMAT)g_format.load();
+    return s;
+}
+}

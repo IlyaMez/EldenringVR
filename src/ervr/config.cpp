@@ -1,4 +1,4 @@
-#include "config.h"
+﻿#include "config.h"
 #include "log.h"
 #include <windows.h>
 #include <xinput.h>
@@ -80,6 +80,19 @@ void Config::Load(const std::wstring& path) {
     vrRuntime  = GetS(ini, L"General", L"VRRuntime", vrRuntime);
     enabled    = GetB(ini, L"General", L"Enabled", enabled);
     pollHz     = GetI(ini, L"General", L"PollHz", pollHz);
+
+    vrStereoMode     = GetS(ini, L"VR", L"StereoMode", vrStereoMode);
+    vrRenderScale    = GetF(ini, L"VR", L"RenderScale", vrRenderScale);
+    vrWorldScale     = GetF(ini, L"VR", L"WorldScale", vrWorldScale);
+    vrPairRateHz     = GetI(ini, L"VR", L"PairRateHz", vrPairRateHz);
+    vrCinemaDistance = GetF(ini, L"VR", L"CinemaDistance", vrCinemaDistance);
+    vrCinemaWidth    = GetF(ini, L"VR", L"CinemaWidth", vrCinemaWidth);
+    vrMirrorWindow   = GetB(ini, L"VR", L"MirrorWindow", vrMirrorWindow);
+    vrXrDebug        = GetB(ini, L"VR", L"XrDebug", vrXrDebug);
+    vrFovDeg         = GetF(ini, L"VR", L"FovDeg", vrFovDeg);
+    vrFovAxis        = GetS(ini, L"VR", L"FovAxis", vrFovAxis);
+    vrIpdMm          = GetF(ini, L"VR", L"IpdMm", vrIpdMm);
+    vrColorFix       = GetS(ini, L"VR", L"ColorFix", vrColorFix);
 
     btnA = GetS(ini, L"Buttons", L"A", btnA); btnB = GetS(ini, L"Buttons", L"B", btnB);
     btnX = GetS(ini, L"Buttons", L"X", btnX); btnY = GetS(ini, L"Buttons", L"Y", btnY);
@@ -166,10 +179,6 @@ void Config::Load(const std::wstring& path) {
     fpCameraRotation = GetS(ini, L"FirstPerson", L"CameraRotation", fpCameraRotation);
     fpCameraYawSource = GetS(ini, L"FirstPerson", L"CameraYawSource", fpCameraYawSource);
     fpOwnChrCam = GetB(ini, L"FirstPerson", L"OwnChrCam", fpOwnChrCam);
-    fpOwnHeadPosition = GetB(ini, L"FirstPerson", L"OwnHeadPosition", fpOwnHeadPosition);
-    fpAddHmdPosition = GetB(ini, L"FirstPerson", L"AddHmdPosition", fpAddHmdPosition);
-    fpHmdYawInGameCamera = GetB(ini, L"FirstPerson", L"HmdYawInGameCamera", fpHmdYawInGameCamera);
-    fpRealHmdPositionScale = GetF(ini, L"FirstPerson", L"RealHmdPositionScale", fpRealHmdPositionScale);
     fpRecenter = GetB(ini, L"FirstPerson", L"Recenter", fpRecenter);
     fpRecenterSeconds = GetF(ini, L"FirstPerson", L"RecenterSeconds", fpRecenterSeconds);
     fpRecenterMaxRadius = GetF(ini, L"FirstPerson", L"RecenterMaxRadius", fpRecenterMaxRadius);
@@ -246,6 +255,23 @@ void Config::Load(const std::wstring& path) {
     cameraYawOffset   = GetI(ini, L"Experimental", L"CameraYawOffset", cameraYawOffset);
     cameraPitchOffset = GetI(ini, L"Experimental", L"CameraPitchOffset", cameraPitchOffset);
     handAimStrength = GetF(ini, L"Experimental", L"HandAimStrength", handAimStrength);
+    patchFpsTarget = GetI(ini, L"Patches", L"FpsTarget", patchFpsTarget);
+
+    m2TaskProbe    = GetB(ini, L"Experimental", L"TaskProbe", m2TaskProbe);
+    taskRegisterTest  = GetB(ini, L"Experimental", L"TaskRegisterTest", taskRegisterTest);
+    taskQueueProbe    = GetB(ini, L"Experimental", L"TaskQueueProbe", taskQueueProbe);
+    taskDumpLists     = GetB(ini, L"Experimental", L"TaskDumpLists", taskDumpLists);
+    taskDoublePumpTest = GetB(ini, L"Experimental", L"TaskDoublePumpTest", taskDoublePumpTest);
+    taskToggle        = GetS(ini, L"Experimental", L"TaskToggle", taskToggle);
+    taskToggleDelay   = GetF(ini, L"Experimental", L"TaskToggleDelay", taskToggleDelay);
+    taskToggleSeconds = GetF(ini, L"Experimental", L"TaskToggleSeconds", taskToggleSeconds);
+    taskToggleCycles  = GetI(ini, L"Experimental", L"TaskToggleCycles", taskToggleCycles);
+    taskToggleMode    = GetS(ini, L"Experimental", L"TaskToggleMode", taskToggleMode);
+    autoPilotSeconds = GetI(ini, L"Experimental", L"AutoPilotSeconds", autoPilotSeconds);
+    autoPilotDelay   = GetF(ini, L"Experimental", L"AutoPilotDelay", autoPilotDelay);
+    autoPilotPeriod  = GetF(ini, L"Experimental", L"AutoPilotPeriod", autoPilotPeriod);
+    autoPilotButton  = GetS(ini, L"Experimental", L"AutoPilotButton", autoPilotButton);
+    autoPilotWiggleSeconds = GetI(ini, L"Experimental", L"AutoPilotWiggleSeconds", autoPilotWiggleSeconds);
 }
 
 Config& Cfg() { return g_cfg; }

@@ -1,4 +1,4 @@
-// XInput hooks: ELDEN RING polls XInputGetState every frame (via XInput9_1_0.dll,
+﻿// XInput hooks: ELDEN RING polls XInputGetState every frame (via XInput9_1_0.dll,
 // with XInput1_4 also present). We detour GetState / GetStateEx / GetCapabilities
 // / SetState in every loaded XInput module and merge the virtual pad in.
 //
@@ -7,6 +7,7 @@
 // synthetic input.
 #include "xinput_hook.h"
 #include "virtual_pad.h"
+#include "autopilot.h"
 #include "config.h"
 #include "log.h"
 #include <windows.h>
@@ -68,16 +69,25 @@ DWORD Common_GetState(PFN_GetState orig, DWORD user, XINPUT_STATE* st) {
     if (user == 0) InterlockedIncrement(&g_calls);
     if (user != 0 || !st) return r;
     if (r != ERROR_SUCCESS) {
-        // No physical pad: fabricate an idle one only if VR controllers are live.
+        // No physical pad: fabricate an idle one only if VR controllers are live - or if the
+        // autopilot is driving an unattended test run, which must work with no headset at all.
         XINPUT_STATE tmp{};
-        if (!VirtualPadMerge(tmp)) return r;
+        bool have = VirtualPadMerge(tmp);
+        have |= AutoPilotMerge(tmp.Gamepad);
+        // Must claim "connected" even while the autopilot is idle. ELDEN RING polls an empty
+        // slot exactly ONCE and then never asks again, so reporting not-connected during the
+        // startup delay means no later press is ever seen. Measured: 1 poll in a 50 s run.
+        have |= AutoPilotActive();
+        if (!have) return r;
         *st = tmp;
         st->dwPacketNumber = ++g_packet;
         InterlockedIncrement(&g_fabricated);
         return ERROR_SUCCESS;
     }
     XINPUT_GAMEPAD before = st->Gamepad;
-    if (VirtualPadMerge(*st) && std::memcmp(&before, &st->Gamepad, sizeof(before)) != 0) {
+    bool changed = VirtualPadMerge(*st);
+    changed |= AutoPilotMerge(st->Gamepad);
+    if (changed && std::memcmp(&before, &st->Gamepad, sizeof(before)) != 0) {
         st->dwPacketNumber = ++g_packet + st->dwPacketNumber;   // ensure the game notices the change
         InterlockedIncrement(&g_merged);
     }
@@ -90,14 +100,14 @@ template <int I> DWORD WINAPI Hook_SetState(DWORD user, XINPUT_VIBRATION* vib) {
     if (user == 0 && vib && Cfg().rumbleToControllers)
         VirtualPadRumble(vib->wLeftMotorSpeed / 65535.f, vib->wRightMotorSpeed / 65535.f);
     DWORD r = g_mods[I].origSetState ? g_mods[I].origSetState(user, vib) : ERROR_DEVICE_NOT_CONNECTED;
-    if (r != ERROR_SUCCESS && user == 0) { XINPUT_STATE t{}; if (VirtualPadMerge(t)) return ERROR_SUCCESS; }
+    if (r != ERROR_SUCCESS && user == 0) { XINPUT_STATE t{}; if (VirtualPadMerge(t) || AutoPilotActive()) return ERROR_SUCCESS; }
     return r;
 }
 template <int I> DWORD WINAPI Hook_GetCaps(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps) {
     DWORD r = g_mods[I].origGetCaps ? g_mods[I].origGetCaps(user, flags, caps) : ERROR_DEVICE_NOT_CONNECTED;
     if (r != ERROR_SUCCESS && user == 0 && caps) {
         XINPUT_STATE t{};
-        if (VirtualPadMerge(t)) {
+        if (VirtualPadMerge(t) || AutoPilotActive()) {
             std::memset(caps, 0, sizeof(*caps));
             caps->Type = XINPUT_DEVTYPE_GAMEPAD;
             caps->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
@@ -150,14 +160,14 @@ DWORD WINAPI IAT_SetState(DWORD user, XINPUT_VIBRATION* vib) {
     if (user == 0 && vib && Cfg().rumbleToControllers)
         VirtualPadRumble(vib->wLeftMotorSpeed / 65535.f, vib->wRightMotorSpeed / 65535.f);
     DWORD r = g_iatOrigSetState ? g_iatOrigSetState(user, vib) : ERROR_DEVICE_NOT_CONNECTED;
-    if (r != ERROR_SUCCESS && user == 0) { XINPUT_STATE t{}; if (VirtualPadMerge(t)) return ERROR_SUCCESS; }
+    if (r != ERROR_SUCCESS && user == 0) { XINPUT_STATE t{}; if (VirtualPadMerge(t) || AutoPilotActive()) return ERROR_SUCCESS; }
     return r;
 }
 DWORD WINAPI IAT_GetCaps(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps) {
     DWORD r = g_iatOrigGetCaps ? g_iatOrigGetCaps(user, flags, caps) : ERROR_DEVICE_NOT_CONNECTED;
     if (r != ERROR_SUCCESS && user == 0 && caps) {
         XINPUT_STATE t{};
-        if (VirtualPadMerge(t)) {
+        if (VirtualPadMerge(t) || AutoPilotActive()) {
             std::memset(caps, 0, sizeof(*caps));
             caps->Type = XINPUT_DEVTYPE_GAMEPAD; caps->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
             caps->Gamepad.wButtons = 0xF3FF; caps->Gamepad.bLeftTrigger = caps->Gamepad.bRightTrigger = 0xFF;
