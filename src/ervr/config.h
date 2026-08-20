@@ -193,8 +193,51 @@ struct Config {
     float handAimStrength = 1.0f;
     // M2 spike: dump the frame task-group table once at startup. Read-only, but it scans
     // process memory, so it costs a second or two and is off by default.
+    // [VR] full-stereo pass 2: task-group indices kept active (ranges, e.g. "144-158,164").
+    // 106 = CameraStep (our hook writes the second eye there). 118,123-125 = the MoveMap
+    // post-physics family hosting the once-per-frame camera-propagation chain (CamWatch
+    // census: exe+0x680bxx + CamFinalize run in group 123) - REQUIRED, or pass 2 renders
+    // pass 1's captured camera regardless of what the camera objects hold. 142 =
+    // ScaleformStep (UI list rebuild), 144-158 = Draw_Pre..Draw_Post, 164 = Flip.
+    std::string vrPass2Keep = "106,118,123-125,144-158,164";
+    // Full-frame second pass: instead of a draw-only pass with cherry-picked groups, run
+    // pass 2 as a COMPLETE engine frame with the game's per-frame delta time swapped to
+    // Pass2Dt (~0) for the pass - everything runs (environment lighting, UI, all producers;
+    // no crashes from skipped setup) but the simulation advances by ~nothing, so both eyes
+    // still share one sim instant. The draw-only sweeps could not find the environment-
+    // lighting producer (2026-08-20: every candidate group failed and broad keeps crash),
+    // which is exactly the case this mode exists for. Excluded even here: PadStep (input
+    // edge replay), the world-origin shift pair, AI GC. Numpad 5 toggles it live.
+    bool  vrPass2FullFrame = false;
+    float vrPass2Dt = 0.000001f;   // seconds; ~0 = frozen sim, tiny to dodge div-by-zero
+    // 1 = each Present carries the PREVIOUS pass's render (pipelined renderer): the XR frame
+    // opens at pass 2's present (left eye) and closes at pass 1's (right). MEASURED on
+    // 2026-08-20 with the pitch probe: pass-2 content lands at pass-1's present (tilting
+    // pass 2 tilted the LEFT eye under lag 0), so 1 is the correct value on this renderer -
+    // it pairs both eyes from ONE sim frame with poses matching their content.
+    int   vrPresentLag = 1;
+    // Serialise the two engine passes on the GPU. The pump starts pass 2 on the CPU the
+    // moment pass 1's queue_tasks returns, while the GPU is still executing pass 1's draws;
+    // if the engine's per-frame upload ring does not advance between the passes, pass 2's
+    // constant uploads overwrite data the GPU is mid-read on (per-object dark/flicker,
+    // worst in pass 1's image). 0 = off, 1 = drain the present queue before pass 2,
+    // 2 = also drain after pass 2 (protects pass 2's image from the NEXT frame's uploads).
+    // DISPROVEN as the cause of the 2026-08-20 dark/flicker (drained 3.8 ms/pass, no visual
+    // change) - kept for future A/B; default off.
+    int   vrGpuSync = 0;
+    // Numpad hotkeys for the stereo A/B experiments (see debug_keys.h). On by default: they
+    // do nothing until pressed, and they are the only way to drive the tests in a headset.
+    bool  debugKeys = true;
+    float vrDebugPass2Pitch = 0.f;   // degrees; diagnostic only
+
     // [Patches] - in-process .text patches (uberhalit's EldenRingFpsUnlockAndMore, MIT)
     int   patchFpsTarget = 0;         // 0 = leave the 60 fps cap; 30..360 = unlock to this
+
+    // Camera-capture hunt: PAGE_GUARD the render camera and log every reader's rip/regs.
+    // Finds where the renderer captures its once-per-frame camera copy (see cam_watch.h).
+    bool  camWatch = false;
+    float camWatchDelay = 5.f;      // seconds after player-active before arming
+    float camWatchSeconds = 3.f;    // how long the guard stays armed
 
     bool  m2TaskProbe = false;
     // M2 experiment: temporarily clear the `active` byte of one named task group and watch
@@ -203,6 +246,7 @@ struct Config {
     bool  taskQueueProbe = false;     // hook CSTask::queue_tasks: caller stack, thread, synchronicity
     bool  taskDumpLists = false;      // dump every group's registered tasks with RTTI names (needs TaskQueueProbe)
     bool  taskDoublePumpTest = false; // A/B: run a draw-only second engine frame per frame (needs TaskQueueProbe)
+    bool  taskContentProbe = false;   // flat routing/brightness probe: pitch pass 2 + read back pixels per present
     std::string taskToggle;
     float taskToggleDelay = 45.f;
     float taskToggleSeconds = 3.f;

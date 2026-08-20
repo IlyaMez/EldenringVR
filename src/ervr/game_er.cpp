@@ -8,11 +8,13 @@
 #include "game_er.h"
 #include "game_memory.h"
 #include "config.h"
+#include "debug_keys.h"
 #include "log.h"
 #include "vr_backend.h"
 #include "midhook.h"
 #include "rtti.h"
 #include "combat.h"
+#include "frame_probe.h"
 #include "stereo.h"
 #include <windows.h>
 #include <MinHook.h>
@@ -191,6 +193,12 @@ double NowSec() {
 }
 
 // VR (right-handed, -Z forward) -> game (left-handed, +Z forward): mirror Z.
+// The numpad hotkey wins over the ini so the experiment can be driven from inside the headset.
+float DebugPass2PitchDeg() {
+    const float k = DebugKeysPass2Pitch();
+    return k >= 0.f ? k : Cfg().vrDebugPass2Pitch;
+}
+
 Vec3 ToGame(const Vec3& v) { return {v.x, v.y, -v.z}; }
 Quat ToGame(const Quat& q) { return {-q.x, -q.y, q.z, q.w}; }
 
@@ -951,11 +959,72 @@ struct SecondEyeStash {
     uint64_t pair = 0;
     float fovY = 0;              // what pass 1 read back from Cam_Fov (pass 2 renders the same)
     Vec3  headPos; Quat headRot; // XR convention, for the report
+    // The finished pass-2 camera basis, computed by GameERApplySecondEyeCamera and re-applied
+    // by UpdateCamera on every camera-step call DURING pass 2. Writing the matrices once
+    // between the passes proved insufficient (DebugPass2Pitch showed in NEITHER eye): the
+    // renderer picks the camera up inside the camera-step machinery, so pass 2 must re-run
+    // group 106 (Pass2Keep) and the hook must feed it the other eye - the same write path
+    // pass 1 provably renders from.
+    bool  camValid = false;
+    Vec3  camR, camU, camF, camPos;
 };
 SecondEyeStash g_secondEye;
 
 void UpdateCamera(uint8_t* player, const FrameInfo& f) {
     const Config& c = Cfg();
+    // Draw-only second pass: the camera step re-runs (Pass2Keep includes 106) purely so the
+    // engine transfers the camera into its render-side state, and the camera it must carry
+    // is the OTHER eye's. No latch, no report, no stash: pass 2 renders, it does not simulate.
+    if (FramePumpCurrentPass() == 2) {
+        Vec3 r2, u2, f2, p2; float fov2;
+        bool have = false;
+        {
+            std::lock_guard<std::mutex> g(g_secondEye.mtx);
+            if (g_secondEye.camValid) {
+                r2 = g_secondEye.camR; u2 = g_secondEye.camU;
+                f2 = g_secondEye.camF; p2 = g_secondEye.camPos;
+                fov2 = g_secondEye.fovY;
+                have = true;
+            }
+        }
+        // Flat experiments (pump mode 1, no headset): no second-eye stash exists, but the
+        // pitch diagnostic still needs a distinguishable pass-2 camera on the monitor.
+        if (!have) {
+            const float pd = DebugPass2PitchDeg();
+            if (pd == 0.f || !g_haveCamMtx.load(std::memory_order_relaxed)) return;
+            float m[16];
+            { std::lock_guard<std::mutex> g(g_camMtxLock); memcpy(m, g_lastCamMtx, sizeof(m)); }
+            r2 = {m[0], m[1], m[2]}; u2 = {m[4], m[5], m[6]};
+            f2 = {m[8], m[9], m[10]}; p2 = {m[12], m[13], m[14]};
+            const Quat pq = Quat::AxisAngle(r2, Deg2Rad(pd));
+            u2 = pq.Rotate(u2); f2 = pq.Rotate(f2);
+            fov2 = 0.f;
+        }
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            LOGI("[cam] pass-2 camera path ACTIVE: second-eye basis re-applied at camera-step time");
+        }
+        uint8_t* pcs2[4]; const int npc2 = AllPersCams(pcs2);
+        for (int i = 0; i < npc2; ++i) {
+            WriteCamMatrix(pcs2[i] + off::Cam_Matrix, r2, u2, f2, p2);
+            if (fov2 > 0.05f) SafeWrite(pcs2[i] + off::Cam_Fov, &fov2, 4);
+        }
+        if (uint8_t* cc = ChrCam()) {
+            WriteCamMatrix(cc + off::Cam_Matrix, r2, u2, f2, p2);
+            if (fov2 > 0.05f) SafeWrite(cc + off::Cam_Fov, &fov2, 4);
+        }
+        if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed))
+            WriteCamMatrix(fc + off::Cam_Matrix, r2, u2, f2, p2);
+        // Keep the reassert hooks (follow cam, CamFinalize) replaying THIS eye for the rest
+        // of the pass.
+        std::lock_guard<std::mutex> g(g_camMtxLock);
+        float m[16] = { r2.x, r2.y, r2.z, 0.f, u2.x, u2.y, u2.z, 0.f,
+                        f2.x, f2.y, f2.z, 0.f, p2.x, p2.y, p2.z, 1.f };
+        memcpy(g_lastCamMtx, m, sizeof(m));
+        g_haveCamMtx.store(true, std::memory_order_relaxed);
+        return;
+    }
     float yaw = f.baseYaw, pitch = 0.f;
     Vec3 r, u, fw;
     // Which eye this frame renders, if the render thread is driving stereo.
@@ -971,6 +1040,15 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
         Quat q = stereo ? qHead * el.req.rot : qHead;   // per-eye cant; identity on most headsets
         fw = q.Rotate({0, 0, 1}); r = q.Rotate({1, 0, 0}); u = q.Rotate({0, 1, 0});
     } else CamBasis(yaw, pitch, r, u, fw);
+    // Capture probe (Numpad 3, third state): tilt the REAL pass's camera. If both eyes show
+    // the tilt, the renderer captures its camera once per sim frame from pass 1 - which is
+    // why nothing written for pass 2 has ever reached pass 2's image. One tilted eye instead
+    // names the eye that receives pass 1's content.
+    const float p1p = DebugKeysPass1Pitch();
+    if (p1p != 0.f) {
+        const Quat pq = Quat::AxisAngle(r, Deg2Rad(p1p));
+        u = pq.Rotate(u); fw = pq.Rotate(fw);
+    }
     // Positional head tracking: nothing downstream adds an HMD offset any more, so the eye
     // we compute is the eye that gets rendered.
     Vec3 pos = f.eye;
@@ -1436,6 +1514,16 @@ void DumpMatrix(const char* tag, uint8_t* cam) {
 double g_lastCamDump = 0;
 float g_lastWrittenYaw = 0.f; bool g_haveWrittenYaw = false;
 long g_camForeign = 0, g_camChecks = 0;   // how often the chr-cam held a yaw other than ours when we came to write
+
+// Which camera machinery re-runs in the draw-only second pass. The renderer captures its
+// camera SOMEWHERE the pass-2 keep set does not cover (writing every camera object at
+// camera-step time in pass 2 changes nothing on screen); a hook that fires in pass 1 but
+// never in pass 2 marks gated machinery - the capture point is downstream of one of those.
+struct PassCount { volatile long p1 = 0, p2 = 0; };
+PassCount g_cntFinalize, g_cntFollow, g_cntUpdFollow, g_cntMms, g_cntModelPos, g_cntPoseEval;
+void CountPass(PassCount& c) {
+    InterlockedIncrement(FramePumpCurrentPass() == 2 ? &c.p2 : &c.p1);
+}
 // Returns true when our camera was written.
 bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
     const Config& c = Cfg();
@@ -1465,6 +1553,18 @@ bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
                 LOGW("[cam] foreign camera yaw in %ld of %ld writes in the last 5 s - an unhooked writer (lock-on camera?) is moving the view. FaceCameraMode=strafe avoids the game's lock-on camera.", g_camForeign, g_camChecks);
             long fy = InterlockedExchange(&g_finalYawForeign, 0), fp = InterlockedExchange(&g_finalPosForeign, 0);
             if (fy + fp) LOGI("[cam] final render camera differed from our write: yaw off in %ld, position off (>5 cm) in %ld of %ld checks (5 s) - the game step re-smooths the final camera", fy, fp, g_camChecks);
+            // Per-pass camera-machinery census (only meaningful while the pump runs).
+            {
+                long f1 = InterlockedExchange(&g_cntFinalize.p1, 0), f2 = InterlockedExchange(&g_cntFinalize.p2, 0);
+                long o1 = InterlockedExchange(&g_cntFollow.p1, 0),   o2 = InterlockedExchange(&g_cntFollow.p2, 0);
+                long u1 = InterlockedExchange(&g_cntUpdFollow.p1, 0),u2 = InterlockedExchange(&g_cntUpdFollow.p2, 0);
+                long m1 = InterlockedExchange(&g_cntMms.p1, 0),      m2 = InterlockedExchange(&g_cntMms.p2, 0);
+                long d1 = InterlockedExchange(&g_cntModelPos.p1, 0), d2 = InterlockedExchange(&g_cntModelPos.p2, 0);
+                long e1 = InterlockedExchange(&g_cntPoseEval.p1, 0), e2 = InterlockedExchange(&g_cntPoseEval.p2, 0);
+                if (f2 + o2 + u2 + m2 + d2 + e2 + f1 + o1 + u1 + m1 + d1 + e1)
+                    LOGI("[cam] 5s hook calls pass1/pass2: finalize %ld/%ld follow %ld/%ld updFollow %ld/%ld mms %ld/%ld modelPos %ld/%ld poseEval %ld/%ld",
+                         f1, f2, o1, o2, u1, u2, m1, m2, d1, d2, e1, e2);
+            }
             g_camForeign = 0; g_camChecks = 0; s_win = nw;
         }
     }
@@ -1502,10 +1602,12 @@ void ReassertCamera() {
     __try { bool d; CameraStepBody(d, false); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
 }
 void __fastcall Hook_MmsUpdateChrCam(void* a) {
+    CountPass(g_cntMms);
     g_origMms(a);
     ReassertCamera();
 }
 void __fastcall Hook_FollowCamFollow(void* fc, float dt, void* c) {
+    CountPass(g_cntFollow);
     g_followCamPtr.store(fc, std::memory_order_relaxed);
     // Setting reset_camera disables the follow cam's position interpolation (erfps2 trick) so it stops fighting us.
     uint8_t saved = 0; bool have = false;
@@ -1525,6 +1627,7 @@ void __fastcall Hook_FollowCamFollow(void* fc, float dt, void* c) {
 // Outer follow-cam update (erfps2's UPDATE_FOLLOW_CAM): it keeps writing camera output *after*
 // ChrExFollowCam::follow returns, which was the writer the watchdog kept counting while moving.
 void __fastcall Hook_UpdateFollowCam(void* fc) {
+    CountPass(g_cntUpdFollow);
     g_followCamPtr.store(fc, std::memory_order_relaxed);
     g_origUpdFollow(fc);
     if (Cfg().fpOwnChrCam) ReassertCamera();
@@ -1541,6 +1644,7 @@ void ReassertCameraMatrix() {
     if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) SafeWrite(fc + off::Cam_Matrix, m, sizeof(m));
 }
 uint64_t __fastcall Hook_CamFinalize(void* a, void* b, void* c, void* d) {
+    CountPass(g_cntFinalize);
     uint64_t rv = g_origCamFinalize(a, b, c, d);
     if (g_tripped || !FirstPersonActive() || !Cfg().fpCameraFinalWrite) return rv;
     __try { ReassertCameraMatrix(); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
@@ -1613,12 +1717,14 @@ void RewriteIfClobbered() {
     UpdateArms(player, f, 3);
 }
 uint64_t __fastcall Hook_PoseEval(void* a, void* b, void* c, void* d) {
+    CountPass(g_cntPoseEval);
     uint64_t rv = g_origPoseEval(a, b, c, d);
     if (g_tripped || !FirstPersonActive() || !Cfg().fpPoseAfterHavok || !Cfg().handTracking) return rv;
     __try { RewriteIfClobbered(); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     return rv;
 }
 void __fastcall Hook_UpdateChrModelPos(void* ctrl) {
+    CountPass(g_cntModelPos);
     // Pre-write as well: the buffer measured OURS after this hook still rendered the layer's animation, so the
     // renderer's pose consumption happens INSIDE this function - the pose present at entry is what gets skinned.
     // The upper-body layer ran just before us; put ours back first, then let the original consume it.
@@ -1634,7 +1740,9 @@ void __fastcall Hook_CameraStep(void* a, void* b) {
     HookCameraStepImpl(a, b);
 }
 void HookCameraStepImpl(void* a, void* b) {
-    ++g_frame;
+    // Pass 2 is the SAME sim frame drawn again - keep every per-frame cache (BuildFrame,
+    // eye latch) on pass 1's values by not advancing the frame counter.
+    if (FramePumpCurrentPass() != 2) ++g_frame;
     bool skip = false;
     if (!g_tripped && FirstPersonActive()) {
         __try { CameraStepBody(skip, false); }
@@ -1693,7 +1801,10 @@ void HkBody() {
     // Re-assert the strafe flags here too: the camera hook runs once, at one point in the frame, and the game
     // is free to put the character back into free-turn before it reads them.
     ApplyFaceCamera(player, f.root, f.bodyYaw);
-    DirectLocomotion(player, f);
+    // Full-frame pass 2 re-runs the behavior/pose machinery at dt~0: re-applying the ARMS
+    // is wanted (pass 2's render must show the VR pose too), but movement and combat are
+    // once-per-SIM-frame actions and must not double-fire.
+    if (FramePumpCurrentPass() != 2) DirectLocomotion(player, f);
     UpdateArms(player, f);
 }
 void HkHandler(MidHookRegs*, void*) {
@@ -1704,7 +1815,7 @@ void HkHandler(MidHookRegs*, void*) {
         __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     }
     // Physical combat: inject the AttackBehavior event once per frame after the arm pose is written.
-    if (g_status.cameraHooked) CombatGameFrame(MainPlayer(), g_frame);
+    if (g_status.cameraHooked && FramePumpCurrentPass() != 2) CombatGameFrame(MainPlayer(), g_frame);
 }
 
 // ---------------------------------------------------------------- init
@@ -1753,19 +1864,64 @@ bool GameERApplySecondEyeCamera() {
     }
     Vec3 r, u, fw, pos;
     if (haveHeadBasis) {
-        const Quat q = qHead * rot;   // per-eye cant, identity on most headsets
+        Quat q = qHead * rot;   // per-eye cant, identity on most headsets
+        // Diagnostic: tilt ONLY the second pass's camera. Whichever headset eye shows the
+        // tilted world is the eye that receives pass 2's CONTENT - the 30-second test for
+        // whether presents carry their own pass's render or lag one behind ([VR] PresentLag).
+        if (DebugPass2PitchDeg() != 0.f)
+            q = q * Quat::AxisAngle({1, 0, 0}, Deg2Rad(DebugPass2PitchDeg()));
         r = q.Rotate({1, 0, 0}); u = q.Rotate({0, 1, 0}); fw = q.Rotate({0, 0, 1});
         pos = posBase + qHead.Rotate(offset);   // offset lives in the HEAD frame, not the canted one
     } else {
         r = br; u = bu; fw = bf;
+        if (DebugPass2PitchDeg() != 0.f) {
+            const Quat pq = Quat::AxisAngle(r, Deg2Rad(DebugPass2PitchDeg()));
+            u = pq.Rotate(u); fw = pq.Rotate(fw);
+        }
         pos = posBase + r * offset.x + u * offset.y + fw * offset.z;
     }
     uint8_t* pcs[4]; const int npc = AllPersCams(pcs);
     for (int i = 0; i < npc; ++i) WriteCamMatrix(pcs[i] + off::Cam_Matrix, r, u, fw, pos);
     if (uint8_t* cc = ChrCam()) WriteCamMatrix(cc + off::Cam_Matrix, r, u, fw, pos);
     if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
+    // Retain the finished basis: UpdateCamera re-applies it on every camera-step call during
+    // pass 2 (the write above, alone, never reached the renderer - see SecondEyeStash).
+    {
+        std::lock_guard<std::mutex> g(g_secondEye.mtx);
+        g_secondEye.camValid = true;
+        g_secondEye.camR = r; g_secondEye.camU = u;
+        g_secondEye.camF = fw; g_secondEye.camPos = pos;
+    }
     StereoReportEye(rep);
     return true;
+}
+
+// Content-probe experiment: rewrite every camera slot as the LAST written camera pitched by
+// `pitchDeg` about its own right axis. Called between engine passes (same safe point as the
+// second-eye write) to make pass 2's render visually distinguishable from pass 1's without
+// any VR session - the flat harness then identifies which Present carries which pass.
+bool GameERDebugPitchCamera(float pitchDeg) {
+    if (!g_haveCamMtx.load(std::memory_order_relaxed)) return false;
+    float m[16];
+    { std::lock_guard<std::mutex> g(g_camMtxLock); memcpy(m, g_lastCamMtx, sizeof(m)); }
+    Vec3 r{m[0], m[1], m[2]}, u{m[4], m[5], m[6]}, fw{m[8], m[9], m[10]}, pos{m[12], m[13], m[14]};
+    const Quat pq = Quat::AxisAngle(r, Deg2Rad(pitchDeg));
+    u = pq.Rotate(u); fw = pq.Rotate(fw);
+    uint8_t* pcs[4]; const int npc = AllPersCams(pcs);
+    if (npc == 0) return false;
+    for (int i = 0; i < npc; ++i) WriteCamMatrix(pcs[i] + off::Cam_Matrix, r, u, fw, pos);
+    if (uint8_t* cc = ChrCam()) WriteCamMatrix(cc + off::Cam_Matrix, r, u, fw, pos);
+    if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
+    return true;
+}
+
+// CamWatch target: the first perspective camera - the chain TGA's freecam writes and the one
+// whose matrix provably steers the render each frame, matrix through fov (0x10..0x54).
+uint8_t* GameERCamWatchTarget(uint32_t* outLen) {
+    uint8_t* pc = PersCam1();
+    if (!pc) return nullptr;
+    if (outLen) *outLen = (uint32_t)(off::Cam_Fov + 4 - off::Cam_Matrix);
+    return pc + off::Cam_Matrix;
 }
 
 bool GameERInit() {

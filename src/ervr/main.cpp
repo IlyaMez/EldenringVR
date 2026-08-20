@@ -15,8 +15,10 @@
 #include "combat.h"
 #include "reshade_addon.h"
 #include "stereo.h"
+#include "debug_keys.h"
 #include "patches_er.h"
 #include "frame_probe.h"
+#include "cam_watch.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -93,6 +95,8 @@ DWORD WINAPI Worker(LPVOID) {
                 LOGI("ReShade add-on live (D3D12 capture + XR submission active)");
             }
             FrameProbeTick();   // M2 spike; no-op unless [Experimental] TaskProbe=true
+            CamWatchTick();     // camera-capture hunt; no-op unless [Experimental] CamWatch=true
+            DebugKeysTick();    // numpad A/B hotkeys for the stereo experiments
         }
         // Hot-reload the ini (any key except VRRuntime/LogLevel/PollHz takes effect immediately).
         if (t - lastIniCheck > 1.0) {
@@ -121,10 +125,23 @@ DWORD WINAPI Worker(LPVOID) {
                  gs.versionOk, gs.cameraHooked, gs.skeletonHooked, gs.playerFound, gs.boneCount, gs.armsActive, gs.camCalls, gs.camMs, gs.hkCalls, gs.hkSolves, gs.hkMs);
             ReShadeStats rs = ReShadeAddonGetStats();
             StereoStats ss = StereoGetStats();
-            LOGD("hb: xr: addon %d d3d12 %d bound %d | 5s: presents %ld, submitted %ld (stereo %ld), submitFails %ld, blitFails %ld | back buffer %ux%u fmt %u | crop %.0f%%x%.0f%% | submit %.2f ms | pump: %ld passes, %.1f ms",
+            static double s_pumpT = 0;
+            const double nowT = Now();
+            const long pumpN = FramePumpTakePasses();
+            const double pumpHz = (s_pumpT > 0 && nowT > s_pumpT) ? pumpN / (nowT - s_pumpT) : 0;
+            s_pumpT = nowT;
+            LOGD("hb: xr: addon %d d3d12 %d bound %d | 5s: presents %ld, submitted %ld (stereo %ld), submitFails %ld, blitFails %ld | back buffer %ux%u fmt %u | crop %.0f%%x%.0f%% | submit %.2f ms | pump: %.0f Hz, %.1f ms, sync %.1f ms",
                  rs.registered, rs.d3d12, ss.graphicsBound, rs.presents, ss.frames, ss.stereoFrames, ss.submitFails, ss.blitFails,
                  rs.width, rs.height, (unsigned)rs.format, ss.cropU * 100.f, ss.cropV * 100.f, ss.lastSubmitMs,
-                 FramePumpTakePasses(), FramePumpLastMs());
+                 pumpHz, FramePumpLastMs(), FramePumpGpuSyncLastMs());
+            if (ss.eyeBlitL || ss.eyeBlitR || ss.eyeDesync)
+                LOGD("hb: eyes: L %ld / R %ld blits, desync %ld", ss.eyeBlitL, ss.eyeBlitR, ss.eyeDesync);
+            // The engine's sim step is a FIXED 1/60 s, so a loop below 60 Hz is not just
+            // lower fps - the whole game runs at loopHz/60 speed. Under stereo the loop is
+            // usually GPU-bound; the fix is lowering the game's resolution/settings.
+            if (pumpHz > 5.0 && pumpHz < 54.0)
+                LOGW("[stereo] loop at %.0f Hz -> GAME SPEED %.0f%%. GPU cannot hold 60 pairs/s; "
+                     "lower the game resolution or graphics settings", pumpHz, pumpHz / 60.0 * 100.0);
             CombatStatus cs = CombatGetStatus();
             LOGD("hb: combat: taeHook %d physical %d learned L%d H%d Left%d stamina %d | 5s: swings %ld, injected %ld",
                  cs.taeHooked, cs.physical, cs.learnedLight, cs.learnedHeavy, cs.learnedLeft, cs.stamina, cs.swings, cs.injected);

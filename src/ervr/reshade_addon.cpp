@@ -1,4 +1,5 @@
 #include "reshade_addon.h"
+#include "frame_probe.h"
 #include "stereo.h"
 #include "log.h"
 #include <windows.h>

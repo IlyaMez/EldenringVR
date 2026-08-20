@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -279,13 +280,55 @@ public:
         }
         if (layer.quadValid && quad_.handle != XR_NULL_HANDLE) {
             const float aspect = quad_.h ? (float)quad_.w / (float)quad_.h : 1.777f;
-            quad.space = viewSpace_;                       // head-locked cinema screen
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = quad_.handle;
             quad.subImage.imageArrayIndex = 0;
             quad.subImage.imageRect = {{0, 0}, {(int32_t)quad_.w, (int32_t)quad_.h}};
-            quad.pose = {{0, 0, 0, 1}, {0, 0, -layer.quadDistanceM}};
             quad.size = {layer.quadWidthM, layer.quadWidthM / aspect};
+            // WORLD-locked screen with a lazy follow, not head-locked. The compositor can
+            // reproject world-locked content perfectly at any submit rate, but view-locked
+            // content must move WITH the head between submits - which reads as judder the
+            // moment submissions run below the display rate (they always do here). The
+            // screen re-anchors only when the head has turned/moved enough to lose it.
+            XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+            bool world = false;
+            if (XR_SUCCEEDED(xrLocateSpace(viewSpace_, appSpace_, displayTime_.load(), &loc)) &&
+                (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
+                (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+                const XrQuaternionf& q = loc.pose.orientation;
+                // head forward = q * (0,0,-1), flattened to the horizon
+                XrVector3f fwd{-2.f * (q.x * q.z + q.w * q.y),
+                               0.f,
+                               -(1.f - 2.f * (q.x * q.x + q.y * q.y))};
+                const float len = std::sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
+                if (len > 0.2f) {   // not staring straight up/down
+                    fwd.x /= len; fwd.z /= len;
+                    const XrVector3f& hp = loc.pose.position;
+                    const float dxa = hp.x - quadAnchorHead_.x, dza = hp.z - quadAnchorHead_.z;
+                    const float dot = fwd.x * quadAnchorFwd_.x + fwd.z * quadAnchorFwd_.z;
+                    if (!quadAnchorValid_ || layer.quadDistanceM != quadAnchorDist_ ||
+                        dot < 0.75f /* ~41 deg */ || dxa * dxa + dza * dza > 0.5f * 0.5f ||
+                        std::fabs(hp.y - quadAnchorHead_.y) > 0.5f) {
+                        const float th = std::atan2(-fwd.x, -fwd.z);
+                        quadAnchor_.orientation = {0.f, std::sin(th * 0.5f), 0.f, std::cos(th * 0.5f)};
+                        quadAnchor_.position = {hp.x + fwd.x * layer.quadDistanceM,
+                                                hp.y,
+                                                hp.z + fwd.z * layer.quadDistanceM};
+                        quadAnchorHead_ = hp;
+                        quadAnchorFwd_ = fwd;
+                        quadAnchorDist_ = layer.quadDistanceM;
+                        quadAnchorValid_ = true;
+                    }
+                    quad.space = appSpace_;
+                    quad.pose = quadAnchor_;
+                    world = true;
+                }
+            }
+            if (!world) {   // tracking lost: fall back to the old head-locked placement
+                quadAnchorValid_ = false;
+                quad.space = viewSpace_;
+                quad.pose = {{0, 0, 0, 1}, {0, 0, -layer.quadDistanceM}};
+            }
             layers[count++] = (const XrCompositionLayerBaseHeader*)&quad;
         }
 
@@ -761,6 +804,12 @@ private:
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     std::vector<XrViewConfigurationView> viewConfig_;
     Swap        eyes_[2], quad_;
+    // Lazy world anchor for the cinema quad (render thread only).
+    bool        quadAnchorValid_ = false;
+    XrPosef     quadAnchor_{};
+    XrVector3f  quadAnchorHead_{};
+    XrVector3f  quadAnchorFwd_{};
+    float       quadAnchorDist_ = 0.f;
     int64_t     eyeFormat_ = 0;
     Actions     actions_;
     ID3D12Device* device_ = nullptr;

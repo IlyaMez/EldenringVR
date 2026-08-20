@@ -30,6 +30,11 @@ bool GameERPlayerActive();
 // Full stereo: write the second eye's camera between the two engine passes of one frame.
 // No-op (false) unless UpdateCamera stashed a second-eye request this frame.
 bool GameERApplySecondEyeCamera();
+// Content-probe experiment: rewrite all camera slots as the last camera pitched by N degrees.
+bool GameERDebugPitchCamera(float pitchDeg);
+// The render camera's matrix+fov range (CSPersCam via FieldArea->GameRend), for the
+// CamWatch guard-page probe. Null until in-game.
+uint8_t* GameERCamWatchTarget(uint32_t* outLen);
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

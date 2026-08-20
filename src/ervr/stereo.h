@@ -68,6 +68,8 @@ struct StereoStats {
     long  submitFails = 0;
     long  blitFails = 0;
     long  stereoFrames = 0;   // of those, projection-layer (i.e. actually stereo) frames
+    long  eyeBlitL = 0, eyeBlitR = 0;   // successful per-eye blits (full mode: should match)
+    long  eyeDesync = 0;      // report/pass eye mismatches (FIFO fell out of step)
     float lastSubmitMs = 0;
     float cropU = 1, cropV = 1;   // fraction of the back buffer each eye actually uses
 };

@@ -40,7 +40,29 @@ constexpr int         kOffHertzBase = 2;    // the first mov
 constexpr int         kOffHertzInt1 = 3;    // +base: the 0x3C (60) immediate
 constexpr int         kOffHertzInt2 = 10;   // +base: the 1 (change flag) immediate
 
+// Framelock imm resolve, shared by the fps unlock and the full-frame pass-2 dt swap.
+uint8_t* ResolveFrameDtImm() {
+    static uint8_t* s_at = nullptr;
+    static bool s_tried = false;
+    if (!s_tried) {
+        s_tried = true;
+        uint8_t* fl = AobScan(kPatFramelock);
+        int off = kOffFramelock;
+        if (!fl) { fl = AobScan(kPatFramelockFuzzy); off = kOffFramelockFuzzy; }
+        if (fl) s_at = fl + off;
+    }
+    return s_at;
+}
+
 } // namespace
+
+float* PatchesFrameDtImm() { return (float*)ResolveFrameDtImm(); }
+
+bool PatchesWriteFrameDt(float dt) {
+    uint8_t* at = ResolveFrameDtImm();
+    if (!at) return false;
+    return PatchWrite(at, &dt, 4);
+}
 
 void PatchesInit() {
     const int fps = Cfg().patchFpsTarget;
@@ -49,23 +71,21 @@ void PatchesInit() {
     const int target = fps < 30 ? 30 : (fps > 360 ? 360 : fps);
     auto* base = (uint8_t*)GetModuleHandleW(nullptr);
 
-    uint8_t* fl = AobScan(kPatFramelock);
-    int off = kOffFramelock;
-    if (!fl) { fl = AobScan(kPatFramelockFuzzy); off = kOffFramelockFuzzy; }
-    if (!fl) {
+    uint8_t* flimm = ResolveFrameDtImm();
+    if (!flimm) {
         LOGW("[patch] FpsTarget=%d: framelock pattern not found (game patch changed it?); no unlock", fps);
         return;
     }
     float before = 0.f;
-    memcpy(&before, fl + off, 4);
+    memcpy(&before, flimm, 4);
     const float dt = 1.0f / (float)target;
-    if (!PatchWrite(fl + off, &dt, 4)) {
-        LOGW("[patch] framelock found at rva 0x%llx but the write failed", (unsigned long long)(fl - base));
+    if (!PatchWrite(flimm, &dt, 4)) {
+        LOGW("[patch] framelock found at rva 0x%llx but the write failed", (unsigned long long)(flimm - base));
         return;
     }
-    LOGI("[patch] fps unlock: frame tick at rva 0x%llx %s: %.1f -> %d fps (dt %.5f). The game "
+    LOGI("[patch] fps unlock: frame tick at rva 0x%llx: %.1f -> %d fps (dt %.5f). The game "
          "runs slow-motion whenever it cannot actually reach this rate.",
-         (unsigned long long)(fl + off - base), off == kOffFramelock ? "(exact)" : "(fuzzy)",
+         (unsigned long long)(flimm - base),
          before > 1e-6f ? 1.f / before : 0.f, target, dt);
 
     if (uint8_t* hz = AobScan(kPatHertzlock)) {

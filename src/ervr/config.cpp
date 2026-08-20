@@ -93,6 +93,13 @@ void Config::Load(const std::wstring& path) {
     vrFovAxis        = GetS(ini, L"VR", L"FovAxis", vrFovAxis);
     vrIpdMm          = GetF(ini, L"VR", L"IpdMm", vrIpdMm);
     vrColorFix       = GetS(ini, L"VR", L"ColorFix", vrColorFix);
+    vrPass2Keep      = GetS(ini, L"VR", L"Pass2Keep", vrPass2Keep);
+    vrPass2FullFrame = GetB(ini, L"VR", L"Pass2FullFrame", vrPass2FullFrame);
+    vrPass2Dt        = GetF(ini, L"VR", L"Pass2Dt", vrPass2Dt);
+    vrPresentLag     = GetI(ini, L"VR", L"PresentLag", vrPresentLag);
+    vrGpuSync        = GetI(ini, L"VR", L"GpuSync", vrGpuSync);
+    debugKeys        = GetB(ini, L"VR", L"DebugKeys", debugKeys);
+    vrDebugPass2Pitch = GetF(ini, L"VR", L"DebugPass2Pitch", vrDebugPass2Pitch);
 
     btnA = GetS(ini, L"Buttons", L"A", btnA); btnB = GetS(ini, L"Buttons", L"B", btnB);
     btnX = GetS(ini, L"Buttons", L"X", btnX); btnY = GetS(ini, L"Buttons", L"Y", btnY);
@@ -257,11 +264,15 @@ void Config::Load(const std::wstring& path) {
     handAimStrength = GetF(ini, L"Experimental", L"HandAimStrength", handAimStrength);
     patchFpsTarget = GetI(ini, L"Patches", L"FpsTarget", patchFpsTarget);
 
+    camWatch        = GetB(ini, L"Experimental", L"CamWatch", camWatch);
+    camWatchDelay   = GetF(ini, L"Experimental", L"CamWatchDelay", camWatchDelay);
+    camWatchSeconds = GetF(ini, L"Experimental", L"CamWatchSeconds", camWatchSeconds);
     m2TaskProbe    = GetB(ini, L"Experimental", L"TaskProbe", m2TaskProbe);
     taskRegisterTest  = GetB(ini, L"Experimental", L"TaskRegisterTest", taskRegisterTest);
     taskQueueProbe    = GetB(ini, L"Experimental", L"TaskQueueProbe", taskQueueProbe);
     taskDumpLists     = GetB(ini, L"Experimental", L"TaskDumpLists", taskDumpLists);
     taskDoublePumpTest = GetB(ini, L"Experimental", L"TaskDoublePumpTest", taskDoublePumpTest);
+    taskContentProbe   = GetB(ini, L"Experimental", L"TaskContentProbe", taskContentProbe);
     taskToggle        = GetS(ini, L"Experimental", L"TaskToggle", taskToggle);
     taskToggleDelay   = GetF(ini, L"Experimental", L"TaskToggleDelay", taskToggleDelay);
     taskToggleSeconds = GetF(ini, L"Experimental", L"TaskToggleSeconds", taskToggleSeconds);

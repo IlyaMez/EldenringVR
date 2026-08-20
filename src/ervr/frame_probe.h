@@ -12,6 +12,8 @@
 // is only a handle { vptr, CSTask* } and its vtable must not be used for these calls).
 #include <cstdint>
 
+struct ID3D12CommandQueue;
+
 namespace ervr {
 
 struct TaskGroupTable {
@@ -39,6 +41,19 @@ int  FramePumpCurrentPass();
 // Heartbeat: second passes executed since the last read, and the last pass-2 duration.
 long  FramePumpTakePasses();
 float FramePumpLastMs();
+// The game's D3D12 present queue, from the ReShade present handler (null on device loss).
+// [VR] GpuSync drains it with a fence between the two engine passes so pass 2's constant
+// uploads cannot overwrite per-frame GPU data pass 1's draws are still reading.
+void  FramePumpSetGpuQueue(ID3D12CommandQueue* q);
+float FramePumpGpuSyncLastMs();   // CPU time the last drain cost, ms
+
+// Content-probe experiment ([Experimental] TaskContentProbe): samples the back buffer at
+// each Present while active. Called from the ReShade present handler; cheap no-op when idle.
+struct Dx12Frame;
+void FrameProbeOnPresent(const Dx12Frame& f);
+
+// Overrides [VR] Pass2Keep at runtime (numpad hotkeys). Empty string restores the ini value.
+void FrameProbeSetPass2Keep(const char* spec);
 const TaskGroupTable& FrameProbeGetTable(); // valid only after the probe has succeeded
 int  FrameProbeIndexOf(const char* name);   // -1 if absent
 bool FrameProbeGetActive(int index, bool& out);

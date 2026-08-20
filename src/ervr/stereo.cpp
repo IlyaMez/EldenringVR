@@ -1,4 +1,5 @@
 ﻿#include "stereo.h"
+#include "debug_keys.h"
 #include "dx12_blit.h"
 #include "frame_probe.h"
 #include "vr_backend.h"
@@ -18,6 +19,8 @@ bool           g_bound = false;
 ID3D12Device*  g_boundDevice = nullptr;
 
 std::atomic<long>  g_frames{0}, g_submitFails{0}, g_blitFails{0}, g_stereoFrames{0};
+std::atomic<long>  g_eyeBlits[2]{};   // successful per-eye blits (L, R)
+std::atomic<long>  g_eyeDesync{0};    // report popped with the wrong eye for the pass
 std::atomic<float> g_lastSubmitMs{0.f};
 std::atomic<int>   g_mode{(int)StereoMode::Off};
 std::atomic<float> g_cropU{1.f}, g_cropV{1.f};
@@ -125,6 +128,7 @@ Crop MakeCrop(float gameFovY, float aspect, const VRFov& want) {
 
 // Tear down GPU-side state. Caller holds g_mtx.
 void ReleaseLocked() {
+    FramePumpSetGpuQueue(nullptr);
     g_blit.Release();
     g_bound = false;
     g_boundDevice = nullptr;
@@ -204,6 +208,13 @@ void StereoReportEye(const StereoEyeReport& r) {
 
 // Pops the oldest game-frame report, or resets everything when the game thread has gone
 // quiet (menu, loading, no player) so we drop back to cinema instead of freezing stereo.
+// True while the game thread is actively producing stereo reports (used to tell "mono
+// frame" from "stereo pair in flight" without consuming anything from the queue).
+bool ReportsLive() {
+    std::lock_guard<std::mutex> b(g_batonMtx);
+    return g_repCount > 0 && GetTickCount64() - g_lastReportTick <= 500;
+}
+
 bool PopReport(StereoEyeReport& rep) {
     std::lock_guard<std::mutex> b(g_batonMtx);
     if (GetTickCount64() - g_lastReportTick > 500) {
@@ -216,6 +227,21 @@ bool PopReport(StereoEyeReport& rep) {
     g_repHead = (g_repHead + 1) % kRepQ;
     --g_repCount;
     return true;
+}
+
+// Pops the oldest report for `eye`, discarding mismatched reports queued ahead of it. A
+// mismatch means the present/report phasing slipped (mode toggle mid-stream, a dropped
+// pass); eating the stale head re-synchronises within a frame. The first PresentLag=1
+// attempt refused mismatched heads instead - one bad pop put it into a mono path that
+// consumed one report per frame while the game pushed two, and the queue never recovered
+// (the observed permanent desync storm).
+bool PopReportForEye(int eye, StereoEyeReport& rep) {
+    for (int guard = 0; guard <= kRepQ; ++guard) {
+        if (!PopReport(rep)) return false;
+        if ((rep.eye & 1) == eye) return true;
+        g_eyeDesync.fetch_add(1, std::memory_order_relaxed);
+    }
+    return false;
 }
 
 // Crops the back buffer to the runtime's per-eye frustum and blits it into that eye's
@@ -273,6 +299,7 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
             g_submit[e].pose.rot = (rep.headRot * want.pose.rot).Normalized();
             g_submit[e].fov = cr.fov;
             g_submitValid[e] = true;
+            g_eyeBlits[e].fetch_add(1, std::memory_order_relaxed);
             ok = true;
         }
         vr->ReleaseEyeImage((VREye)e);
@@ -343,12 +370,24 @@ bool BlitQuad(IVRBackend* vr, const Dx12Frame& f, BlitParams bp) {
 // with no second pass (menus, loading, stereo not requested) close as a cinema quad on the
 // next pass-1 present.
 void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
+    // ER's renderer may be pipelined one present deep - the image a Present carries can be
+    // the PREVIOUS pass's render, in which case eye content is cross-routed and both eyes
+    // shimmer (each image is submitted with the other camera's pose). PresentLag selects
+    // which pass's present opens the XR frame with the left eye and which closes it with
+    // the right:
+    //   0: pass 1 opens (its present carries its own render)
+    //   1: pass 2 opens (presents lag one pass; verify with [VR] DebugPass2Pitch)
+    // Hot-reloads, so the right value can be found live in the headset.
+    const int keyLag = DebugKeysPresentLag();
+    const int lag = keyLag >= 0 ? keyLag : (Cfg().vrPresentLag != 0 ? 1 : 0);
     const int pass = FramePumpCurrentPass();
+    const bool opens = (lag == 0) ? (pass == 1) : (pass == 2);
     const double t0 = NowMs();
 
-    if (pass == 1) {
+    if (opens) {
         if (g_frameOpen) {
-            // The previous frame never got a pass 2: it was mono. Close it as a quad.
+            // A stereo pair started (left eye blitted) but its pass 2 never presented -
+            // rare stall. Close the dangling XR frame with whatever we have.
             VRSubmitLayer layer;
             layer.quadValid = g_quadPending;
             layer.quadDistanceM = Cfg().vrCinemaDistance;
@@ -360,22 +399,49 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
         }
         VRFrameInfo fi;
         if (!vr->WaitBeginFrame(fi)) return;
-        g_frameOpen = true;
         g_openFi = fi;
         PublishEyeRequest(vr, f, fi);
 
         StereoEyeReport rep;
-        if (fi.shouldRender) {
-            if (PopReport(rep) && (rep.eye & 1) == 0 && BlitEyeFromReport(vr, f, bp, rep)) {
-                // left eye is in its swapchain; the pair completes at pass 2
-            } else {
-                g_quadPending = BlitQuad(vr, f, bp);
-            }
+        bool leftBlitted = false;
+        if (fi.shouldRender && PopReportForEye(0, rep))
+            leftBlitted = BlitEyeFromReport(vr, f, bp, rep);
+        if (leftBlitted) {
+            // The pair completes at pass 2's present; hold the XR frame open until then.
+            g_frameOpen = true;
+        } else {
+            // Mono frame (menu, loading, warm-up): begin-blit-end within THIS present,
+            // exactly like cinema mode. Holding the frame open until the next present made
+            // every quad submission one present late - a ~16 ms head-locked lag that read
+            // as jitter the moment the head moved, even in the main menu.
+            VRSubmitLayer layer;
+            if (fi.shouldRender && BlitQuad(vr, f, bp)) layer.quadValid = true;
+            layer.quadDistanceM = Cfg().vrCinemaDistance;
+            layer.quadWidthM = Cfg().vrCinemaWidth;
+            if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
+            else g_frames.fetch_add(1, std::memory_order_relaxed);
         }
     } else {
-        if (!g_frameOpen) return;   // pass 2 with no open XR frame: nothing sane to do
+        if (!g_frameOpen) {
+            // With PresentLag=1 the closing pass is pass 1 - the ONLY pass menus and mono
+            // frames ever present from - so the immediate cinema treatment lives here.
+            if (lag == 1) {
+                if (ReportsLive()) return;   // stereo pair in flight; pass 2 will open it
+                VRFrameInfo fi;
+                if (!vr->WaitBeginFrame(fi)) return;
+                PublishEyeRequest(vr, f, fi);
+                VRSubmitLayer layer;
+                if (fi.shouldRender && BlitQuad(vr, f, bp)) layer.quadValid = true;
+                layer.quadDistanceM = Cfg().vrCinemaDistance;
+                layer.quadWidthM = Cfg().vrCinemaWidth;
+                if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
+                else g_frames.fetch_add(1, std::memory_order_relaxed);
+                g_lastSubmitMs.store((float)(NowMs() - t0), std::memory_order_relaxed);
+            }
+            return;
+        }
         StereoEyeReport rep;
-        if (g_openFi.shouldRender && PopReport(rep) && (rep.eye & 1) == 1)
+        if (g_openFi.shouldRender && PopReportForEye(1, rep))
             BlitEyeFromReport(vr, f, bp, rep);
         VRSubmitLayer layer;
         const bool didStereo = g_submitValid[0] && g_submitValid[1];
@@ -415,6 +481,7 @@ void StereoOnPresent(const Dx12Frame& f) {
         if (!g_blit.Ensure(f.device)) return;
         g_boundDevice = f.device;
         g_bound = true;
+        FramePumpSetGpuQueue(f.queue);   // the pump's GpuSync fences this queue between passes
         uint32_t ew = 0, eh = 0;
         vr->GetRecommendedEyeSize(ew, eh);
         LOGI("[stereo] bound: back buffer %ux%u fmt %u, eye target %ux%u",
@@ -490,6 +557,9 @@ StereoStats StereoGetStats() {
     s.submitFails = g_submitFails.exchange(0);
     s.blitFails = g_blitFails.exchange(0);
     s.stereoFrames = g_stereoFrames.exchange(0);
+    s.eyeBlitL = g_eyeBlits[0].exchange(0);
+    s.eyeBlitR = g_eyeBlits[1].exchange(0);
+    s.eyeDesync = g_eyeDesync.exchange(0);
     s.lastSubmitMs = g_lastSubmitMs.load();
     s.cropU = g_cropU.load();
     s.cropV = g_cropV.load();

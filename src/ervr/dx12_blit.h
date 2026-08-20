@@ -38,6 +38,19 @@ struct BlitParams {
     }
 };
 
+// Debug probe: synchronously copies a small centre region of `src` (expected in PRESENT
+// state; R10G10B10A2 or R8G8B8A8/B8G8R8A8) to a readback buffer on `queue`, waits, and
+// returns the mean RGB in [0,1] storage (gamma) space. Costs a queue flush per call - for
+// experiments only, never the shipping path.
+// `tagIn` is stored with the submitted copy and echoed back as `*tagOut` alongside the luma
+// it produced, so the caller can pair each luma with the pass it was actually captured on
+// despite the submit-now/read-later latency. Returns true only when a luma is produced.
+bool Dx12SampleBackbuffer(ID3D12CommandQueue* queue, ID3D12Resource* src,
+                          uint32_t tagIn, uint32_t* tagOut, float* outLuma);
+// Which state the probe assumes the back buffer is in during the present event.
+D3D12_RESOURCE_STATES Dx12ProbeSrcState();
+void Dx12SetProbeSrcState(D3D12_RESOURCE_STATES s);
+
 class Dx12Blitter {
 public:
     bool Ensure(ID3D12Device* dev);

@@ -384,4 +384,150 @@ void Dx12Blitter::Release() {
     dev_ = nullptr; queue_ = nullptr; fenceVal_ = 0; ring_ = 0;
     for (auto& f : ringFence_) f = 0;
 }
+
+// ---- debug probe -------------------------------------------------------------------
+// Snapshots a small centre region of the back buffer at present time. Submit-now / read-
+// later with a 2-deep ring, exactly like the blitter uses the game's queue - the earlier
+// version blocked the render thread on a fence wait INSIDE the present event, which crashed
+// D3D12Core/ReShade; this never blocks. Returns the luma from a copy submitted a couple of
+// presents ago, which is fine for an experiment measuring steady-state brightness.
+namespace {
+struct SampleRing {
+    static constexpr UINT W = 128, H = 128, kRowPitch = W * 4;   // 512, 256-aligned
+    static constexpr int  N = 3;
+    ID3D12Device*              dev = nullptr;
+    ID3D12CommandAllocator*    alloc[N]{};
+    ID3D12GraphicsCommandList* list[N]{};
+    ID3D12Resource*            rb[N]{};
+    ID3D12Fence*               fence = nullptr;
+    uint64_t                   fv = 0;
+    uint64_t                   slotFence[N]{};
+    bool                       slotPending[N]{};
+    uint32_t                   slotTag[N]{};
+    int                        cur = 0;
+    DXGI_FORMAT                fmt = DXGI_FORMAT_UNKNOWN;
+
+    void Destroy() {
+        for (auto& l : list) if (l) { l->Release(); l = nullptr; }
+        for (auto& a : alloc) if (a) { a->Release(); a = nullptr; }
+        for (auto& r : rb) if (r) { r->Release(); r = nullptr; }
+        if (fence) { fence->Release(); fence = nullptr; }
+        dev = nullptr; fv = 0; cur = 0;
+        for (int i = 0; i < N; ++i) { slotFence[i] = 0; slotPending[i] = false; }
+    }
+    bool Ensure(ID3D12Device* d) {
+        if (dev == d) return true;
+        Destroy();
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = kRowPitch * H; rd.Height = 1; rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1; rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bool ok = SUCCEEDED(d->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
+        for (int i = 0; i < N && ok; ++i) {
+            ok = SUCCEEDED(d->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc[i]))) &&
+                 SUCCEEDED(d->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc[i], nullptr, IID_PPV_ARGS(&list[i]))) &&
+                 SUCCEEDED(list[i]->Close()) &&
+                 SUCCEEDED(d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb[i])));
+        }
+        if (!ok) { Destroy(); return false; }
+        dev = d;
+        return true;
+    }
+    static float Luma(const void* mem, DXGI_FORMAT f) {
+        const bool tenBit = f == DXGI_FORMAT_R10G10B10A2_UNORM || f == DXGI_FORMAT_R10G10B10A2_TYPELESS;
+        const bool bgra = f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        double sr = 0, sg = 0, sb = 0;
+        for (UINT y = 0; y < H; ++y) {
+            const uint32_t* row = (const uint32_t*)((const uint8_t*)mem + (size_t)y * kRowPitch);
+            for (UINT x = 0; x < W; ++x) {
+                const uint32_t v = row[x];
+                if (tenBit) { sr += (v & 1023) / 1023.0; sg += ((v >> 10) & 1023) / 1023.0; sb += ((v >> 20) & 1023) / 1023.0; }
+                else if (bgra) { sb += (v & 255) / 255.0; sg += ((v >> 8) & 255) / 255.0; sr += ((v >> 16) & 255) / 255.0; }
+                else { sr += (v & 255) / 255.0; sg += ((v >> 8) & 255) / 255.0; sb += ((v >> 16) & 255) / 255.0; }
+            }
+        }
+        const double n = (double)W * H;
+        return (float)((sr + sg + sb) / (3.0 * n));
+    }
+};
+SampleRing g_sr;
+D3D12_RESOURCE_STATES g_probeSrcState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+} // namespace
+
+D3D12_RESOURCE_STATES Dx12ProbeSrcState() { return g_probeSrcState; }
+void Dx12SetProbeSrcState(D3D12_RESOURCE_STATES s) { g_probeSrcState = s; }
+
+bool Dx12SampleBackbuffer(ID3D12CommandQueue* queue, ID3D12Resource* src,
+                          uint32_t tagIn, uint32_t* tagOut, float* outLuma) {
+    if (!queue || !src || !outLuma) return false;
+    ID3D12Device* dev = nullptr;
+    if (FAILED(src->GetDevice(IID_PPV_ARGS(&dev)))) return false;
+    const bool ok = g_sr.Ensure(dev);
+    dev->Release();
+    if (!ok) return false;
+
+    const D3D12_RESOURCE_DESC sd = src->GetDesc();
+    if (sd.Width < SampleRing::W || sd.Height < SampleRing::H) return false;
+    g_sr.fmt = sd.Format;
+
+    const int slot = g_sr.cur;
+    g_sr.cur = (g_sr.cur + 1) % SampleRing::N;
+
+    // Read back this slot's PREVIOUS copy (finished long ago; no wait) before overwriting it.
+    bool produced = false;
+    if (g_sr.slotPending[slot] && g_sr.fence->GetCompletedValue() >= g_sr.slotFence[slot]) {
+        void* mem = nullptr;
+        D3D12_RANGE rr{0, SampleRing::kRowPitch * SampleRing::H};
+        if (SUCCEEDED(g_sr.rb[slot]->Map(0, &rr, &mem))) {
+            *outLuma = SampleRing::Luma(mem, g_sr.fmt);
+            D3D12_RANGE wr{0, 0};
+            g_sr.rb[slot]->Unmap(0, &wr);
+            if (tagOut) *tagOut = g_sr.slotTag[slot];
+            produced = true;
+        }
+        g_sr.slotPending[slot] = false;
+    }
+
+    // Record + submit a fresh copy into this slot (read next time this slot comes round).
+    if (FAILED(g_sr.alloc[slot]->Reset()) || FAILED(g_sr.list[slot]->Reset(g_sr.alloc[slot], nullptr)))
+        return produced;
+    ID3D12GraphicsCommandList* cl = g_sr.list[slot];
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = src;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    // The state the back buffer is actually in during ReShade's present event. PRESENT
+    // (== COMMON) crashed D3D12Core at +0x11f85 twice; ReShade transitions the back buffer
+    // to RENDER_TARGET for its own effect pass, and a wrong StateBefore is UB. Overridable
+    // so the two candidates can be A/B'd in one run.
+    b.Transition.StateBefore = Dx12ProbeSrcState();
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    cl->ResourceBarrier(1, &b);
+    const UINT x0 = (UINT)((sd.Width - SampleRing::W) / 2), y0 = (sd.Height - SampleRing::H) / 2;
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = g_sr.rb[slot];
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint = {sd.Format, SampleRing::W, SampleRing::H, 1, SampleRing::kRowPitch};
+    D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+    srcLoc.pResource = src;
+    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    srcLoc.SubresourceIndex = 0;
+    D3D12_BOX box{x0, y0, 0, x0 + SampleRing::W, y0 + SampleRing::H, 1};
+    cl->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, &box);
+    std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+    cl->ResourceBarrier(1, &b);
+    if (FAILED(cl->Close())) return produced;
+    ID3D12CommandList* lists[] = {cl};
+    queue->ExecuteCommandLists(1, lists);
+    const uint64_t fv = ++g_sr.fv;
+    if (SUCCEEDED(queue->Signal(g_sr.fence, fv))) {
+        g_sr.slotFence[slot] = fv;
+        g_sr.slotTag[slot] = tagIn;
+        g_sr.slotPending[slot] = true;
+    }
+    return produced;
+}
 }

@@ -65,7 +65,9 @@ add_library(ERVR SHARED
   src/ervr/midhook.cpp
   src/ervr/rtti.cpp
   src/ervr/frame_probe.cpp
+  src/ervr/cam_watch.cpp
   src/ervr/autopilot.cpp
+  src/ervr/debug_keys.cpp
   src/ervr/game_er.cpp
   src/ervr/patches_er.cpp
   src/ervr/combat.cpp

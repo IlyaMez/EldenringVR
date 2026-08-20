@@ -12,7 +12,10 @@
 // include/coresystem/taskgroups.inl). This file only READS - it locates the table, walks it,
 // and reports what it found. Nothing here changes game state.
 #include "frame_probe.h"
+#include "debug_keys.h"
+#include "dx12_blit.h"
 #include "game_er.h"
+#include "patches_er.h"
 #include "game_memory.h"
 #include "rtti.h"
 #include "reshade_addon.h"
@@ -21,8 +24,11 @@
 #include <MinHook.h>
 #include <windows.h>
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -637,22 +643,172 @@ std::atomic<int> g_p1N{0}, g_p2N{0};
 uint8_t ReadActiveRaw(int i) { return g_table.entry0[(size_t)i * g_table.stride + kActiveOff]; }
 void    WriteActiveRaw(int i, uint8_t v) { g_table.entry0[(size_t)i * g_table.stride + kActiveOff] = v; }
 
+// Which groups stay active in the draw-only second pass. Config-driven ("144-158,164" style
+// ranges) so renderer-state experiments - exposure, Scaleform/UI, TAA behaviour - are an ini
+// edit away instead of a rebuild; the ini hot-reloads.
+std::mutex  g_pass2OverrideMtx;
+std::string g_pass2Override;   // content-probe sweep: non-empty replaces [VR] Pass2Keep
+
+void ParseKeepSpec(const char* spec, bool out[256]) {
+    memset(out, 0, 256);
+    const char* p = spec;
+    while (*p) {
+        while (*p == ',' || *p == ' ') ++p;
+        if (!isdigit((unsigned char)*p)) break;
+        int lo = (int)strtol(p, (char**)&p, 10), hi = lo;
+        if (*p == '-') hi = (int)strtol(p + 1, (char**)&p, 10);
+        for (int i = lo; i <= hi && i >= 0; ++i)
+            if (i < 256) out[i] = true;
+    }
+}
+
+const bool* Pass2KeepSet() {
+    static std::string s_spec;
+    static bool s_keep[256];
+    std::string spec;
+    {
+        std::lock_guard<std::mutex> g(g_pass2OverrideMtx);
+        spec = g_pass2Override.empty() ? Cfg().vrPass2Keep : g_pass2Override;
+    }
+    if (spec != s_spec) {
+        s_spec = spec;
+        ParseKeepSpec(spec.c_str(), s_keep);
+        std::string names;
+        for (int i = 0; i < g_table.count && i < 256; ++i)
+            if (s_keep[i]) { names += std::to_string(i); names += ' '; }
+        LOGI("[stereo] pass-2 keeps groups: %s", names.c_str());
+    }
+    return s_keep;
+}
+
+std::atomic<bool> g_probePitchOn{false};   // content probe: tilt ONLY pass 2's camera
+
+// ---- GPU serialisation between the two engine passes -----------------------------------
+// The pump starts pass 2 on the CPU the moment pass 1's queue_tasks returns - while the GPU
+// (GPU-bound at ~45 Hz in stereo) is still executing pass 1's draws. The engine sizes its
+// per-frame upload memory for frames-in-flight keyed by a frame index; if that advance
+// lives in a group pass 2 gates, both passes write the SAME ring slot and pass 2's constant
+// uploads land while the GPU is mid-read on pass 1's - per-object corruption, worst in
+// pass 1's image (its data is overwritten ~1 ms after submit), a different, lighter set in
+// pass 2's (overwritten by the NEXT frame's pass 1, a whole frame later). [VR] GpuSync
+// drains the present queue with a fence so the passes cannot overlap on the GPU. It
+// serialises CPU against GPU - real cost - but it is hot-togglable (Numpad 4), so the
+// hypothesis is a ten-second in-headset test: 1 should clean up the left eye, 2 both.
+std::atomic<ID3D12CommandQueue*> g_gpuQueue{nullptr};
+ID3D12Fence*  g_syncFence = nullptr;
+ID3D12Device* g_syncFenceDev = nullptr;   // identity only, never dereferenced
+HANDLE        g_syncEvent = nullptr;
+uint64_t      g_syncVal = 0;
+std::atomic<float> g_syncLastMs{0.f};
+
+int GpuSyncLevel() {
+    const int k = DebugKeysGpuSync();
+    return k >= 0 ? k : Cfg().vrGpuSync;
+}
+
+// Signal-and-wait on the game's present queue. Runs on the main-loop thread between engine
+// passes - the same thread that presents, so this is like the game's own vsync wait, NOT a
+// block inside the ReShade present event (which crashed D3D12Core; see dx12_blit notes).
+void PumpGpuDrain(const char* where) {
+    ID3D12CommandQueue* q = g_gpuQueue.load(std::memory_order_acquire);
+    if (!q) return;
+    ID3D12Device* dev = nullptr;
+    if (FAILED(q->GetDevice(IID_PPV_ARGS(&dev))) || !dev) return;
+    if (g_syncFence && g_syncFenceDev != dev) {   // device changed under us
+        g_syncFence->Release();
+        g_syncFence = nullptr;
+    }
+    if (!g_syncFence) {
+        if (FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_syncFence)))) {
+            g_syncFence = nullptr;
+            dev->Release();
+            return;
+        }
+        g_syncFenceDev = dev;
+        g_syncVal = 0;
+        if (!g_syncEvent) g_syncEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        LOGI("[stereo] GpuSync: fence created on the present queue");
+    }
+    dev->Release();
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    const uint64_t v = ++g_syncVal;
+    if (FAILED(q->Signal(g_syncFence, v))) return;
+    if (g_syncFence->GetCompletedValue() < v && g_syncEvent) {
+        g_syncFence->SetEventOnCompletion(v, g_syncEvent);
+        if (WaitForSingleObject(g_syncEvent, 2000) != WAIT_OBJECT_0) {
+            LOGW("[stereo] GpuSync %s: fence wait timed out (device hung or removed?)", where);
+            return;
+        }
+    }
+    QueryPerformanceCounter(&t1);
+    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+    g_syncLastMs.store((float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart),
+                       std::memory_order_relaxed);
+}
+
 void DoSecondPass(void* self, void* a, void* b) {
     // Stereo mode: only pump frames for which the game stashed the second eye's camera -
     // and write that camera FIRST, while every writer is quiescent. Menus, loading and
     // cinema mode simply never stash one, so those frames stay single-pass.
-    if (g_pumpMode == 2 && !GameERApplySecondEyeCamera()) return;
-    // We are on the main-loop thread between two frames; the runners are parked. Keep the
-    // draw phase (Draw_Pre 144 .. Draw_Post 158) and Flip (164); gate everything else, which
-    // also covers input, menus, sound, streaming and the Steam threads - pass 2 must not
-    // advance anything.
+    if (g_pumpMode == 2) {
+        // Spawn/teleport guard: pumping within seconds of the player appearing crashed the
+        // game at exe+0x1e8b0bc (a draw fn reading a per-frame input that the spawn-fade
+        // machinery - gated in pass 2 - had not produced). Give every player-inactive ->
+        // active transition a grace period before the second pass resumes.
+        static ULONGLONG s_lastInactive = GetTickCount64();
+        if (!GameERPlayerActive()) { s_lastInactive = GetTickCount64(); return; }
+        if (GetTickCount64() - s_lastInactive < 8000) return;
+        if (!GameERApplySecondEyeCamera()) return;
+    }
+    // Content probe (experiment mode): make pass 2's render unmistakable - the harness then
+    // reads pixels back at each Present to learn which pass's image that Present carries.
+    if (g_pumpMode == 1 && g_probePitchOn.load(std::memory_order_relaxed))
+        GameERDebugPitchCamera(80.f);
+    // Let the GPU finish pass 1 (its draws AND our left-eye blit, both on the present queue)
+    // before pass 2's queue_tasks re-uploads the per-frame GPU data those draws read.
+    const int gpuSync = GpuSyncLevel();
+    if (gpuSync >= 1) PumpGpuDrain("pre-pass2");
+    // Two shapes for the second pass:
+    //  * draw-only (default): keep the draw phase + camera propagation, gate everything
+    //    else. Cheap, but the environment lighting never found its producer this way.
+    //  * full-frame ([VR] Pass2FullFrame / Numpad 5): run a COMPLETE engine frame with the
+    //    game's per-frame dt swapped to ~0 - every producer runs, nothing advances. Only
+    //    PadStep (input edge replay), the world-origin shift pair and AI GC stay gated.
+    const int keyFF = DebugKeysPass2FullFrame();
+    const bool fullFrame = keyFF >= 0 ? keyFF != 0 : Cfg().vrPass2FullFrame;
+    float dtSaved = 0.f;
+    bool dtSwapped = false;
+    static const char* kFullFrameKeep = "0-8,10,12-159,161-165,167,168";
+    const bool* keepSet;
+    if (fullFrame) {
+        static std::string s_ffSpec;
+        static bool s_ffKeep[256];
+        if (s_ffSpec != kFullFrameKeep) {   // parse once
+            s_ffSpec = kFullFrameKeep;
+            ParseKeepSpec(kFullFrameKeep, s_ffKeep);
+        }
+        keepSet = s_ffKeep;
+        float* imm = PatchesFrameDtImm();
+        if (imm) {
+            memcpy(&dtSaved, imm, 4);
+            dtSwapped = PatchesWriteFrameDt(Cfg().vrPass2Dt);
+        }
+        static bool s_ffLogged = false;
+        if (!s_ffLogged) {
+            s_ffLogged = true;
+            LOGI("[stereo] pass 2 FULL-FRAME mode: dt %s (saved %.5f -> %.7f), keep %s",
+                 dtSwapped ? "swapped" : "NOT SWAPPED (framelock imm unresolved!)",
+                 dtSaved, Cfg().vrPass2Dt, kFullFrameKeep);
+        }
+    } else {
+        keepSet = Pass2KeepSet();
+    }
     uint8_t saved[256];
     const int n = g_table.count < 256 ? g_table.count : 256;
     for (int i = 0; i < n; ++i) saved[i] = ReadActiveRaw(i);
-    for (int i = 0; i < n; ++i) {
-        const bool keep = (i >= 144 && i <= 158) || i == 164;
-        if (!keep) WriteActiveRaw(i, 0);
-    }
+    for (int i = 0; i < n; ++i)
+        if (!keepSet[i]) WriteActiveRaw(i, 0);
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     g_curPass.store(2, std::memory_order_release);
@@ -660,6 +816,10 @@ void DoSecondPass(void* self, void* a, void* b) {
     g_curPass.store(1, std::memory_order_release);
     QueryPerformanceCounter(&t1);
     for (int i = 0; i < n; ++i) WriteActiveRaw(i, saved[i]);
+    if (dtSwapped) PatchesWriteFrameDt(dtSaved);
+    // Symmetric protection: pass 2's image is read by the GPU while the NEXT frame's pass 1
+    // uploads - drain again so its data survives until its draws complete.
+    if (gpuSync >= 2) PumpGpuDrain("post-pass2");
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
     g_pumpLastMs.store((float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart),
                        std::memory_order_relaxed);
@@ -862,6 +1022,187 @@ void DoublePumpTest() {
     LOGI("[m2] PUMP TEST done (game still alive = pass 2 is survivable)");
 }
 
+// ---- experiment: content probe ----------------------------------------------------------
+// Answers, WITHOUT a headset, the two questions the in-headset bugs raised:
+//   A. Does a Present carry ITS OWN pass's render, or the PREVIOUS pass's (pipelined)?
+//      Method: toggle an 80-degree pitch on pass 2's camera once a second and see which
+//      pass-tag's sampled luminance follows the toggle.
+//   B. Does the draw-only pass render DARKER than the real pass (the user's dark eye)?
+//      Method: same camera both passes, sweep Pass2Keep variants, compare per-tag luminance.
+struct CSample { uint8_t pass, pitchOn; float luma; };
+constexpr int kMaxCSamples = 4096;
+CSample g_cs[kMaxCSamples];
+std::atomic<int>  g_csN{0};
+std::atomic<bool> g_csOn{false};
+
+struct CellStats { double sum = 0; int n = 0; double Mean() const { return n ? sum / n : 0; } };
+
+// Aggregates the sample buffer into (pass, pitch) cells.
+void CsCells(CellStats out[2][2]) {
+    const int n = g_csN.load() < kMaxCSamples ? g_csN.load() : kMaxCSamples;
+    for (int i = 0; i < n; ++i) {
+        const CSample& s = g_cs[i];
+        CellStats& c = out[s.pass == 2 ? 1 : 0][s.pitchOn ? 1 : 0];
+        c.sum += s.luma; ++c.n;
+    }
+}
+
+void SetPass2Override(const char* spec) {
+    std::lock_guard<std::mutex> g(g_pass2OverrideMtx);
+    g_pass2Override = spec;
+}
+
+// Screenshot-driven variant: NO GPU work of our own. Three attempts at reading the back
+// buffer from inside the present event all crashed D3D12Core at +0x11f85 (blocking wait,
+// non-blocking ring, and both barrier states) - submitting our own command list on the
+// game's queue during ReShade's present event is simply not viable here.
+//
+// The monitor shows the LAST image presented, which answers both questions for free:
+//   A. Routing: pitch pass 2's camera at the ground. If presents carry their OWN pass's
+//      render, the screen shows the tilted view; if they lag one pass, it stays normal.
+//   B. Brightness: with the pump on, the screen shows one pass's render every frame - if
+//      the draw-only pass is the dark one, the SCREENSHOT is dark. Sweeping Pass2Keep then
+//      shows which task group restores it.
+// Each phase is timestamped in the log; tools/run_game.ps1 -Shots correlates by filename.
+void ContentProbeShots() {
+    if (!Cfg().taskContentProbe) return;
+    if (!g_origQueueTasks) { LOGW("[cp] needs TaskQueueProbe=true (no frame-driver hook)"); return; }
+    for (int w = 0; w < 180 && !GameERPlayerActive(); ++w) Sleep(1000);
+    if (!GameERPlayerActive()) { LOGW("[cp] player never became active; aborting"); return; }
+    LOGI("[cp] player active; settling 20 s");
+    Sleep(20000);
+
+    auto phase = [](const char* what, int secs) {
+        LOGI("[cp] PHASE %s (%d s)", what, secs);
+        Sleep(secs * 1000);
+    };
+
+    phase("BASELINE: pump off, no pitch", 10);
+
+    g_pumpMode = 1;
+    phase("A1: pump ON, pass-2 pitch OFF", 10);
+    g_probePitchOn.store(true);
+    phase("A2: pump ON, pass-2 pitch 80deg AT THE GROUND", 12);
+    g_probePitchOn.store(false);
+
+    const char* variants[] = {
+        "144-158,164",                  // baseline (what the user saw)
+        "107,144-158,164",              // + DrawParamUpdate (lighting/tonemap param banks)
+        "98,107,144-158,164",           // + RenderingSystemUpdate
+        "49,98,107,144-158,164",        // + Geom_UpdateDraw
+        "49,98,107,142,144-158,164",    // + ScaleformStep (UI list)
+    };
+    for (const char* v : variants) {
+        SetPass2Override(v);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "B keep={%s}", v);
+        phase(buf, 10);
+    }
+    SetPass2Override("");
+    g_pumpMode = 0;
+    phase("FINAL: pump off (should look like BASELINE)", 8);
+    LOGI("[cp] ---- content probe done ----");
+}
+
+void ContentProbe() {
+    if (!Cfg().taskContentProbe) return;
+    if (!g_origQueueTasks) { LOGW("[cp] needs TaskQueueProbe=true (no frame-driver hook)"); return; }
+    for (int w = 0; w < 180 && !GameERPlayerActive(); ++w) Sleep(1000);
+    if (!GameERPlayerActive()) { LOGW("[cp] player never became active; aborting"); return; }
+    // Settle WELL clear of the spawn fade: arming the pump 3 s after spawn crashed the game
+    // at exe+0x1e8b0bc (a draw-path fn reading a null per-frame input - the fade machinery
+    // lives in groups pass 2 gates). 55+ s post-spawn pumping was always stable.
+    LOGI("[cp] player active; settling 20 s before pumping");
+    Sleep(20000);
+
+    // Bisection stages: two identical crashes at exe+0x1e8b0bc landed ~1.0 s after pump-on
+    // = ~0.5 s after sampling began, while pump-alone ran 600+ passes cleanly in earlier
+    // sessions. Separate the suspects so the crash timestamp names the guilty one.
+    // Stage 0 A/B: which resource state is the back buffer really in during the present
+    // event? PRESENT(==COMMON) crashed D3D12Core at +0x11f85 twice, so try RENDER_TARGET
+    // first - surviving it names the state AND flags the same latent assumption in the blit.
+    LOGI("[cp] stage 0a: readback with StateBefore=RENDER_TARGET (3 s)");
+    Dx12SetProbeSrcState(D3D12_RESOURCE_STATE_RENDER_TARGET);
+    g_csN.store(0);
+    g_csOn.store(true);
+    Sleep(3000);
+    g_csOn.store(false);
+    LOGI("[cp] stage 0a SURVIVED (%d samples) -> the back buffer is in RENDER_TARGET at "
+         "present time; dx12_blit's PRESENT assumption is WRONG too", g_csN.load());
+
+    LOGI("[cp] stage 0b: readback with StateBefore=PRESENT (3 s) - expected to crash");
+    Dx12SetProbeSrcState(D3D12_RESOURCE_STATE_PRESENT);
+    g_csN.store(0);
+    g_csOn.store(true);
+    Sleep(3000);
+    g_csOn.store(false);
+    LOGI("[cp] stage 0b SURVIVED (%d samples) - state is NOT the crash cause", g_csN.load());
+    Dx12SetProbeSrcState(D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+    LOGI("[cp] stage 1: pump only, no readback (3 s)");
+    g_pumpMode = 1;
+    Sleep(3000);
+    LOGI("[cp] stage 1 SURVIVED (%ld passes)", (long)g_pumpPasses);
+    g_pumpMode = 0;
+    Sleep(1000);
+
+    LOGI("[cp] ---- content probe: PHASE A (present routing: pump + readback) ----");
+    g_pumpMode = 1;
+    Sleep(500);
+    g_csN.store(0);
+    g_csOn.store(true);
+    for (int w = 0; w < 8; ++w) {
+        g_probePitchOn.store((w & 1) != 0);
+        Sleep(1000);
+    }
+    g_csOn.store(false);
+    g_probePitchOn.store(false);
+    {
+        CellStats c[2][2]{};
+        CsCells(c);
+        const double d1 = std::fabs(c[0][1].Mean() - c[0][0].Mean());
+        const double d2 = std::fabs(c[1][1].Mean() - c[1][0].Mean());
+        LOGI("[cp] A: luma by (pass, pitch): p1/off %.4f (n=%d)  p1/on %.4f (n=%d)  "
+             "p2/off %.4f (n=%d)  p2/on %.4f (n=%d)",
+             c[0][0].Mean(), c[0][0].n, c[0][1].Mean(), c[0][1].n,
+             c[1][0].Mean(), c[1][0].n, c[1][1].Mean(), c[1][1].n);
+        LOGI("[cp] A VERDICT: pitch moved p1 presents by %.4f, p2 presents by %.4f -> %s",
+             d1, d2,
+             (d2 > 2 * d1 && d2 > 0.01) ? "presents carry their OWN pass's render: use PresentLag=0"
+             : (d1 > 2 * d2 && d1 > 0.01) ? "presents carry the PREVIOUS pass's render: use PresentLag=1"
+             : "INCONCLUSIVE (deltas too similar or too small)");
+    }
+
+    LOGI("[cp] ---- content probe: PHASE B (draw-only pass brightness) ----");
+    const char* variants[] = {
+        "144-158,164",                  // baseline (what the user saw)
+        "107,144-158,164",              // + DrawParamUpdate (lighting/tonemap param banks)
+        "98,107,144-158,164",           // + RenderingSystemUpdate
+        "49,98,107,144-158,164",        // + Geom_UpdateDraw
+        "49,98,107,142,144-158,164",    // + ScaleformStep (UI list)
+    };
+    for (const char* v : variants) {
+        SetPass2Override(v);
+        Sleep(700);   // let a few pairs render under the new set
+        g_csN.store(0);
+        g_csOn.store(true);
+        Sleep(2500);
+        g_csOn.store(false);
+        CellStats c[2][2]{};
+        CsCells(c);
+        const double p1 = c[0][0].Mean() + c[0][1].Mean();   // pitch always off in phase B
+        const double p2 = c[1][0].Mean() + c[1][1].Mean();
+        LOGI("[cp] B keep={%s}: p1-present luma %.4f (n=%d), p2-present luma %.4f (n=%d) -> "
+             "p2/p1 = %.0f%%%s",
+             v, p1, c[0][0].n + c[0][1].n, p2, c[1][0].n + c[1][1].n,
+             p1 > 1e-6 ? p2 / p1 * 100.0 : 0.0,
+             (p1 > 0.02 && p2 < p1 * 0.75) ? "  <-- pass-2-tagged presents are DARK here" : "");
+    }
+    SetPass2Override("");
+    g_pumpMode = 0;
+    LOGI("[cp] ---- content probe done ----");
+}
+
 void QueueTasksProbeInstall(bool force = false) {
     if ((!Cfg().taskQueueProbe && !force) || !g_table.vtable || g_origQueueTasks) return;
     void* target = g_table.vtable[5];
@@ -1054,6 +1395,7 @@ void FrameProbeTick() {
                     RegisterExperiment();
                     QueueTasksProbeInstall();
                     DumpTaskLists();
+                    ContentProbeShots();
                     DoublePumpTest();
                     ToggleExperiment();
                 }
@@ -1065,8 +1407,26 @@ void FrameProbeTick() {
     }).detach();
 }
 
+void FrameProbeOnPresent(const Dx12Frame& f) {
+    if (!g_csOn.load(std::memory_order_relaxed)) return;
+    // Pack this present's pass + pitch state into the tag so it travels through the sampler's
+    // latency and comes back paired with the luma of the frame it was actually captured on.
+    const uint32_t tagIn = (uint32_t)FramePumpCurrentPass() |
+                           (g_probePitchOn.load(std::memory_order_relaxed) ? 0x100u : 0u);
+    uint32_t tagOut = 0;
+    float luma = 0.f;
+    if (!Dx12SampleBackbuffer(f.queue, f.backBuffer, tagIn, &tagOut, &luma)) return;
+    const int i = g_csN.fetch_add(1, std::memory_order_relaxed);
+    if (i < kMaxCSamples)
+        g_cs[i] = {(uint8_t)(tagOut & 0xff), (uint8_t)((tagOut & 0x100) ? 1 : 0), luma};
+}
+
+void FrameProbeSetPass2Keep(const char* spec) { SetPass2Override(spec ? spec : ""); }
+
 bool FramePumpReady() { return g_origQueueTasks != nullptr && g_pumpMode == 2; }
 int  FramePumpCurrentPass() { return g_curPass.load(std::memory_order_acquire); }
 long FramePumpTakePasses() { return InterlockedExchange(&g_pumpPasses, 0); }
 float FramePumpLastMs() { return g_pumpLastMs.load(std::memory_order_relaxed); }
+void FramePumpSetGpuQueue(ID3D12CommandQueue* q) { g_gpuQueue.store(q, std::memory_order_release); }
+float FramePumpGpuSyncLastMs() { return g_syncLastMs.load(std::memory_order_relaxed); }
 }
