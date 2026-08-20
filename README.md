@@ -133,23 +133,93 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
 
 `[FirstPerson]` in `ERVR.ini`. ERVR takes over the game camera and the arm bones; R.E.A.L. keeps rendering.
 
-* **Camera** – MinHook on the camera step function (RVA `0x3bc5e0`, erfps2's `CAMERA_STEP_UPDATE`). While first
-  person is on the original is *not* called; ERVR writes `CSPersCam1` (`[[FieldArea]+0x20]+0x20`, matrix at +0x10)
-  and `ChrCam.pers_cam` (`WorldChrMan+0x1ECE0`) with position = character root (`ChrCtrl+0x230` row 3) +
-  `EyeHeight`, rotation = base yaw from the game's own chr-cam (stick / lock-on) — R.E.A.L. composes the HMD on top.
+* **Camera** – MinHook on the camera step function (RVA `0x3bc5e0`, erfps2's `CAMERA_STEP_UPDATE`). ERVR writes
+  `CSPersCam1` (`[[FieldArea]+0x20]+0x20`, matrix at +0x10) and `ChrCam.pers_cam` (`WorldChrMan+0x1ECE0`) with
+  position = the character's **head bone** (`CameraAnchor=head`, low-passed by `CameraAnchorSmoothing`, vertical
+  = root + `EyeHeight` + `CameraBob` × the bone's own excursion) — so neck, shoulders and arms are under the view
+  whatever the run/turn animation does, instead of the skeleton being dragged under a root-anchored camera every
+  tick (`CameraAnchor=root` + `BodyFollowsHead`, the old way, which the run animation fights and wins on some
+  frames). Rotation = ERVR's yaw; R.E.A.L. composes the HMD on top.
   The HMD look direction is written to `ChrIns+0x120` (`aim_view_mtx`) so spells/bows aim where you look.
+  Our writes always happen *after* the game's own chr-cam / camera step has run, so the game never gets a
+  first-person matrix as the input to its next update.
+* **Play-space origin** (`Recenter`, off by default: it makes body and hands slide for `RecenterSeconds` after every real head move) – the runtime reports head/hand positions relative to *its* origin, and
+  everything we place from them is rotated by the camera yaw. Half a metre of "I'm standing off to the side"
+  therefore becomes a camera that swings sideways every time you turn with the stick, arm targets that miss by
+  the same amount, and a `BodyFollowsHead` shift pinned against its clamp. ERVR keeps its own origin that follows
+  your head with a `RecenterSeconds` time constant and a `RecenterMaxRadius` hard limit: leaning and ducking still
+  move the view, walking around the room is absorbed.
+* **Eye ownership** (`OwnHeadPosition`, off by default: it costs 6DoF feel — head tilt/roll pivots wrong and the body appears to slide against it) – ERVR hooks the very `ovr_GetTrackingState` call R.E.A.L. reads its
+  head pose from and hands it a *zero* position (rotation untouched), then writes the eye
+  (anchor + re-centred HMD offset) into the game camera itself. R.E.A.L. therefore has nothing of its own to
+  add, and the rendered eye is exactly the camera we wrote — the body, hands and aim matrix are placed against
+  the same point by construction. Without it (OpenVR, or turned off) we fall back to guessing what R.E.A.L. adds
+  (`RealHmdPositionScale`) and pre-subtracting it, which is only as good as the guess.
+* **Body pose** (`PoseMode=vr`, default) – the rig never plays a game animation. A standing pose is captured from
+  the animation system once (at skeleton discovery, re-captured whenever you stand still for a second, so
+  idle/crouch/sit stances still come through as discrete poses) and written over the **entire** live Havok pose on
+  every pose-hook call, yawed to the body yaw; the arm IK and spine twist go on top. Root motion is untouched:
+  rolls, attacks and running still *displace* the character (and the camera rides along 1:1), they just never pose
+  the rig or whip the camera around, because the head bone the camera anchors to no longer moves relative to the
+  root. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
+* **Body facing** (`FaceCamera` + `FaceCameraMode`) – keeps movement in strafe mode so the arms can always reach.
+  `strafe` (default with `PoseMode=vr`) only sets the ChrCtrl "strafing" flag and leaves the game's lock-on state
+  alone. The old way (`lock`) forced `Chr_IsLockedOn` onto a fake far-away point every frame — which engages the
+  game's **lock-on camera**, a camera writer ERVR does not hook: it orbits the view around the character while
+  strafing, swallows right-stick turns, and follows animations. If the log warns about "foreign camera yaw", an
+  unhooked writer like that is still active. `LockTargetDistance` only matters in `lock` mode. The flags are
+  re-asserted from the pose hook as well, since the camera hook only runs at one point in the frame.
+* **Follow-cam neutralization** (erfps2's full first-person set) – while first person runs, every
+  `ChrExFollowCam::follow` call gets `reset_camera=1` (no position interpolation), `camera_auto_rotation=0` (no
+  turning behind a moving character), `locked_on_cam_offset=0` (no lateral lock-on framing), and the global camera
+  **wall-recovery** flag is cleared each frame (the game otherwise pushes the camera out of geometry near walls —
+  another writer that moved the view on its own).
 * **Head hiding** – erfps2's part list: `PlayerIns+0x648 -> CSChrAsmModelIns+0x28 [27] -> CSModelIns+0x18 ->
   CSModelDispEntity+0x20 bit0` for parts 0,2,6,21..25 (+ sheathed 7,8,11,12) and the model-res masks at
   `PlayerIns+0x640` (+0x58 bit3, +0x49 bit3, +0x50 bit5).
 * **Arms** – ERSkeletonMan's pose access: `ChrIns+0x190 -> +0x28 (behavior) -> +0x10 (or +0x60) -> +0x30 =
   hkbCharacter`; skeleton `[[hkb+0x90]+0x28]` (parent indices +0x20, count +0x28, names +0x30, ref pose +0x40);
   live pose `[[hkb+0x38]] + *(int*)(..+0x54)` as `hkQsTransform[bones]` (parent-relative). Timing point:
-  `CS::NoUpdateInterface` vtable slot 10 (RTTI-located; slot replaced with a register-preserving stub).
-  Each call: read pose, compute world transforms from the physics module root (`+0x70` pos, `+0x50` quat), solve
+  `CS::NoUpdateInterface` vtable slot 10 (RTTI-located; slot replaced with a register-preserving stub), on
+  every call (`ArmSolveEveryCall`) — it fires several times per rendered frame and a later animation evaluation
+  otherwise throws our pose away, most visibly while running.
+  Each call: read pose, compute world transforms from the character root, solve
   2-bone IK per arm toward the controller (VR -> game frame: mirror Z; hand rotation = controller * calibration),
   write the three local quaternions back. Weapons/hitboxes hang off the hand bones and follow.
-  `BodyFollowsHead` shifts the root bones by the (clamped) HMD offset so shoulders stay under the headset when you
-  lean or step; the physics root stays put, hands get the unclamped offset.
+  The root position is the `ChrCtrl` model matrix (`ArmRootSource=model`) — that is the transform the game draws
+  the skeleton with, and while running it and the physics position are a frame of motion apart — while the root
+  rotation is the physics one (local -Z = facing, verified against the lock-on point; `modelmatrix` uses the
+  matrix basis too). `BodyRotate` yaws the root bones by (body yaw - that facing); the residual animation yaw is
+  taken out by the Spine twist, measured on the L/R clavicle line whose side is auto-calibrated against the root
+  facing on the untouched pose (the Master bone's own axes are *not* the body's forward — aligning them spun the
+  body 90 degrees).
+  `BodyFollowsHead` shifts the root bones by the (clamped, re-centred) HMD offset so shoulders stay under the
+  headset when you lean or step; the physics root stays put, hands get the unclamped offset. The shift is applied
+  against the animation's own translation, remembered per bone, so running twice in a frame is a no-op instead of
+  walking the skeleton away from the character; with `BodyAnchor=head` the head bone is measured on that
+  *unshifted* pose first (measuring it on our own previous output made the shift alternate between full and
+  zero on back-to-back calls).
+* **Turning / movement** – ERVR owns the camera controller (`OwnChrCam`, `CameraYawSource=ervr`,
+  `CameraTurnByErvr`): the game's follow cam keeps its own yaw state (it is what turned the view whenever the
+  character walked at an angle) and writes it into the chr-cam from several places per frame — skipping one of
+  them made the view flip-flop between its yaw and ours — so our matrix is re-asserted right after every game
+  write we hook (follow-cam function, chr-cam update, camera step), and the debug dump counts any foreign yaw
+  still found before a write. The view yaw is integrated from the right stick
+  (smooth or snap), the chr-cam matrix is anchor + that yaw, the game moves the character relative to it, and the
+  camera step R.E.A.L. hooks still runs on top. Locked on, the yaw follows the target. `Forward=head|hand|body`
+  rotate the move stick if you want forward to be something other than the view yaw. `CameraYawSource=game`
+  is the old read-it-back mode. The character itself is still driven through the game (stick, strafe flags,
+  its own animation/collision/root motion) — nothing of the locomotion is re-implemented.
+* **Locomotion** â€“ `[Locomotion] Mode=game` (default): the game moves the character from the virtual stick.
+  `Mode=direct` (experimental, opt-in): ERVR integrates the horizontal position itself from the processed stick in
+  the view frame (`RunSpeed`/`SprintSpeed`, sprint = B held), keeps the game's height, and turns the physics
+  body to the view yaw â€” only while the stick is pushed, so rolls/attacks/ladders still displace normally. The
+  game's collision is bypassed for that motion. `FeedStick` keeps handing the stick to the game so the run/strafe
+  animations play (its own displacement is overwritten).
+* **Body yaw** (`BodyYaw=camera`) – the character body (fake lock-on facing, whole-skeleton yaw, spine twist,
+  elbow poles) sits on the view yaw, instantly. `head` makes it chase the headset yaw with a
+  `BodyYawFollowSeconds` time constant instead (shoulders come round when you turn your real body); `stick` is
+  for `CameraYawSource=ervr` + `RightStick=body`. Locked on, the game aims the body.
 * Version gate: RVAs are used only when the exe is 2.6.2.0; otherwise erfps2's AOBs are tried. AOB check script:
   see `tools/verify_signatures.py`.
 

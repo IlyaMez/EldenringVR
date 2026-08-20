@@ -60,4 +60,11 @@ void BackendsShutdown();
 
 // Thread-safe snapshot for consumers (XInput hook runs on the game's input thread).
 bool GetLatestVRState(VRTracking& tracking, VRInputState& input);
+
+// Head-position ownership. When enabled, the backend hides the HMD *position* from the host (R.E.A.L.) - it keeps
+// receiving orientation, but sees the head sitting at the tracking origin - so the only positional offset in the
+// rendered view is the one ERVR writes into the game camera. ERVR's own polling always sees the raw position.
+// Returns false if the active backend cannot intercept the host's pose reads (then the host still adds its own offset).
+void VRSetHostHeadPositionHidden(bool hidden);
+bool VRHostHeadPositionHideSupported();
 }

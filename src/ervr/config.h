@@ -49,8 +49,14 @@ struct Config {
     bool  gestureHaptics = true;
 
     // [Movement]
-    bool  handRelativeMovement = false;   // left stick direction relative to left controller yaw (vs HMD yaw)
-    bool  snapTurn = false;               // right stick X -> discrete pulses
+    std::string moveForward = "head";     // head (where you look - stick forward walks toward your gaze) | camera (stick passed through: forward = the stick yaw) | hand | body
+    std::string rightStick = "camera";    // camera | body: what the right stick turns when ERVR owns the yaw
+    bool  handRelativeMovement = false;   // legacy alias for MoveForward=hand
+    bool  cameraTurnErvr = true;          // the turn stick drives ERVR's own view yaw (needs CameraYawSource=ervr)
+    float turnSpeedDegPerSec = 120.f;     // smooth-turn rate when ERVR owns the yaw
+    float snapTurnDegrees = 30.f;         // step size when SnapTurn is on and ERVR owns the yaw
+    bool  moveRelativeToCamera = false;   // rotate the move stick by (view yaw - body yaw); ER's stick is camera-relative already, so leave off
+    bool  snapTurn = false;               // right stick X -> discrete turns (pulses if ERVR does not own the yaw)
     float snapTurnPulseSeconds = 0.08f;
     float snapTurnRepeatSeconds = 0.30f;
 
@@ -60,12 +66,38 @@ struct Config {
 
     // [FirstPerson]  (ERVR takes over the game camera; R.E.A.L. keeps rendering)
     bool  fpEnabled = true;
-    float fpEyeHeight = 1.60f;            // meters above the character root
+    float fpEyeHeight = 1.60f;            // meters above the character root (CameraAnchor=root, and the height for CameraAnchor=head)
+    std::string fpCameraAnchor = "head";  // head = camera rides on the head bone (body connected by construction) | root = character root + EyeHeight
+    float fpCameraAnchorSmoothing = 0.06f;// s: low-pass on the head-bone anchor (kills per-frame animation jitter, keeps the lean)
+    float fpCameraBob = 1.f;              // 0..1: how much of the head bone's vertical motion (bob, crouch, run lean) the camera follows (1 = stay on the head)
+    // [Locomotion]
+    std::string locomotion = "game";      // game = the game moves the character from the stick | direct = ERVR integrates the position/facing itself (no collision from us)
+    float locoRunSpeed = 4.5f, locoSprintSpeed = 6.5f;   // m/s for Locomotion=direct
+    bool  locoFeedStick = true;           // direct: still hand the stick to the game so run/strafe animations play (its own motion is discarded)
     std::string fpCameraMode = "pre";     // pre | post | block | passthrough (how we hand the camera to the game)
     std::string fpCameraRotation = "yaw"; // yaw | game | hmd  -> what rotation we write into the game camera
-    bool  fpAddHmdPosition = false;       // add the HMD positional offset ourselves (R.E.A.L. usually does)
+    std::string fpCameraYawSource = "ervr"; // ervr (our own yaw, stick-integrated; the game's chr-cam update is replaced so nothing else can move it) | game (read the game camera's yaw back)
+    bool  fpOwnChrCam = true;             // replace the game's chr-cam (follow cam) update while first person is on, instead of writing on top of it
+    bool  fpOwnHeadPosition = false;      // hide the HMD position from R.E.A.L. (it keeps rotation) and place the eye ourselves (breaks 6DoF feel: off)
+    bool  fpAddHmdPosition = false;       // (only when OwnHeadPosition is off/unsupported) add the HMD offset ourselves
     bool  fpHmdYawInGameCamera = false;   // set true if R.E.A.L. writes HMD yaw into the game camera (hands double-turn otherwise)
+    float fpRealHmdPositionScale = 1.0f;  // how much of the raw HMD position R.E.A.L. adds to our camera (we subtract it back out)
+    bool  fpRecenter = true;              // slow play-space re-centring: without it, standing off the runtime origin makes the eye orbit the body on every stick turn
+    float fpRecenterSeconds = 2.0f;       // time constant of the slow re-centring (0 = hard lock, no positional head tracking)
+    float fpRecenterSnapRadius = 0.35f;   // m: residual beyond this snaps the play-space origin to your head instead of easing (a runtime origin metres away otherwise parks the body away from the camera and slides it back for seconds)
+    float fpRecenterMaxRadius = 0.75f;    // m: never let the head sit further than this from the character
+    bool  fpRecenterHeight = true;        // also absorb vertical drift (keeps EyeHeight whatever your real height is)
     bool  fpFaceCamera = true;           // keep the body facing the camera (strafe mode) so arms can always reach
+    std::string fpFaceCameraMode = "strafe"; // strafe (Ctrl unlock flag only: no game lock-on camera) | lock (old: force Chr_IsLockedOn + fake target) | off; ini "auto" = strafe with PoseMode=vr, else lock
+    float fpLockTargetDistance = 100.f;   // m: how far ahead the fake lock-on point sits (short = the game's lock-on camera drags your yaw)
+    std::string fpPoseMode = "vr";        // vr = full-rig template override (no animation ever poses the body; root motion still moves it) | game = animation + IK on top
+    std::string fpArmRootSource = "model";  // model = position from the ChrCtrl model matrix (the transform the renderer skins with, read fresh in the model-pos hook) + physics rotation | modelmatrix | physics
+    bool  fpPinBodyFacing = true;         // strafe mode: pin the physics facing to BodyYaw so walking toward your gaze is forward speed, not a side-step
+    bool  fpCameraAfterModelPos = true;   // write the camera again once the rendered model matrix exists, so camera and body sit on the same transform (kills the body-slides-to-camera lag)
+    bool  fpCameraFinalWrite = true;      // replay our camera matrix after the game's camera finalizer (which runs past every other write point and would otherwise render its own interpolated follow position)
+    bool  fpLatchVRPerFrame = true;       // take ONE head/hand sample per render cycle and use it at every write point, so the body is posed and the camera placed from the identical head position
+    bool  fpPoseAfterHavok = false;       // DISABLED: detouring the Havok pose fn (0x146b5e0) crashes - its ABI is not the guessed 4-arg one (crash dumps at +0x4e). Needs a register-preserving midhook instead. Weapon sway stays until then.
+    bool  fpArmSolveEveryCall = true;     // solve the arms on every Havok update, not once per rendered frame
     bool  fpHideHead = true;
     bool  fpHideSheathed = false;
     bool  fpWriteAim = true;              // write the HMD look direction into the player's aim matrix (spells/bows)
@@ -76,14 +108,21 @@ struct Config {
     float elbowPoleDown = 1.0f, elbowPoleOut = 0.6f, elbowPoleBack = 0.3f;
     float armStretch = 1.5f;              // max stretch factor of forearm+hand when the target is out of reach (1 = none)
     float handScale = 1.0f;               // scale controller offsets from the head (compensate arm length differences)
-    bool  torsoFaceCamera = true;         // twist the Spine bone so the chest faces the camera yaw
-    bool  bodyFollowsHead = true;         // shift the whole skeleton by the HMD offset so shoulders stay under your head
+    std::string bodyYawSource = "head";   // head (shoulders follow your real head - physically turning turns the body) | camera | stick
+    float bodyFacingOffsetDeg = 0.f;      // manual correction if the rendered body faces the wrong way (180 = flipped)
+    float bodyYawFollowSeconds = 0.25f;   // time constant of the body chasing the head yaw (0 = instant)
+    float bodyYawDeadzoneDeg = 0.f;       // look this far off before the body starts to follow
+    bool  torsoFaceCamera = true;         // twist the Spine bone so the chest faces the body yaw
+    bool  bodyFollowsHead = true;         // shift the whole rig so its head sits under your eye: physically stepping/leaning moves the character with you (PoseMode=vr makes this idempotent and feedback-free)
+    bool  bodyRotateToHead = true;        // also yaw the whole rendered skeleton to BodyYaw (does not wait for the game to turn the character)
+    std::string bodyAnchor = "head";      // head = put the head bone at the eye | root = shift by the headset offset only
     float bodyFollowMaxHorizontal = 0.6f; // m clamp for the skeleton shift (character root does not move)
     float bodyFollowMaxDown = 0.6f, bodyFollowMaxUp = 0.25f;
-    std::string boneTorso = "Spine";
+    std::string boneTorso = "Spine", boneHead = "Head";
     std::string boneLUpperArm = "L_UpperArm", boneLForearm = "L_Forearm", boneLHand = "L_Hand";
     std::string boneRUpperArm = "R_UpperArm", boneRForearm = "R_Forearm", boneRHand = "R_Hand";
     bool  dumpSkeleton = true;            // log all bone names once when the player skeleton is first seen
+    bool  fpPoseScan = false;             // diagnostic: page-protect the pose buffer for ~1 s and log every reader/writer RVA (one shot per false->true flip)
     bool  fpDebug = false;                // per-second debug lines with frame data
 
     // [Combat]  physical melee: swings invoke the game's AttackBehavior event instead of pressing R1/R2

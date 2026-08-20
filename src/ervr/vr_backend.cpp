@@ -18,6 +18,11 @@ int g_failStreak = 0;
 
 IVRBackend* ActiveBackend() { return g_active; }
 
+void OculusSetHostHeadPositionHidden(bool hidden);   // vr_oculus.cpp
+bool OculusHooksInstalled();
+void VRSetHostHeadPositionHidden(bool hidden) { OculusSetHostHeadPositionHidden(hidden); }
+bool VRHostHeadPositionHideSupported() { return g_active && g_active == CreateOculusBackend() && OculusHooksInstalled(); }
+
 void BackendsInit(const char* pref) {
     std::string p = pref ? pref : "auto";
     for (auto& c : p) c = (char)tolower((unsigned char)c);

@@ -112,6 +112,12 @@ void Config::Load(const std::wstring& path) {
     gestureHaptics       = GetB(ini, L"Gestures", L"Haptics", gestureHaptics);
 
     handRelativeMovement = GetB(ini, L"Movement", L"HandRelative", handRelativeMovement);
+    moveForward = GetS(ini, L"Movement", L"Forward", handRelativeMovement ? std::string("hand") : moveForward);
+    rightStick = GetS(ini, L"Movement", L"RightStick", rightStick);
+    cameraTurnErvr  = GetB(ini, L"Movement", L"CameraTurnByErvr", cameraTurnErvr);
+    turnSpeedDegPerSec = GetF(ini, L"Movement", L"TurnSpeed", turnSpeedDegPerSec);
+    snapTurnDegrees = GetF(ini, L"Movement", L"SnapTurnDegrees", snapTurnDegrees);
+    moveRelativeToCamera = GetB(ini, L"Movement", L"RelativeToCamera", moveRelativeToCamera);
     snapTurn        = GetB(ini, L"Movement", L"SnapTurn", snapTurn);
     snapTurnPulseSeconds  = GetF(ini, L"Movement", L"SnapTurnPulseSeconds", snapTurnPulseSeconds);
     snapTurnRepeatSeconds = GetF(ini, L"Movement", L"SnapTurnRepeatSeconds", snapTurnRepeatSeconds);
@@ -149,11 +155,40 @@ void Config::Load(const std::wstring& path) {
 
     fpEnabled = GetB(ini, L"FirstPerson", L"Enabled", fpEnabled);
     fpEyeHeight = GetF(ini, L"FirstPerson", L"EyeHeight", fpEyeHeight);
+    fpCameraAnchor = GetS(ini, L"FirstPerson", L"CameraAnchor", fpCameraAnchor);
+    fpCameraAnchorSmoothing = GetF(ini, L"FirstPerson", L"CameraAnchorSmoothing", fpCameraAnchorSmoothing);
+    fpCameraBob = GetF(ini, L"FirstPerson", L"CameraBob", fpCameraBob);
+    locomotion = GetS(ini, L"Locomotion", L"Mode", locomotion);
+    locoRunSpeed = GetF(ini, L"Locomotion", L"RunSpeed", locoRunSpeed);
+    locoSprintSpeed = GetF(ini, L"Locomotion", L"SprintSpeed", locoSprintSpeed);
+    locoFeedStick = GetB(ini, L"Locomotion", L"FeedStick", locoFeedStick);
     fpCameraMode = GetS(ini, L"FirstPerson", L"CameraMode", fpCameraMode);
     fpCameraRotation = GetS(ini, L"FirstPerson", L"CameraRotation", fpCameraRotation);
+    fpCameraYawSource = GetS(ini, L"FirstPerson", L"CameraYawSource", fpCameraYawSource);
+    fpOwnChrCam = GetB(ini, L"FirstPerson", L"OwnChrCam", fpOwnChrCam);
+    fpOwnHeadPosition = GetB(ini, L"FirstPerson", L"OwnHeadPosition", fpOwnHeadPosition);
     fpAddHmdPosition = GetB(ini, L"FirstPerson", L"AddHmdPosition", fpAddHmdPosition);
     fpHmdYawInGameCamera = GetB(ini, L"FirstPerson", L"HmdYawInGameCamera", fpHmdYawInGameCamera);
+    fpRealHmdPositionScale = GetF(ini, L"FirstPerson", L"RealHmdPositionScale", fpRealHmdPositionScale);
+    fpRecenter = GetB(ini, L"FirstPerson", L"Recenter", fpRecenter);
+    fpRecenterSeconds = GetF(ini, L"FirstPerson", L"RecenterSeconds", fpRecenterSeconds);
+    fpRecenterMaxRadius = GetF(ini, L"FirstPerson", L"RecenterMaxRadius", fpRecenterMaxRadius);
+    fpRecenterSnapRadius = GetF(ini, L"FirstPerson", L"RecenterSnapRadius", fpRecenterSnapRadius);
+    fpRecenterHeight = GetB(ini, L"FirstPerson", L"RecenterHeight", fpRecenterHeight);
     fpFaceCamera = GetB(ini, L"FirstPerson", L"FaceCamera", fpFaceCamera);
+    fpPoseMode = GetS(ini, L"FirstPerson", L"PoseMode", fpPoseMode);
+    {   // "auto" resolves against PoseMode on every (re)load so hot-editing PoseMode keeps them consistent
+        std::string fcm = GetS(ini, L"FirstPerson", L"FaceCameraMode", "auto");
+        fpFaceCameraMode = (fcm == "auto") ? (fpPoseMode == "vr" ? std::string("strafe") : std::string("lock")) : fcm;
+    }
+    fpLockTargetDistance = GetF(ini, L"FirstPerson", L"LockTargetDistance", fpLockTargetDistance);
+    fpArmRootSource = GetS(ini, L"FirstPerson", L"ArmRootSource", fpArmRootSource);
+    fpPinBodyFacing = GetB(ini, L"FirstPerson", L"PinBodyFacing", fpPinBodyFacing);
+    fpPoseAfterHavok = GetB(ini, L"FirstPerson", L"PoseAfterHavok", fpPoseAfterHavok);
+    fpLatchVRPerFrame = GetB(ini, L"FirstPerson", L"LatchVRPerFrame", fpLatchVRPerFrame);
+    fpCameraFinalWrite = GetB(ini, L"FirstPerson", L"CameraFinalWrite", fpCameraFinalWrite);
+    fpCameraAfterModelPos = GetB(ini, L"FirstPerson", L"CameraAfterModelPos", fpCameraAfterModelPos);
+    fpArmSolveEveryCall = GetB(ini, L"FirstPerson", L"ArmSolveEveryCall", fpArmSolveEveryCall);
     fpHideHead = GetB(ini, L"FirstPerson", L"HideHead", fpHideHead);
     fpHideSheathed = GetB(ini, L"FirstPerson", L"HideSheathedWeapons", fpHideSheathed);
     fpWriteAim = GetB(ini, L"FirstPerson", L"WriteAim", fpWriteAim);
@@ -168,12 +203,19 @@ void Config::Load(const std::wstring& path) {
     elbowPoleBack = GetF(ini, L"FirstPerson", L"ElbowPoleBack", elbowPoleBack);
     armStretch = GetF(ini, L"FirstPerson", L"ArmStretch", armStretch);
     handScale = GetF(ini, L"FirstPerson", L"HandScale", handScale);
+    bodyYawSource = GetS(ini, L"FirstPerson", L"BodyYaw", bodyYawSource);
+    bodyFacingOffsetDeg = GetF(ini, L"FirstPerson", L"BodyFacingOffsetDeg", bodyFacingOffsetDeg);
+    bodyYawFollowSeconds = GetF(ini, L"FirstPerson", L"BodyYawFollowSeconds", bodyYawFollowSeconds);
+    bodyYawDeadzoneDeg = GetF(ini, L"FirstPerson", L"BodyYawDeadzoneDeg", bodyYawDeadzoneDeg);
     torsoFaceCamera = GetB(ini, L"FirstPerson", L"TorsoFaceCamera", torsoFaceCamera);
     bodyFollowsHead = GetB(ini, L"FirstPerson", L"BodyFollowsHead", bodyFollowsHead);
+    bodyAnchor = GetS(ini, L"FirstPerson", L"BodyAnchor", bodyAnchor);
+    bodyRotateToHead = GetB(ini, L"FirstPerson", L"BodyRotate", bodyRotateToHead);
     bodyFollowMaxHorizontal = GetF(ini, L"FirstPerson", L"BodyFollowMaxHorizontal", bodyFollowMaxHorizontal);
     bodyFollowMaxDown = GetF(ini, L"FirstPerson", L"BodyFollowMaxDown", bodyFollowMaxDown);
     bodyFollowMaxUp = GetF(ini, L"FirstPerson", L"BodyFollowMaxUp", bodyFollowMaxUp);
     boneTorso = GetS(ini, L"FirstPerson", L"BoneTorso", boneTorso);
+    boneHead = GetS(ini, L"FirstPerson", L"BoneHead", boneHead);
     boneLUpperArm = GetS(ini, L"FirstPerson", L"BoneLeftUpperArm", boneLUpperArm);
     boneLForearm = GetS(ini, L"FirstPerson", L"BoneLeftForearm", boneLForearm);
     boneLHand = GetS(ini, L"FirstPerson", L"BoneLeftHand", boneLHand);
@@ -181,6 +223,7 @@ void Config::Load(const std::wstring& path) {
     boneRForearm = GetS(ini, L"FirstPerson", L"BoneRightForearm", boneRForearm);
     boneRHand = GetS(ini, L"FirstPerson", L"BoneRightHand", boneRHand);
     dumpSkeleton = GetB(ini, L"FirstPerson", L"DumpSkeleton", dumpSkeleton);
+    fpPoseScan = GetB(ini, L"FirstPerson", L"PoseWriterScan", fpPoseScan);
     fpDebug = GetB(ini, L"FirstPerson", L"Debug", fpDebug);
 
     menuNavEnabled = GetB(ini, L"MenuNav", L"Enabled", menuNavEnabled);

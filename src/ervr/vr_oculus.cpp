@@ -109,9 +109,18 @@ void NoteSession(ovrSession s) {
     }
 }
 
+std::atomic<bool> g_hideHostHeadPos{false};
 ovrTrackingState* __cdecl Hook_GetTrackingState(ovrTrackingState* out, ovrSession s, double t, ovrBool lm) {
     NoteSession(s);
-    return g_GetTrackingState(out, s, t, lm);
+    ovrTrackingState* r = g_GetTrackingState(out, s, t, lm);
+    // R.E.A.L. builds its view from this head pose. With the position hidden it contributes rotation only and
+    // ERVR is the sole owner of where the eye sits (see VRSetHostHeadPositionHidden).
+    if (r && g_hideHostHeadPos.load(std::memory_order_relaxed)) {
+        r->HeadPose.ThePose.Position = {0.f, 0.f, 0.f};
+        r->HeadPose.LinearVelocity = {0.f, 0.f, 0.f};
+        r->HeadPose.LinearAcceleration = {0.f, 0.f, 0.f};
+    }
+    return r;
 }
 double __cdecl Hook_GetPredictedDisplayTime(ovrSession s, long long idx) {
     NoteSession(s);
@@ -270,4 +279,6 @@ public:
 } // namespace
 
 IVRBackend* CreateOculusBackend() { static OculusBackend b; return &b; }
+void OculusSetHostHeadPositionHidden(bool hidden) { g_hideHostHeadPos.store(hidden); }
+bool OculusHooksInstalled() { return g_hooked; }
 }

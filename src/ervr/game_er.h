@@ -24,4 +24,22 @@ struct GameERStatus {
     double hkMs = 0, camMs = 0;                     // total ms spent in the hooks since last query
 };
 GameERStatus GameERGetStatus();
+
+// ---- camera ownership -------------------------------------------------------------
+// With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and
+// everything (camera matrix, body facing, movement basis) is derived from it, so nothing the game's own
+// follow / lock-on camera does can drag the view around.
+void GameERAddCameraYaw(float radians);
+void GameERAddBodyYaw(float radians);     // RightStick=body: turn the character body only, the view stays put
+
+struct MoveBasis {
+    bool  active = false;    // first person is running and we have a player
+    bool  lockedOn = false;  // a real enemy is locked on (the game owns the yaw then)
+    float camYaw = 0;        // where the view points
+    float chrYaw = 0;        // where the character actually faces (lags camYaw while it turns)
+    float bodyYaw = 0;       // where ERVR is turning the body toward (head yaw by default)
+    float headYaw = 0;       // HMD yaw relative to the tracking origin, game convention (positive = right)
+    bool  headValid = false;
+};
+MoveBasis GameERGetMoveBasis();
 }

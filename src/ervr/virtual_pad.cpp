@@ -2,6 +2,7 @@
 #include "vr_backend.h"
 #include "gestures.h"
 #include "combat.h"
+#include "game_er.h"
 #include "config.h"
 #include "log.h"
 #include "game_memory.h"
@@ -43,6 +44,7 @@ bool g_snapActive = false;
 
 // Menu navigation mode: left stick = held D-pad, movement zeroed, gestures muted.
 bool g_menuMode = false;        // effective state (memory flag if known, else manual/START-driven)
+MoveIntent g_move;
 bool g_menuManual = false;      // state driven by START/toggle when the memory flag is unavailable
 int  g_menuDpadDir = 0;         // 0 none, 1 up, 2 down, 3 left, 4 right (with hysteresis)
 bool g_menuToggleFired = false; // stick-click hold already toggled during this press
@@ -234,22 +236,63 @@ void VirtualPadUpdate(double now) {
         g_lthumbHold.down = false;
     }
 
-    // Hand-relative movement: rotate the stick vector by (controller yaw - head yaw).
-    if (c.handRelativeMovement && tr.hand[HandLeft].valid && tr.head.valid) {
-        float d = WrapPi(tr.hand[HandLeft].rot.Yaw() - tr.head.rot.Yaw());
-        float cs = std::cos(d), sn = std::sin(d);
-        float nx = lx * cs + ly * sn, ny = -lx * sn + ly * cs;   // rotate around Y (stick y = forward)
+    // ---- movement basis --------------------------------------------------------
+    // The game moves you relative to its camera, and in first person that camera is ERVR's stick yaw - which is
+    // where the *tracking origin* points, not where you look. So "forward" has to be rotated by the yaw of
+    // whatever the player means by forward, measured in the tracking frame (game convention: positive = right):
+    //   head   = where you look (default; what every VR game does)
+    //   hand   = where the left controller points
+    //   body   = where the character body is turned (BodyYaw)
+    //   camera = the stick yaw itself (old behaviour: forward is wherever you last turned with the stick)
+    MoveBasis mb = GameERGetMoveBasis();
+    auto rotateStick = [&](float r) {   // rotate the stick vector by r about Y (stick y = forward, positive r = right)
+        float cs = std::cos(r), sn = std::sin(r);
+        float nx = lx * cs + ly * sn, ny = -lx * sn + ly * cs;
         lx = nx; ly = ny;
+    };
+    if (mb.active && !g_menuMode) {   // first person only: in third person the game camera is R.E.A.L.'s to steer
+        // VR-frame Yaw() is positive to the LEFT (0 = -Z); the game's yaw is positive to the right.
+        if (c.moveForward == "hand" && tr.hand[HandLeft].valid) rotateStick(-tr.hand[HandLeft].rot.Yaw());
+        else if (c.moveForward == "body") rotateStick(WrapPi(mb.bodyYaw - mb.camYaw));
+        else if ((c.moveForward == "head" || c.moveForward == "hand") && mb.headValid) rotateStick(mb.headYaw);
+    } else if (c.moveForward == "hand" && tr.hand[HandLeft].valid && tr.head.valid && !g_menuMode) {
+        // Game-owned view yaw (default): forward is where you look; hand-relative = rotate by (controller - head) yaw.
+        rotateStick(WrapPi(tr.hand[HandLeft].rot.Yaw() - tr.head.rot.Yaw()));
     }
 
-    // Snap turn: convert right-stick X into short full-deflection pulses.
-    if (c.snapTurn) {
+    // ---- turning ---------------------------------------------------------------
+    // When ERVR owns the view yaw the turn stick drives *our* yaw, not the game's camera.
+    bool ervrTurn = mb.active && c.cameraTurnErvr && !g_menuMode;   // menus keep the stock right stick
+    if (ervrTurn) {
+        static double s_lastTurn = 0;
+        float dt = (float)Clamp((float)(now - s_lastTurn), 0.f, 0.1f);
+        s_lastTurn = now;
+        float delta = 0.f;
+        if (c.snapTurn) {
+            if (std::fabs(rx) > 0.7f) {
+                if (!g_snapActive || now - g_lastSnap >= c.snapTurnRepeatSeconds) { g_lastSnap = now; g_snapActive = true; delta = (rx > 0 ? 1.f : -1.f) * c.snapTurnDegrees; }
+            } else g_snapActive = false;
+        } else {
+            delta = rx * c.turnSpeedDegPerSec * c.rightStickSensitivity * dt;
+        }
+        if (c.rightStick == "camera") GameERAddCameraYaw(Deg2Rad(delta));
+        else GameERAddBodyYaw(Deg2Rad(delta));   // body only: the view stays where it is
+        if (!mb.lockedOn) rx = 0.f;   // locked on the right stick still switches targets; otherwise it is ours
+        ry = 0.f;                     // pitch comes from the headset
+    } else if (c.snapTurn) {
+        // Snap turn without yaw ownership: convert right-stick X into short full-deflection pulses.
         if (std::fabs(rx) > 0.7f) {
             if (!g_snapActive || now - g_lastSnap >= c.snapTurnRepeatSeconds) { g_lastSnap = now; g_snapActive = true; }
             rx = (now - g_lastSnap) < c.snapTurnPulseSeconds ? (rx > 0 ? 1.f : -1.f) : 0.f;
         } else { g_snapActive = false; rx = 0.f; }
     } else {
         rx *= c.rightStickSensitivity; ry *= c.rightStickSensitivity;
+    }
+    if (mb.active && c.moveRelativeToCamera && !g_menuMode) {
+        float d = WrapPi(mb.camYaw - mb.chrYaw);
+        float cs = std::cos(d), sn = std::sin(d);
+        float nx = lx * cs + ly * sn, ny = -lx * sn + ly * cs;
+        lx = nx; ly = ny;
     }
 
     // ---- gestures ----------------------------------------------------------
@@ -308,9 +351,15 @@ void VirtualPadUpdate(double now) {
     pad.buttons = held | pulses;
     pad.lt = lt; pad.rt = rt;
     pad.lx = ToStick(lx); pad.ly = ToStick(ly); pad.rx = ToStick(rx); pad.ry = ToStick(ry);
+    {
+        MoveIntent mi; mi.x = lx; mi.y = ly; mi.sprint = (pad.buttons & XINPUT_GAMEPAD_B) != 0; mi.valid = !g_menuMode;
+        std::lock_guard<std::mutex> g(g_mtx); g_move = mi;
+        if (c.locomotion == "direct" && !c.locoFeedStick && !g_menuMode) { pad.lx = 0; pad.ly = 0; }
+    }
     std::lock_guard<std::mutex> g(g_mtx);
     g_pad = pad;
 }
+MoveIntent VirtualPadGetMove() { std::lock_guard<std::mutex> g(g_mtx); return g_move; }
 
 bool VirtualPadMerge(XINPUT_STATE& st) {
     VPad p;
