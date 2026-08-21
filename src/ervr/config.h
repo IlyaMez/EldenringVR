@@ -39,15 +39,31 @@ struct Config {
     // gamma encoded) and the XR swapchain is read as linear. "none" if the picture looks
     // too dark, "srgb" to force the conversion on.
     std::string vrColorFix = "auto";       // auto | srgb | none
-    // Game render resolution for VR (uberhalit's custom-resolution technique: overwrite the
-    // 1920x1080 entry of the game's resolution table, bypass the 16:9 clamp). The per-eye
-    // image is a CROP of the game's frame, so the game resolution IS the VR sharpness - and
-    // a near-square target (the headset's own eye aspect) stops a 16:9 frame wasting ~57%
-    // of its width to the crop. "auto" = the headset's recommended per-eye size (cached in
-    // ERVR.cache.ini so it is available at boot, before the runtime is up), "WxH" = exact
-    // override, "off" = leave the game's table alone (DSR territory again).
+    // Game render resolution for VR, written into the game's own GraphicsConfig.xml (the
+    // mechanism R.E.A.L. VR uses: the windowed size there is honoured even when no monitor
+    // could display it, so it needs no menu step and no patching). The per-eye image is a
+    // CROP of the game's frame, so this IS the VR sharpness - and per-eye pixels track the
+    // frame's HEIGHT almost alone, since a wider frame just widens the rendered FOV
+    // proportionally. "auto" = the headset's recommended per-eye size (cached in
+    // ERVR.cache.ini so it is known at boot, before the runtime is up), "WxH" = exact
+    // override, "off" = leave the player's own resolution alone.
     std::string vrGameRes = "auto";        // off | auto | WxH (e.g. 3072x3264)
     float vrGameResScale = 1.0f;           // scales the auto target (GPU headroom knob)
+    // Try to make the game accept a target LARGER than the desktop by inflating every
+    // desktop-size API it might consult. DEFAULT OFF because it does not work yet and costs
+    // sharpness when it fails: measured 2026-08-21, the game's late "apply settings" pass
+    // still rejected an oversized entry and fell back to the table slot BELOW it (1680x945,
+    // worse than the fitted 1656x1440). Lied to so far, all without effect: GetSystemMetrics
+    // (all screen metrics, and the max-track pair), GetMonitorInfoW/A (including the calls
+    // DXGI makes on the game's behalf), EnumDisplaySettings(ENUM_CURRENT_SETTINGS),
+    // GetDeviceCaps (never called at all). The check must read a cached value - finding it
+    // needs a guard-page census on the resolution table to catch the comparing code.
+    bool  vrGameResOversize = false;
+    // Remove the game's 16:9 letterbox mask when GameRes is not 16:9. The game renders the
+    // whole window and then masks it back to 16:9, which both wastes the pixels and leaves
+    // the eye crop computing against an aspect the image does not actually have (black bars
+    // plus head-motion shear, measured 2026-08-21). Set false to fall back to 16:9 targets.
+    bool  vrGameResAspectFix = true;
 
     // [Buttons]  Touch -> XInput. Values are XInput button names or "none".
     std::string btnA = "A", btnB = "B", btnX = "X", btnY = "Y";
@@ -287,6 +303,11 @@ struct Config {
 
     // [Patches] - in-process .text patches (uberhalit's EldenRingFpsUnlockAndMore, MIT)
     int   patchFpsTarget = 0;         // 0 = leave the 60 fps cap; 30..360 = unlock to this
+    // Opt the process into per-monitor DPI awareness at startup. Without it Windows
+    // virtualizes the desktop size for the game (a 3440x1440 screen at 150% scaling reads as
+    // ~2293x960), so its windowed resolution list stops at 1680x945 and the back buffer -
+    // the only pixels VR has to work with - is that small before DWM upscales it.
+    bool  patchDpiAware = true;
 
     // Camera-capture hunt: PAGE_GUARD the render camera and log every reader's rip/regs.
     // Finds where the renderer captures its once-per-frame camera copy (see cam_watch.h).

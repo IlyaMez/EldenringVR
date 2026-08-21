@@ -18,6 +18,12 @@ bool  PatchesWriteFrameDt(float dt);
 // square) resolution in the video settings without touching DSR. Idempotent; re-applies
 // when the target changes (ini hot-reload, fresh headset geometry). Worker thread.
 void PatchesApplyGameResolution();
+// Opt the process into per-monitor DPI awareness, as early as possible. ELDEN RING is
+// DPI-virtualized by default: on a 3440x1440 desktop at 150% scaling it measures the screen
+// as ~2293x960, so its WINDOWED resolution list stops at 1680x945 and the back buffer it
+// hands us is that small - then DWM upscales it. That is the single biggest source of VR
+// blur; awareness alone restores the full-size entries.
+void PatchesMakeDpiAware();
 // The runtime's recommended per-eye size, once known. Cached to ERVR.cache.ini so the NEXT
 // boot can patch the table before the game reads its saved graphics settings; re-applies
 // the resolution patch live when it changes an "auto" target.

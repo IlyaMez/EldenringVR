@@ -180,6 +180,13 @@ void VirtualPadUpdate(double now) {
             if (flag != g_menuLastFlag) { g_menuOverride = false; g_menuLastFlag = flag; }
             if (toggle) { g_menuOverride = true; g_menuManual = !g_menuMode; }
             g_menuMode = g_menuOverride ? g_menuManual : (flag == 1);
+        } else if (!GameERPlayerActive()) {
+            // Title screen, loading, character creation: there is no in-game menu for
+            // START-follow to track, and these screens navigate from the ANALOG stick. Left
+            // to itself, the first Menu press on the title screen flipped the mod into
+            // D-pad mode and the selection stopped moving (reported 2026-08-21).
+            g_menuManual = false;
+            g_menuMode = false;
         } else {
             if (c.menuNavFollowStart) {
                 if (pressedStart) g_menuManual = !g_menuManual;   // START opens the menu, and closes it again
@@ -351,6 +358,25 @@ void VirtualPadUpdate(double now) {
     pad.buttons = held | pulses;
     pad.lt = lt; pad.rt = rt;
     pad.lx = ToStick(lx); pad.ly = ToStick(ly); pad.rx = ToStick(rx); pad.ry = ToStick(ry);
+
+    // What the GAME is handed, logged on change. Pairs with "[xr] raw" (what the runtime
+    // handed US), so a control that does nothing can be blamed on exactly one of the two
+    // hops instead of both being suspect at once.
+    {
+        auto dir8 = [](int16_t x, int16_t y) {
+            const int ax = x < 0 ? -x : x, ay = y < 0 ? -y : y;
+            if (ax < 8000 && ay < 8000) return 0;
+            return ax > ay ? (x > 0 ? 1 : 2) : (y > 0 ? 3 : 4);
+        };
+        static uint16_t s_btn = 0; static int s_l = 0, s_r = 0; static int s_menu = -1;
+        const int l = dir8(pad.lx, pad.ly), r = dir8(pad.rx, pad.ry);
+        if (pad.buttons != s_btn || l != s_l || r != s_r || (int)g_menuMode != s_menu) {
+            s_btn = pad.buttons; s_l = l; s_r = r; s_menu = (int)g_menuMode;
+            LOGD("[pad] -> game: btn 0x%04X lt %u rt %u stick L(%d,%d) R(%d,%d)%s",
+                 pad.buttons, pad.lt, pad.rt, pad.lx, pad.ly, pad.rx, pad.ry,
+                 g_menuMode ? "  [menu-nav ON: left stick replaced by held D-pad]" : "");
+        }
+    }
     {
         MoveIntent mi; mi.x = lx; mi.y = ly; mi.sprint = (pad.buttons & XINPUT_GAMEPAD_B) != 0; mi.valid = !g_menuMode;
         std::lock_guard<std::mutex> g(g_mtx); g_move = mi;

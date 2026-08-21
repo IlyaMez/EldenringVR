@@ -95,6 +95,8 @@ void Config::Load(const std::wstring& path) {
     vrColorFix       = GetS(ini, L"VR", L"ColorFix", vrColorFix);
     vrGameRes        = GetS(ini, L"VR", L"GameRes", vrGameRes);
     vrGameResScale   = GetF(ini, L"VR", L"GameResScale", vrGameResScale);
+    vrGameResOversize = GetB(ini, L"VR", L"GameResOversize", vrGameResOversize);
+    vrGameResAspectFix = GetB(ini, L"VR", L"GameResAspectFix", vrGameResAspectFix);
     vrPass2Keep      = GetS(ini, L"VR", L"Pass2Keep", vrPass2Keep);
     vrPass2FullFrame = GetB(ini, L"VR", L"Pass2FullFrame", vrPass2FullFrame);
     vrPass2Dt        = GetF(ini, L"VR", L"Pass2Dt", vrPass2Dt);
@@ -269,6 +271,7 @@ void Config::Load(const std::wstring& path) {
     cameraPitchOffset = GetI(ini, L"Experimental", L"CameraPitchOffset", cameraPitchOffset);
     handAimStrength = GetF(ini, L"Experimental", L"HandAimStrength", handAimStrength);
     patchFpsTarget = GetI(ini, L"Patches", L"FpsTarget", patchFpsTarget);
+    patchDpiAware  = GetB(ini, L"Patches", L"DpiAware", patchDpiAware);
 
     camWatch        = GetB(ini, L"Experimental", L"CamWatch", camWatch);
     camWatchDelay   = GetF(ini, L"Experimental", L"CamWatchDelay", camWatchDelay);

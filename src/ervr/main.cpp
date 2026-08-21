@@ -119,6 +119,9 @@ DWORD WINAPI Worker(LPVOID) {
     LogInit(dir + L"\\ERVR.log", ParseLevel(Cfg().logLevel));
     LOGI("ERVR %s starting (pid %lu) in %S", ERVR_VERSION, GetCurrentProcessId(), dir.c_str());
     if (!Cfg().enabled) { LOGI("Disabled via ERVR.ini; exiting worker"); return 0; }
+    // Before the game creates its window and measures the desktop: DPI virtualization is
+    // what caps the windowed resolution list (and therefore the VR image) at 1680x945.
+    PatchesMakeDpiAware();
     AddVectoredExceptionHandler(1, PanicVeh);   // turn DL_PANIC crashes into logged stacks
 
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {

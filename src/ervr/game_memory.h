@@ -10,7 +10,7 @@ namespace ervr {
 // Scans the main module's executable sections for an IDA-style pattern ("48 8B 05 ?? ?? ?? ??").
 uint8_t* AobScan(const std::string& pattern);
 // Same pattern syntax over the module's readable NON-executable sections (.data/.rdata),
-// returning every match: data tables (like the resolution list) can exist in several copies.
+// returning every match: data tables can exist in more than one copy.
 std::vector<uint8_t*> AobScanData(const std::string& pattern);
 // Resolves a rip-relative reference located at `at + relOffset` for an instruction of length `instrLen`.
 uint8_t* ResolveRipRelative(uint8_t* at, int relOffset, int instrLen);

@@ -402,8 +402,18 @@ public:
         if (GetBool(actions_.stickClick[HandRight])) b |= VRB_RThumb;
         in.buttons = b;
 
+        LogInputCensus(tr.time);
+
+        // Event-driven: a 2 s poll misses every stick push a player actually makes, which is
+        // exactly what made the 2026-08-21 "menu will not move" report unreadable (25 samples,
+        // not one of them during a press). Anything non-idle logs within 250 ms.
         static double s_lastDump = 0;
-        if (tr.time - s_lastDump > 2.0) {
+        const bool anyInput =
+            b != 0 || in.indexTrigger[0] > 0.1f || in.indexTrigger[1] > 0.1f ||
+            in.handTrigger[0] > 0.1f || in.handTrigger[1] > 0.1f ||
+            std::fabs(in.thumb[0][0]) > 0.1f || std::fabs(in.thumb[0][1]) > 0.1f ||
+            std::fabs(in.thumb[1][0]) > 0.1f || std::fabs(in.thumb[1][1]) > 0.1f;
+        if (tr.time - s_lastDump > (anyInput ? 0.25 : 2.0)) {
             s_lastDump = tr.time;
             LOGD("[xr] raw: state %d conn(%d,%d) btn 0x%04x trig(%.2f,%.2f) grip(%.2f,%.2f) "
                  "stick L(%.2f,%.2f) R(%.2f,%.2f) head(%.2f,%.2f,%.2f)",
@@ -429,6 +439,66 @@ public:
     }
 
 private:
+    std::string PathStr(XrPath p) const {
+        if (p == XR_NULL_PATH) return "<none>";
+        char buf[XR_MAX_PATH_LENGTH]{};
+        uint32_t n = 0;
+        if (XR_FAILED(xrPathToString(instance_, p, sizeof(buf), &n, buf))) return "?";
+        return buf;
+    }
+    std::string ProfileFor(const char* handPath) {
+        XrInteractionProfileState ips{XR_TYPE_INTERACTION_PROFILE_STATE};
+        XrPath hp = XR_NULL_PATH;
+        xrStringToPath(instance_, handPath, &hp);
+        if (hp == XR_NULL_PATH || XR_FAILED(xrGetCurrentInteractionProfile(session_, hp, &ips)))
+            return "<none>";
+        return PathStr(ips.interactionProfile);
+    }
+
+    // isActive is the runtime telling us whether an action has a bound source AT ALL, as
+    // opposed to "bound but the user is not touching it". Without it, a control that never
+    // binds is indistinguishable from one nobody pressed - the ambiguity that stalled the
+    // 2026-08-21 "left stick does nothing, A works" report. Logged only when it changes.
+    void LogInputCensus(double now) {
+        if (now - lastCensus_ < 1.0) return;
+        lastCensus_ = now;
+        auto boolAct = [&](XrAction a) {
+            if (!a) return false;
+            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO}; gi.action = a;
+            XrActionStateBoolean s{XR_TYPE_ACTION_STATE_BOOLEAN};
+            return XR_SUCCEEDED(xrGetActionStateBoolean(session_, &gi, &s)) && s.isActive != XR_FALSE;
+        };
+        auto floatAct = [&](XrAction a) {
+            if (!a) return false;
+            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO}; gi.action = a;
+            XrActionStateFloat s{XR_TYPE_ACTION_STATE_FLOAT};
+            return XR_SUCCEEDED(xrGetActionStateFloat(session_, &gi, &s)) && s.isActive != XR_FALSE;
+        };
+        auto vecAct = [&](XrAction a) {
+            if (!a) return false;
+            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO}; gi.action = a;
+            XrActionStateVector2f s{XR_TYPE_ACTION_STATE_VECTOR2F};
+            return XR_SUCCEEDED(xrGetActionStateVector2f(session_, &gi, &s)) && s.isActive != XR_FALSE;
+        };
+        const bool ls = vecAct(actions_.stick[0]),  rs = vecAct(actions_.stick[1]);
+        const bool lt = floatAct(actions_.trigger[0]), rt = floatAct(actions_.trigger[1]);
+        const bool lg = floatAct(actions_.squeeze[0]), rg = floatAct(actions_.squeeze[1]);
+        const bool lc = boolAct(actions_.stickClick[0]), rc = boolAct(actions_.stickClick[1]);
+        const bool ba = boolAct(actions_.btnA), bb = boolAct(actions_.btnB);
+        const bool bx = boolAct(actions_.btnX), by = boolAct(actions_.btnY), bm = boolAct(actions_.btnMenu);
+        const uint32_t mask = (uint32_t)ls | (rs << 1) | (lt << 2) | (rt << 3) | (lg << 4) |
+                              (rg << 5) | (lc << 6) | (rc << 7) | (ba << 8) | (bb << 9) |
+                              (bx << 10) | (by << 11) | (bm << 12);
+        if (mask == lastCensusMask_) return;
+        lastCensusMask_ = mask;
+        LOGI("[xr] input sources bound: L(stick %d trig %d grip %d click %d) "
+             "R(stick %d trig %d grip %d click %d) A %d B %d X %d Y %d menu %d | "
+             "profile L=\"%s\" R=\"%s\"%s",
+             ls, lt, lg, lc, rs, rt, rg, rc, ba, bb, bx, by, bm,
+             ProfileFor("/user/hand/left").c_str(), ProfileFor("/user/hand/right").c_str(),
+             (!ls || !rs) ? "  <-- A THUMBSTICK HAS NO BOUND SOURCE (menu/movement will be dead)" : "");
+    }
+
     bool LocateIn(XrSpace space, int64_t displayTimeNs, VREyeView out[2]) {
         std::lock_guard<std::recursive_mutex> g(g_mtx);
         if (!bound_ || space == XR_NULL_HANDLE) return false;
@@ -835,6 +905,8 @@ private:
     ID3D12CommandQueue* queue_ = nullptr;
     bool bound_ = false, sessionRunning_ = false, frameBegun_ = false, haveTimeConv_ = false;
     uint64_t lastAttach_ = 0;
+    double   lastCensus_ = 0;
+    uint32_t lastCensusMask_ = 0xFFFFFFFF;   // never equals a real mask, so the first poll logs
     std::atomic<XrTime> displayTime_{0};
     uint64_t pairIndex_ = 0;
 };

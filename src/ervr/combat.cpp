@@ -13,6 +13,7 @@
 // Muffin's DS3 moveset notes (BehaviorParam_PC row = 1_0000_0000 + variation*1000 + judgeId).
 #include "combat.h"
 #include "config.h"
+#include "game_er.h"
 #include "game_memory.h"
 #include "log.h"
 #include "rtti.h"
@@ -279,7 +280,15 @@ bool CombatInit(uint8_t* base, bool versionOk) {
 
 void CombatShutdown() {}
 
-bool CombatHandlesSwings() { std::lock_guard<std::mutex> g(g_mtx); return g_status.taeHooked && PhysicalActiveLocked(); }
+// Physical combat exists only while the player is IN THE WORLD. Without the player check the
+// attack-button block stayed armed on the title screen and in menus - RB (right trigger) and
+// RT (right grip) silently did nothing there, since no swing can fire to replace them
+// (reported 2026-08-21: "right trigger seems disabled").
+bool CombatHandlesSwings() {
+    if (!GameERPlayerActive()) return false;
+    std::lock_guard<std::mutex> g(g_mtx);
+    return g_status.taeHooked && PhysicalActiveLocked();
+}
 
 void CombatNotifyButton(uint16_t mask, double now) {
     const Config& c = Cfg();
@@ -349,7 +358,11 @@ void CombatGameFrame(uint8_t* player, uint32_t frame) {
 }
 
 CombatStatus CombatGetStatus() {
+    // Live, not the value last written by the in-world frame body: that one reads 0 whenever
+    // the player is not spawned, which hid an armed RB/RT block behind "physical 0".
+    const bool phys = CombatHandlesSwings();
     CombatStatus s = g_status;
+    s.physical = phys;
     { std::lock_guard<std::mutex> g(g_mtx); s.learnedLight = g_tpl[SlotLight].valid; s.learnedHeavy = g_tpl[SlotHeavy].valid; s.learnedLeft = g_tpl[SlotLeft].valid; }
     s.injected = InterlockedExchange(&g_injected, 0); s.swings = InterlockedExchange(&g_swings, 0);
     return s;
