@@ -59,6 +59,29 @@ uint8_t* AobScan(const std::string& pattern) {
     return nullptr;
 }
 
+std::vector<uint8_t*> AobScanData(const std::string& pattern) {
+    std::vector<uint8_t*> hits;
+    auto pat = Parse(pattern);
+    if (pat.empty()) return hits;
+    auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    auto* dos = (IMAGE_DOS_HEADER*)base;
+    auto* nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    auto* sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+        if (sec->Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_READ)) continue;
+        uint8_t* start = base + sec->VirtualAddress;
+        size_t size = sec->Misc.VirtualSize;
+        if (size < pat.size()) continue;
+        for (size_t off = 0; off + pat.size() <= size; ++off) {
+            size_t k = 0;
+            for (; k < pat.size(); ++k) if (!pat[k].wild && start[off + k] != pat[k].v) break;
+            if (k == pat.size()) hits.push_back(start + off);
+        }
+    }
+    return hits;
+}
+
 uint8_t* ResolveRipRelative(uint8_t* at, int relOffset, int instrLen) {
     int32_t rel = 0;
     if (!SafeRead(at + relOffset, &rel, sizeof(rel))) return nullptr;

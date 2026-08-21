@@ -152,6 +152,13 @@ DWORD WINAPI Worker(LPVOID) {
             FrameProbeTick();   // M2 spike; no-op unless [Experimental] TaskProbe=true
             CamWatchTick();     // camera-capture hunt; no-op unless [Experimental] CamWatch=true
             DebugKeysTick();    // numpad A/B hotkeys for the stereo experiments
+            // Feed the headset's recommended per-eye size to the resolution patch (cached
+            // for the next boot; dedup + no-op inside when nothing changed).
+            if (IVRBackend* vb = ActiveBackend()) {
+                uint32_t ew = 0, eh = 0;
+                if (vb->IsReady() && vb->GetRecommendedEyeSize(ew, eh))
+                    PatchesNoteHmdEyeSize(ew, eh);
+            }
         }
         // Hot-reload the ini (any key except VRRuntime/LogLevel/PollHz takes effect immediately).
         if (t - lastIniCheck > 1.0) {
@@ -161,6 +168,7 @@ DWORD WINAPI Worker(LPVOID) {
                 iniTime = ft;
                 Cfg().Load(ini);
                 VirtualPadInit();
+                PatchesApplyGameResolution();   // GameRes/GameResScale hot-edit
                 LOGI("ERVR.ini reloaded");
             }
         }

@@ -39,6 +39,15 @@ struct Config {
     // gamma encoded) and the XR swapchain is read as linear. "none" if the picture looks
     // too dark, "srgb" to force the conversion on.
     std::string vrColorFix = "auto";       // auto | srgb | none
+    // Game render resolution for VR (uberhalit's custom-resolution technique: overwrite the
+    // 1920x1080 entry of the game's resolution table, bypass the 16:9 clamp). The per-eye
+    // image is a CROP of the game's frame, so the game resolution IS the VR sharpness - and
+    // a near-square target (the headset's own eye aspect) stops a 16:9 frame wasting ~57%
+    // of its width to the crop. "auto" = the headset's recommended per-eye size (cached in
+    // ERVR.cache.ini so it is available at boot, before the runtime is up), "WxH" = exact
+    // override, "off" = leave the game's table alone (DSR territory again).
+    std::string vrGameRes = "auto";        // off | auto | WxH (e.g. 3072x3264)
+    float vrGameResScale = 1.0f;           // scales the auto target (GPU headroom knob)
 
     // [Buttons]  Touch -> XInput. Values are XInput button names or "none".
     std::string btnA = "A", btnB = "B", btnX = "X", btnY = "Y";
@@ -220,6 +229,15 @@ struct Config {
     // (the single float every stack-built FD4TaskData copies its dt from) to ~0 around
     // pass 2. 0 = pass 2 advances NOTHING = true same-sim-time stereo. -1 = off.
     int vrPass2Steps = 0;
+    // Fade-out watcher for world transitions (fast travel/death): samples back-buffer luma
+    // ~4x/s and suspends pass 2 while the screen is black. DEFAULT OFF - the sample is a
+    // GPU readback submitted inside ReShade's present event, and EVERY variant of that
+    // crashes D3D12Core.dll+0x11f85 (measured 2026-08-20 in three designs, then again
+    // 2026-08-21 as a 100%-reproducible VR startup crash ~3 s after stereo starts: device
+    // wedge -> XR_ERROR_RUNTIME_FAILURE flood -> game AV -> GPU video-engine reset). Do not
+    // enable until the sampler is redesigned off the present path; fast travel is covered
+    // by Pass2EatAsserts + the teleport guard + the player-inactive grace meanwhile.
+    bool  vrFadeGuard = false;
     // Suppress DL_PANIC asserts that fire DURING pass 2 (skip the deliberate null-write;
     // the panic fn then returns cleanly). Pass-2 asserts are spurious - the second pass
     // replays the frame over transition state pass 1 never sees (fast travel's fade-out).

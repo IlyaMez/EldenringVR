@@ -93,12 +93,15 @@ void Config::Load(const std::wstring& path) {
     vrFovAxis        = GetS(ini, L"VR", L"FovAxis", vrFovAxis);
     vrIpdMm          = GetF(ini, L"VR", L"IpdMm", vrIpdMm);
     vrColorFix       = GetS(ini, L"VR", L"ColorFix", vrColorFix);
+    vrGameRes        = GetS(ini, L"VR", L"GameRes", vrGameRes);
+    vrGameResScale   = GetF(ini, L"VR", L"GameResScale", vrGameResScale);
     vrPass2Keep      = GetS(ini, L"VR", L"Pass2Keep", vrPass2Keep);
     vrPass2FullFrame = GetB(ini, L"VR", L"Pass2FullFrame", vrPass2FullFrame);
     vrPass2Dt        = GetF(ini, L"VR", L"Pass2Dt", vrPass2Dt);
     vrPass2FullFrameKeep = GetS(ini, L"VR", L"Pass2FullFrameKeep", vrPass2FullFrameKeep);
     vrPass2Steps     = GetI(ini, L"VR", L"Pass2Steps", vrPass2Steps);
     vrPass2EatAsserts = GetB(ini, L"VR", L"Pass2EatAsserts", vrPass2EatAsserts);
+    vrFadeGuard      = GetB(ini, L"VR", L"FadeGuard", vrFadeGuard);
     vrPresentLag     = GetI(ini, L"VR", L"PresentLag", vrPresentLag);
     vrGpuSync        = GetI(ini, L"VR", L"GpuSync", vrGpuSync);
     debugKeys        = GetB(ini, L"VR", L"DebugKeys", debugKeys);

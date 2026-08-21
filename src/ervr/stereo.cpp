@@ -402,7 +402,9 @@ void FadeGuardSample(const Dx12Frame& f) {
 bool StereoFadeGuardActive() { return g_fadeGuard.load(std::memory_order_relaxed); }
 
 void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
-    FadeGuardSample(f);
+    // [VR] FadeGuard, DEFAULT OFF: the luma readback inside the present event is the
+    // D3D12Core+0x11f85 crash (2026-08-21: 100% VR startup crash ~3 s in). See config.h.
+    if (Cfg().vrFadeGuard) FadeGuardSample(f);
     // ER's renderer may be pipelined one present deep - the image a Present carries can be
     // the PREVIOUS pass's render, in which case eye content is cross-routed and both eyes
     // shimmer (each image is submitted with the other camera's pose). PresentLag selects
