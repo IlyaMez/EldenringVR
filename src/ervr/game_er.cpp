@@ -106,6 +106,7 @@ uint8_t* g_camWallRecovery = nullptr;    // address of the camera wall-recovery 
 uint8_t** g_worldChrManPtr = nullptr;    // address of the WorldChrMan* global
 uint8_t** g_fieldAreaPtr = nullptr;      // address of the FieldArea* global
 uint8_t** g_gameDataManPtr = nullptr;    // address of the GameDataMan* global (stats cheat)
+std::atomic<ULONGLONG> g_bigJumpTick{0}; // last >100 m camera jump (teleport) tick
 FnCameraStep g_origCameraStep = nullptr;
 using FnMmsUpdate = void (__fastcall*)(void*);
 using FnFollow = void (__fastcall*)(void* followCam, float dt, void* c);
@@ -1071,6 +1072,23 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
         for (int i = 0; i < npc; ++i) SafeWrite(pcs[i] + off::Cam_Fov, &fov, 4);
         if (uint8_t* cc = ChrCam()) SafeWrite(cc + off::Cam_Fov, &fov, 4);
     }
+    // World-origin-shift telemetry: an origin rebase (BeginShiftWorldPosition, group 160)
+    // moves every world coordinate at once, so the camera jumps farther in one frame than any
+    // real motion could. Logged so in-headset glitch reports can be lined up against shifts -
+    // the 2026-08-20 "geometry shifting/teleport ~1 min in" started at the first rebase.
+    { static Vec3 s_prevPos{}; static bool s_havePrev = false;
+      if (s_havePrev) {
+          const float jump = (pos - s_prevPos).Length();
+          if (jump > 20.f) {
+              // Rebases move ~32 m; anything much larger is a teleport (fast travel, grace
+              // warp) - suspend the second pass while the world is torn down and rebuilt
+              // around it (fast travel's fade fired pass-2 DL_PANICs on 2026-08-21).
+              if (jump > 100.f) g_bigJumpTick.store(GetTickCount64(), std::memory_order_relaxed);
+              LOGI("[shift] camera jumped %.1f m in one frame - %s", jump,
+                   jump > 100.f ? "TELEPORT (pass 2 suspended)" : "world-origin rebase");
+          }
+      }
+      s_prevPos = pos; s_havePrev = true; }
     g_lastWrittenPos = pos; g_lastCamRoot = f.root;
     { std::lock_guard<std::mutex> g(g_camMtxLock);
       float m[16] = { r.x, r.y, r.z, 0.f, u.x, u.y, u.z, 0.f, fw.x, fw.y, fw.z, 0.f, pos.x, pos.y, pos.z, 1.f };
@@ -1433,7 +1451,9 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
             }
         }
     }
-    Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(c.handRotOffX), Deg2Rad(c.handRotOffZ));
+    float handRotX = c.handRotOffX;
+    DebugKeysHandRotX(&handRotX);   // Numpad 6/9 live calibration wins while active
+    Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
     bool any = false;
     for (int h = 0; h < 2; ++h) {
         if (!f.handValid[h]) continue;
@@ -2006,6 +2026,31 @@ void ApplyStatCheat() {
         LOGI("[cheat] raised %d stats to %d (level -> %d)", changed, want, level);
     }
     applied = want;
+}
+
+// In-game time in ms (GameDataMan+0xA0, the community IGT offset speedrun timers use). IGT
+// advances by the frame dt each sim frame, which makes it the perfect probe for the pass-2
+// dt swap: a full-dt second pass doubles its rate, a dt~0 one leaves it at 1.0x realtime.
+uint32_t GameERIgtMs() {
+    if (!g_gameDataManPtr) return 0;
+    uint8_t* gdm = Deref(g_gameDataManPtr);
+    if (!gdm) return 0;
+    uint32_t igt = 0;
+    if (!SafeRead(gdm + 0xA0, &igt, 4)) return 0;
+    return igt;
+}
+
+bool GameERTeleportGraceActive() {
+    const ULONGLONG t = g_bigJumpTick.load(std::memory_order_relaxed);
+    return t != 0 && GetTickCount64() - t < 4000;
+}
+
+uint8_t* GameERIgtWatchTarget(uint32_t* outLen) {
+    if (!g_gameDataManPtr) return nullptr;
+    uint8_t* gdm = Deref(g_gameDataManPtr);
+    if (!gdm) return nullptr;
+    if (outLen) *outLen = 4;
+    return gdm + 0xA0;
 }
 
 void GameERTick() {

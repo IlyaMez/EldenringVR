@@ -1,5 +1,6 @@
 #include "cam_watch.h"
 #include "game_er.h"
+#include "frame_probe.h"
 #include "config.h"
 #include "log.h"
 #include <windows.h>
@@ -147,11 +148,31 @@ DWORD WINAPI WatchThread(LPVOID) {
     // Wait for the world; the camera object only exists in-game.
     for (int w = 0; w < 600 && !GameERPlayerActive(); ++w) Sleep(1000);
     if (!GameERPlayerActive()) { LOGW("[camwatch] player never became active"); return 0; }
-    Sleep((DWORD)(Cfg().camWatchDelay * 1000.f));
 
     uint32_t len = 0;
-    uint8_t* tgt = GameERCamWatchTarget(&len);
-    if (!tgt || !len) { LOGW("[camwatch] no camera object to watch"); return 0; }
+    uint8_t* tgt = nullptr;
+    if (Cfg().camWatchDst) {
+        // Watch the task-runner's staged frame-state block: which fields does the dispatch
+        // read PER PASS (x2/frame when pumped) - the dt staging the passes consume.
+        for (int w = 0; w < 600 && !(tgt = FramePumpStepsDstWatchTarget(&len)); ++w) Sleep(1000);
+        if (!tgt) { LOGW("[camwatch] staged block never captured (pump never ran?)"); return 0; }
+    } else if (Cfg().camWatchIgt) {
+        // Watch the IGT counter's WRITER: names the code that advances game time and, via
+        // the register dump, where its increment comes from. Wait for the pump so the
+        // census covers pumped frames (2 writes/frame vs 1 = per-pass evidence).
+        for (int w = 0; w < 600 && !FramePumpDtWatchTarget(&len); ++w) Sleep(1000);
+        tgt = GameERIgtWatchTarget(&len);
+        if (!tgt) { LOGW("[camwatch] no GameDataMan for the IGT watch"); return 0; }
+    } else if (Cfg().camWatchDt) {
+        // Watch the frame-timing dt block instead of the camera. Its address only exists
+        // once the pump has run a full-frame pass 2 (the hw-bp capture), so wait for it.
+        for (int w = 0; w < 600 && !(tgt = FramePumpDtWatchTarget(&len)); ++w) Sleep(1000);
+        if (!tgt) { LOGW("[camwatch] dt struct never captured (pump never ran?)"); return 0; }
+    } else {
+        Sleep((DWORD)(Cfg().camWatchDelay * 1000.f));
+        tgt = GameERCamWatchTarget(&len);
+        if (!tgt || !len) { LOGW("[camwatch] no camera object to watch"); return 0; }
+    }
     g_lo = (uintptr_t)tgt;
     g_hi = g_lo + len;
     g_pages[0] = g_lo & ~0xFFFull;
@@ -188,7 +209,7 @@ DWORD WINAPI WatchThread(LPVOID) {
 } // namespace
 
 void CamWatchTick() {
-    if (!Cfg().camWatch) return;
+    if (!Cfg().camWatch && !Cfg().camWatchDt && !Cfg().camWatchIgt && !Cfg().camWatchDst) return;
     if (g_started.exchange(true)) return;
     if (HANDLE h = CreateThread(nullptr, 0, WatchThread, nullptr, 0, nullptr)) CloseHandle(h);
 }

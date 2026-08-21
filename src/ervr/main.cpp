@@ -51,6 +51,60 @@ double Now() {
     return (double)c.QuadPart / (double)f.QuadPart;
 }
 
+// Every Dantelion engine assert funnels into ONE deliberate null-write - DL_PANIC at
+// exe+0x1eb9999 on 2.6.2.0 ("DL_PANIC is firing core dump", imm 0x00DEADBA). The Windows
+// crash record therefore always shows the same offset and never the culprit. This VEH
+// matches exactly that address, scans the faulting thread's stack for return addresses into
+// the exe, logs them (the log fflushes per line, so it survives the crash), and lets the
+// crash proceed. Wrong game version = the address never matches = dormant.
+constexpr uintptr_t kRvaDlPanicNullWrite = 0x1eb9999;
+
+LONG CALLBACK PanicVeh(EXCEPTION_POINTERS* xp) {
+    using namespace ervr;
+    if (xp->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    if ((uint8_t*)xp->ExceptionRecord->ExceptionAddress != base + kRvaDlPanicNullWrite)
+        return EXCEPTION_CONTINUE_SEARCH;
+    // Pass-2 asserts are SPURIOUS by construction: the second pass replays the frame over
+    // world state mid-transition (fast travel's fade-out fired two of these on 2026-08-21)
+    // that pass 1 would never see. The panic function is log-then-die: after the 11-byte
+    // null-write it just does `add rsp,0x70; pop rdi; ret` - so skipping the write turns
+    // the assert into "log and continue" and the asserting task carries on. Only ever done
+    // for pass 2; pass-1 panics are real and still crash (with the stack logged below).
+    const bool pass2 = FramePumpCurrentPass() == 2;
+    static LONG s_eaten = 0;
+    if (pass2 && Cfg().vrPass2EatAsserts && InterlockedIncrement(&s_eaten) <= 64) {
+        LOGE("[panic] DL_PANIC during pass 2 SUPPRESSED (#%ld) - spurious assert on "
+             "transition-state; skipping the deliberate null-write",
+             s_eaten);
+        xp->ContextRecord->Rip += 11;   // mov dword ptr [0], 0xDEADBA is 11 bytes
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    static LONG s_seen = 0;
+    if (InterlockedIncrement(&s_seen) > 3) return EXCEPTION_CONTINUE_SEARCH;
+    // Walk the FAULTING context's stack (RtlCaptureStackBackTrace here would walk the
+    // exception dispatcher's, not the panicking function's). A raw scan for .text return
+    // addresses is crude but names the caller chain reliably enough.
+    auto* dos = (IMAGE_DOS_HEADER*)base;
+    auto* nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    const uintptr_t textLo = (uintptr_t)base + 0x1000;
+    const uintptr_t textHi = (uintptr_t)base + nt->OptionalHeader.SizeOfImage;
+    const uint64_t* sp = (const uint64_t*)xp->ContextRecord->Rsp;
+    char line[768]; int p = 0;
+    for (int i = 0; i < 256 && p < (int)sizeof(line) - 24; ++i) {
+        uint64_t v = 0;
+        __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        if (v >= textLo && v < textHi)
+            p += snprintf(line + p, sizeof(line) - p, " exe+0x%llx",
+                          (unsigned long long)(v - (uintptr_t)base));
+    }
+    LOGE("[panic] DL_PANIC (deliberate engine assert) on thread %lu during pass %d; "
+         "return addresses on the faulting stack:%s",
+         GetCurrentThreadId(), FramePumpCurrentPass(), line);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 FILETIME IniWriteTime(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA d{};
     GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d);
@@ -65,6 +119,7 @@ DWORD WINAPI Worker(LPVOID) {
     LogInit(dir + L"\\ERVR.log", ParseLevel(Cfg().logLevel));
     LOGI("ERVR %s starting (pid %lu) in %S", ERVR_VERSION, GetCurrentProcessId(), dir.c_str());
     if (!Cfg().enabled) { LOGI("Disabled via ERVR.ini; exiting worker"); return 0; }
+    AddVectoredExceptionHandler(1, PanicVeh);   // turn DL_PANIC crashes into logged stacks
 
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
         LOGE("MinHook init failed"); return 0;
@@ -130,10 +185,19 @@ DWORD WINAPI Worker(LPVOID) {
             const long pumpN = FramePumpTakePasses();
             const double pumpHz = (s_pumpT > 0 && nowT > s_pumpT) ? pumpN / (nowT - s_pumpT) : 0;
             s_pumpT = nowT;
-            LOGD("hb: xr: addon %d d3d12 %d bound %d | 5s: presents %ld, submitted %ld (stereo %ld), submitFails %ld, blitFails %ld | back buffer %ux%u fmt %u | crop %.0f%%x%.0f%% | submit %.2f ms | pump: %.0f Hz, %.1f ms, sync %.1f ms",
+            // IGT rate: in-game ms per real ms. 1.00 = the sim advances at exactly realtime;
+            // ~2.0 = pass 2 is advancing the sim too (the dt swap is not reaching it);
+            // below 1.0 = the loop is under 60 pairs/s and the game is in slow motion.
+            static double s_igtT = 0; static uint32_t s_igtMs = 0;
+            double igtRate = 0;
+            { const uint32_t ig = GameERIgtMs();
+              if (ig && s_igtMs && ig > s_igtMs && nowT > s_igtT)
+                  igtRate = (double)(ig - s_igtMs) / 1000.0 / (nowT - s_igtT);
+              s_igtT = nowT; s_igtMs = ig; }
+            LOGD("hb: xr: addon %d d3d12 %d bound %d | 5s: presents %ld, submitted %ld (stereo %ld), submitFails %ld, blitFails %ld | back buffer %ux%u fmt %u | crop %.0f%%x%.0f%% | submit %.2f ms | pump: %.0f Hz, %.1f ms, sync %.1f ms | igt x%.2f",
                  rs.registered, rs.d3d12, ss.graphicsBound, rs.presents, ss.frames, ss.stereoFrames, ss.submitFails, ss.blitFails,
                  rs.width, rs.height, (unsigned)rs.format, ss.cropU * 100.f, ss.cropV * 100.f, ss.lastSubmitMs,
-                 pumpHz, FramePumpLastMs(), FramePumpGpuSyncLastMs());
+                 pumpHz, FramePumpLastMs(), FramePumpGpuSyncLastMs(), igtRate);
             if (ss.eyeBlitL || ss.eyeBlitR || ss.eyeDesync)
                 LOGD("hb: eyes: L %ld / R %ld blits, desync %ld", ss.eyeBlitL, ss.eyeBlitR, ss.eyeDesync);
             // The engine's sim step is a FIXED 1/60 s, so a loop below 60 Hz is not just

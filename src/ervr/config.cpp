@@ -96,6 +96,9 @@ void Config::Load(const std::wstring& path) {
     vrPass2Keep      = GetS(ini, L"VR", L"Pass2Keep", vrPass2Keep);
     vrPass2FullFrame = GetB(ini, L"VR", L"Pass2FullFrame", vrPass2FullFrame);
     vrPass2Dt        = GetF(ini, L"VR", L"Pass2Dt", vrPass2Dt);
+    vrPass2FullFrameKeep = GetS(ini, L"VR", L"Pass2FullFrameKeep", vrPass2FullFrameKeep);
+    vrPass2Steps     = GetI(ini, L"VR", L"Pass2Steps", vrPass2Steps);
+    vrPass2EatAsserts = GetB(ini, L"VR", L"Pass2EatAsserts", vrPass2EatAsserts);
     vrPresentLag     = GetI(ini, L"VR", L"PresentLag", vrPresentLag);
     vrGpuSync        = GetI(ini, L"VR", L"GpuSync", vrGpuSync);
     debugKeys        = GetB(ini, L"VR", L"DebugKeys", debugKeys);
@@ -267,6 +270,10 @@ void Config::Load(const std::wstring& path) {
     camWatch        = GetB(ini, L"Experimental", L"CamWatch", camWatch);
     camWatchDelay   = GetF(ini, L"Experimental", L"CamWatchDelay", camWatchDelay);
     camWatchSeconds = GetF(ini, L"Experimental", L"CamWatchSeconds", camWatchSeconds);
+    camWatchDt      = GetB(ini, L"Experimental", L"CamWatchDt", camWatchDt);
+    camWatchIgt     = GetB(ini, L"Experimental", L"CamWatchIgt", camWatchIgt);
+    camWatchDst     = GetB(ini, L"Experimental", L"CamWatchDst", camWatchDst);
+    igtTrace        = GetB(ini, L"Experimental", L"IgtTrace", igtTrace);
     m2TaskProbe    = GetB(ini, L"Experimental", L"TaskProbe", m2TaskProbe);
     taskRegisterTest  = GetB(ini, L"Experimental", L"TaskRegisterTest", taskRegisterTest);
     taskQueueProbe    = GetB(ini, L"Experimental", L"TaskQueueProbe", taskQueueProbe);

@@ -27,6 +27,14 @@ GameERStatus GameERGetStatus();
 // Cheap "are we actually in the world?" check. Unlike GameERGetStatus it resets no counters,
 // so it is safe to call from the input hook every frame.
 bool GameERPlayerActive();
+// In-game time in ms (0 if unavailable). Advances by the frame dt each sim frame - the
+// direct probe for whether pass 2 advances the simulation (see hb "igt" ratio).
+uint32_t GameERIgtMs();
+// Address of the IGT counter, for the CamWatch writer census ([Experimental] CamWatchIgt).
+uint8_t* GameERIgtWatchTarget(uint32_t* outLen);
+// True for 4 s after a >100 m camera jump (fast travel / warp): the frame pump suspends
+// the second pass while the world is torn down and rebuilt.
+bool GameERTeleportGraceActive();
 // Full stereo: write the second eye's camera between the two engine passes of one frame.
 // No-op (false) unless UpdateCamera stashed a second-eye request this frame.
 bool GameERApplySecondEyeCamera();

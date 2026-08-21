@@ -54,6 +54,11 @@ void FrameProbeOnPresent(const Dx12Frame& f);
 
 // Overrides [VR] Pass2Keep at runtime (numpad hotkeys). Empty string restores the ini value.
 void FrameProbeSetPass2Keep(const char* spec);
+// The engine's frame-timing dt block (hw-bp captured; null until the pump has run once).
+// [Experimental] CamWatchDt points the CamWatch census here instead of the camera.
+uint8_t* FramePumpDtWatchTarget(uint32_t* outLen);
+// The task-runner's staged frame-state block (steps/flags/dt staging), hw-bp captured.
+uint8_t* FramePumpStepsDstWatchTarget(uint32_t* outLen);
 const TaskGroupTable& FrameProbeGetTable(); // valid only after the probe has succeeded
 int  FrameProbeIndexOf(const char* name);   // -1 if absent
 bool FrameProbeGetActive(int index, bool& out);

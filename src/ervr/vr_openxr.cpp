@@ -219,15 +219,34 @@ public:
         PumpEvents();
         if (!sessionRunning_) return false;
 
+        // Runtime-death failsafe: a broken runtime (VDXR losing the display to an exclusive
+        // fullscreen switch, 2026-08-21, or the streamer dropping) fails EVERY frame; the
+        // old behaviour spammed it until something crashed the game. After ~2 s of
+        // consecutive failures, give up on stereo for this session and let the game run
+        // flat - the user fixes the display state and relaunches.
+        static std::atomic<int>  s_frameFails{0};
+        static std::atomic<bool> s_runtimeDead{false};
+        if (s_runtimeDead.load(std::memory_order_relaxed)) return false;
+        auto frameFail = [&](const char* what, XrResult rr) {
+            LOGW("[xr] %s: %s", what, XrStr(rr));
+            if (s_frameFails.fetch_add(1, std::memory_order_relaxed) + 1 >= 120 &&
+                !s_runtimeDead.exchange(true))
+                LOGE("[xr] runtime failed 120 consecutive frames - STEREO DISABLED for this "
+                     "session, game continues flat. Fix the runtime/display (no exclusive "
+                     "fullscreen with Virtual Desktop!) and restart for VR.");
+            return false;
+        };
+
         XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState fs{XR_TYPE_FRAME_STATE};
         XrResult r = xrWaitFrame(session_, &wi, &fs);   // deliberately outside the lock
-        if (XR_FAILED(r)) { LOGW("[xr] xrWaitFrame: %s", XrStr(r)); return false; }
+        if (XR_FAILED(r)) return frameFail("xrWaitFrame", r);
 
         std::lock_guard<std::recursive_mutex> g(g_mtx);
         XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
         r = xrBeginFrame(session_, &bi);
-        if (XR_FAILED(r) && r != XR_FRAME_DISCARDED) { LOGW("[xr] xrBeginFrame: %s", XrStr(r)); return false; }
+        if (XR_FAILED(r) && r != XR_FRAME_DISCARDED) return frameFail("xrBeginFrame", r);
+        s_frameFails.store(0, std::memory_order_relaxed);
 
         displayTime_.store(fs.predictedDisplayTime);
         frameBegun_ = true;

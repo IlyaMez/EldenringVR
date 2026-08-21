@@ -14,6 +14,12 @@ std::atomic<float> g_pass2Pitch{-1.f};  // <0 = follow the ini
 std::atomic<float> g_pass1Pitch{0.f};   // capture probe; no ini, hotkey only
 std::atomic<int>   g_gpuSync{-1};       // -1 = follow the ini
 std::atomic<int>   g_fullFrame{-1};     // -1 = follow the ini; 0/1 override
+// Hand-rotation calibration override, degrees about the controller X axis (pitch). The
+// sentinel means "follow the ini" (HandRotOffsetX). Numpad 6/9 step it -/+15 deg live so
+// the "weapons rotated ~90 deg towards me" grip-pose offset can be dialled in one session,
+// then the winning value baked into the ini.
+constexpr float    kHandRotFollowIni = 1e9f;
+std::atomic<float> g_handRotX{kHandRotFollowIni};
 int                g_keepIdx = -1;      // -1 = follow the ini
 int                g_pitchState = 0;    // 0 off | 1 pitch pass 2 | 2 pitch pass 1
 
@@ -41,20 +47,20 @@ int                g_pitchState = 0;    // 0 off | 1 pitch pass 2 | 2 pitch pass
 // populated gated bands; they may cause brief weirdness (2x sim speed, doubled audio) -
 // judge ONLY the dark eye's brightness and cycle on. NEVER kept: 9 PadStep (input replay),
 // 11/160 world-origin shift pair, 166 AI GC.
-// Darkness hunt, round 5: bisect DOWN. Bottom-up sweeps exhausted every plausible producer
-// group (49/98/107/142, frame lifecycle 0/168/161/165, EmkSystem 22-24, Location, Havok,
-// managers) - none brightened pass 2. So flip it: keep EVERYTHING except the known-fatal
-// groups (7-21 game-flow band - crashed the game; 109 sound; 126 MenuMan; 130-133 AI/net
-// flow; 160 world-origin shift; 166 AI GC). Sets 2-3 double-step the world sim: the game
-// runs ~2x speed and both eyes desync in time while held - EXPECTED, judge only whether
-// the right eye brightens, and do it out of combat.
+// The fast-motion gating experiments are OVER: the cause was never per-invocation steppers
+// but the pass-2 dt itself - the framelock imm is written into the runtime time struct
+// BEFORE queue_tasks, so the imm swap never reached pass 2 and it ran a full-dt engine
+// frame. frame_probe.cpp now swaps the RUNTIME dt slots around pass 2; the ini-default
+// full-frame set is the production candidate again. Round-1/2 gating findings kept for the
+// record: SfxMan(37) is what draws particles + their lights/sounds so it can never be
+// gated; SfxMan without the chr band 54-84 crashes (raw AV); chr band without the
+// post-physics half crashes. The sets below are diagnostics only.
+// An empty spec means "follow the ini default of the active mode".
 struct KeepSet { const char* spec; const char* what; };
 const KeepSet kKeeps[] = {
-    {"106,118,123-125,144-158,164",                     "reference (dark right eye)"},
-    {"0-6,22-108,110-125,127-129,134-159,161-165,167,168", "keep ALL safe groups (the decisive test)"},
-    {"0-6,22-106,118,123-125,144-158,164",              "all-safe LOW half (0-6,22-105)"},
-    {"106,108,110-125,127-129,134-159,161-165,167,168", "all-safe HIGH half (108-168)"},
-    {"144-158,164",                                     "bare draw (bright-reference sanity)"},
+    {"",                                          "ini default (full frame, dt frozen, no cloth in pass 2)"},
+    {"0-7,10-25,27-84,86-142,144-160,164,168",    "cloth back in pass 2 (haywire reference)"},
+    {"106,118,123-125,144-158,164",               "draw-only (dark reference)"},
 };
 constexpr int kKeepCount = (int)(sizeof(kKeeps) / sizeof(kKeeps[0]));
 
@@ -95,6 +101,12 @@ void Announce() {
 } // namespace
 
 int   DebugKeysPresentLag() { return g_presentLag.load(std::memory_order_relaxed); }
+bool  DebugKeysHandRotX(float* outDeg) {
+    const float v = g_handRotX.load(std::memory_order_relaxed);
+    if (v >= kHandRotFollowIni) return false;
+    *outDeg = v;
+    return true;
+}
 float DebugKeysPass2Pitch() { return g_pass2Pitch.load(std::memory_order_relaxed); }
 float DebugKeysPass1Pitch() { return g_pass1Pitch.load(std::memory_order_relaxed); }
 int   DebugKeysGpuSync()    { return g_gpuSync.load(std::memory_order_relaxed); }
@@ -155,6 +167,22 @@ void DebugKeysTick() {
         LOGI("[keys] Pass2FullFrame -> %d (%s)", next,
              next ? "pass 2 = complete engine frame at dt~0" : "pass 2 = draw-only gated pass");
         Buzz(next ? 2 : 1);
+    }
+    const bool hand6 = Pressed(VK_NUMPAD6), hand9 = Pressed(VK_NUMPAD9);
+    if (hand6 || hand9) {
+        // Hand grip calibration: pitch the controller->hand mapping about the controller's
+        // X axis, -15 deg per Numpad6, +15 per Numpad9. Starts from the ini's value on the
+        // first press. One buzz for -, two for +; the log carries the value to bake in.
+        const bool plus = hand9;
+        float cur = Cfg().handRotOffX;
+        const float v = g_handRotX.load();
+        if (v < kHandRotFollowIni) cur = v;
+        float next = cur + (plus ? 15.f : -15.f);
+        if (next > 180.f) next -= 360.f;
+        if (next < -180.f) next += 360.f;
+        g_handRotX.store(next);
+        LOGI("[keys] HandRotOffsetX -> %.0f deg (bake into [FirstPerson] HandRotOffsetX when it looks right)", next);
+        Buzz(plus ? 2 : 1);
     }
     if (Pressed(VK_NUMPAD0)) {
         Announce();

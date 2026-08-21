@@ -14,6 +14,9 @@
 //                               per pass or once per sim frame)
 //   Numpad 4  GpuSync           cycles 0 -> 1 -> 2 (drain the GPU between the engine passes)
 //   Numpad 5  Pass2FullFrame    0 <-> 1 (pass 2 = complete engine frame at dt~0)
+//   Numpad 6 / 9  hand grip calibration: -15 / +15 deg pitch on the controller->hand
+//                 mapping (HandRotOffsetX), for dialling out the "weapon points at me"
+//                 grip-pose offset live; bake the logged winner into the ini
 //   Numpad 0  re-announce the current state (haptic + log)
 //
 // Haptics: one pulse = value returned to default/off, two = alternative/on, three = the
@@ -28,4 +31,6 @@ float DebugKeysPass2Pitch();
 float DebugKeysPass1Pitch();   // capture probe: tilts the REAL pass's camera
 int   DebugKeysGpuSync();
 int   DebugKeysPass2FullFrame();
+// True (and fills *outDeg) only while the hotkeys override the ini's HandRotOffsetX.
+bool  DebugKeysHandRotX(float* outDeg);
 }

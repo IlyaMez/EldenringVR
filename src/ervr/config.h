@@ -121,7 +121,10 @@ struct Config {
     bool  handTracking = true;            // drive arm bones from the controllers
     std::string handOrigin = "head";      // head | tracking | floor
     float handBackOffset = 0.06f;         // meters from controller grip pose back to the wrist bone
-    float handRotOffX = 0.f, handRotOffY = 0.f, handRotOffZ = 0.f;   // degrees, controller -> hand bone calibration
+    // Degrees, controller -> hand bone calibration. X=+45 dialled in-headset on a Quest 3
+    // (2026-08-21, Numpad9 x3): the raw grip pose leaves weapons pitched ~90 deg toward the
+    // player. Numpad 6/9 step X live by -/+15 for re-calibration.
+    float handRotOffX = 45.f, handRotOffY = 0.f, handRotOffZ = 0.f;
     float elbowPoleDown = 1.0f, elbowPoleOut = 0.6f, elbowPoleBack = 0.3f;
     float armStretch = 1.5f;              // max stretch factor of forearm+hand when the target is out of reach (1 = none)
     float handScale = 1.0f;               // scale controller offsets from the head (compensate arm length differences)
@@ -207,9 +210,43 @@ struct Config {
     // still share one sim instant. The draw-only sweeps could not find the environment-
     // lighting producer (2026-08-20: every candidate group failed and broad keeps crash),
     // which is exactly the case this mode exists for. Excluded even here: PadStep (input
-    // edge replay), the world-origin shift pair, AI GC. Numpad 5 toggles it live.
+    // edge replay), the resource lifecycle, AI GC. Numpad 5 toggles it live.
     bool  vrPass2FullFrame = false;
-    float vrPass2Dt = 0.000001f;   // seconds; ~0 = frozen sim, tiny to dodge div-by-zero
+    // <= 0 = off (production). > 0 = experimental float-dt freeze (imm + hw-bp
+    // timing-struct swap) - measured NOT to reach the sim (the float dt only becomes
+    // limiter ticks); kept for future RE only. The real lever is Pass2Steps below.
+    float vrPass2Dt = 0.f;
+    // >= 0: master switch for the pass-2 time freeze - swaps the engine's frame-dt global
+    // (the single float every stack-built FD4TaskData copies its dt from) to ~0 around
+    // pass 2. 0 = pass 2 advances NOTHING = true same-sim-time stereo. -1 = off.
+    int vrPass2Steps = 0;
+    // Suppress DL_PANIC asserts that fire DURING pass 2 (skip the deliberate null-write;
+    // the panic fn then returns cleanly). Pass-2 asserts are spurious - the second pass
+    // replays the frame over transition state pass 1 never sees (fast travel's fade-out).
+    // Pass-1 panics still crash with the stack logged.
+    bool vrPass2EatAsserts = true;
+    // Groups the FULL-FRAME pass keeps. Everything except: PadStep 9 (input edge replay),
+    // the resource lifecycle (8 ResStep, 26/143 FLVER deletion window, 161-163 FileStep,
+    // 165 DelayDeleteStep, 167 heap stats - deletion must tick once per REAL frame), and
+    // BOTH halves of the AI Lua GC bracket 85/166. RULE learned the hard way: Begin/End
+    // task pairs must be kept or gated TOGETHER - keeping AiBeginCollectGabage(85) while
+    // gating AiEndCollectGabage(166) left "GC running" set and the next AI Lua call hit
+    // the engine's deliberate DL_PANIC ("Running GC!", CSAiLua.cpp:642) - the crash
+    // signature exe+0x1eb9999 of 2026-08-20.
+    // The world-origin shift pair 11/160 is KEPT, and the boundary case of the rule: it
+    // brackets the INTER-frame window (Begin=160 late in frame N, End=11 early in N+1),
+    // so gating both out of pass 2 leaves pass 2 running an entire engine frame inside a
+    // half-applied origin rebase whenever pass 1's group 160 triggered one - measured
+    // in-headset 2026-08-20 as geometry shifting/teleporting/OOB starting ~1 min in (the
+    // first time the player walks far enough to trigger a shift). Keeping both replicates
+    // the vanilla order inside pass 2: its group 11 closes pass 1's shift before the pass
+    // simulates, and its group 160's begin-check is a no-op right after a rebase.
+    // Cloth (100-105 pre + 110-112 post, gated TOGETHER) is excluded since 2026-08-21: the
+    // Havok cloth solver run twice per frame with pass 2's ~0 dt goes visibly unstable
+    // ("cloth going haywire"); gating it renders pass 1's cloth state in pass 2 - the same
+    // sim instant, exactly what same-sim-time stereo wants anyway.
+    // Hot-reloads; Numpad 2 cycles stabilisation variants.
+    std::string vrPass2FullFrameKeep = "0-7,10-25,27-84,86-99,106-109,113-142,144-160,164,168";
     // 1 = each Present carries the PREVIOUS pass's render (pipelined renderer): the XR frame
     // opens at pass 2's present (left eye) and closes at pass 1's (right). MEASURED on
     // 2026-08-20 with the pitch probe: pass-2 content lands at pass-1's present (tilting
@@ -238,6 +275,10 @@ struct Config {
     bool  camWatch = false;
     float camWatchDelay = 5.f;      // seconds after player-active before arming
     float camWatchSeconds = 3.f;    // how long the guard stays armed
+    bool  camWatchDt = false;       // watch the frame-timing dt block instead of the camera
+    bool  camWatchIgt = false;      // watch the IGT counter's writer (game-time advance)
+    bool  camWatchDst = false;      // watch the task-runner's staged frame-state block
+    bool  igtTrace = false;         // hook the IGT-advance fn; log caller/dt/pass
 
     bool  m2TaskProbe = false;
     // M2 experiment: temporarily clear the `active` byte of one named task group and watch

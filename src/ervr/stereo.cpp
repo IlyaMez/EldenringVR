@@ -369,7 +369,40 @@ bool BlitQuad(IVRBackend* vr, const Dx12Frame& f, BlitParams bp) {
 // pass 2's the RIGHT. The XR frame opens at pass 1 and closes (submits) at pass 2. Frames
 // with no second pass (menus, loading, stereo not requested) close as a cinema quad on the
 // next pass-1 present.
+// Fade guard: every dangerous world transition (fast travel, death warp, cutscene load)
+// fades the screen to black BEFORE tearing the world down - and both fast-travel crashes
+// (2026-08-21: a pass-2 DL_PANIC, then a raw INT_OVERFLOW no assert-eater can catch) hit in
+// exactly that window, before any other observable signal. So the guard watches the image
+// itself: a sharp drop from normal brightness to near-black = fade-out -> suspend pass 2
+// until brightness returns (mono while the screen is black is invisible; the player-
+// inactive grace takes over during the load screen). A statically dark scene cannot
+// trigger it: the HUD alone keeps luma above the threshold, and arming requires the screen
+// to have been NORMAL within the last 3 s.
+std::atomic<bool> g_fadeGuard{false};
+
+void FadeGuardSample(const Dx12Frame& f) {
+    static int s_n = 0;
+    if (++s_n % 32) return;   // ~4 samples/s at 144 presents - catches a ~1 s fade early
+    uint32_t tagOut = 0; float luma = 0.f;
+    if (!Dx12SampleBackbuffer(f.queue, f.backBuffer, 0, &tagOut, &luma)) return;
+    static ULONGLONG s_lastNormal = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (luma > 0.03f) {
+        s_lastNormal = now;
+        if (g_fadeGuard.exchange(false))
+            LOGI("[stereo] fade guard released (luma %.3f) - pass 2 resumes", luma);
+        return;
+    }
+    if (luma < 0.004f && s_lastNormal && now - s_lastNormal < 3000 &&
+        !g_fadeGuard.exchange(true))
+        LOGI("[stereo] fade-out detected (luma %.4f) - pass 2 suspended until the screen returns",
+             luma);
+}
+
+bool StereoFadeGuardActive() { return g_fadeGuard.load(std::memory_order_relaxed); }
+
 void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
+    FadeGuardSample(f);
     // ER's renderer may be pipelined one present deep - the image a Present carries can be
     // the PREVIOUS pass's render, in which case eye content is cross-routed and both eyes
     // shimmer (each image is submitted with the other camera's pose). PresentLag selects

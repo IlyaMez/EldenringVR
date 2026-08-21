@@ -17,11 +17,13 @@
 #include "game_er.h"
 #include "patches_er.h"
 #include "game_memory.h"
+#include "stereo.h"
 #include "rtti.h"
 #include "reshade_addon.h"
 #include "config.h"
 #include "log.h"
 #include <MinHook.h>
+#include <intrin.h>
 #include <windows.h>
 #include <algorithm>
 #include <cctype>
@@ -662,13 +664,15 @@ void ParseKeepSpec(const char* spec, bool out[256]) {
     }
 }
 
-const bool* Pass2KeepSet() {
+// The active keep set: a Numpad-2 override wins in either mode; otherwise the mode's own
+// ini default (`defaultSpec`). Cached parse, re-logged whenever the effective spec changes.
+const bool* Pass2KeepSet(const std::string& defaultSpec) {
     static std::string s_spec;
     static bool s_keep[256];
     std::string spec;
     {
         std::lock_guard<std::mutex> g(g_pass2OverrideMtx);
-        spec = g_pass2Override.empty() ? Cfg().vrPass2Keep : g_pass2Override;
+        spec = g_pass2Override.empty() ? defaultSpec : g_pass2Override;
     }
     if (spec != s_spec) {
         s_spec = spec;
@@ -747,6 +751,358 @@ void PumpGpuDrain(const char* where) {
                        std::memory_order_relaxed);
 }
 
+// ---- pass-2 runtime dt swap ------------------------------------------------------------
+// The framelock imm is an INSTRUCTION operand: `mov [reg+disp], 1/60f` in the frame loop,
+// executed once per REAL frame BEFORE queue_tasks. Swapping the imm around pass 2 therefore
+// changed nothing - the instruction never re-executes inside the pass, and pass 2 ran a
+// FULL-dt engine frame (the 2026-08-21 "everything runs fast" report; gating experiments
+// chased per-invocation steppers that were never the cause). The fix: find where that
+// instruction wrote this frame's dt - the runtime slot(s) inside the queue_tasks argument
+// structs - by scanning them for the exact framelock bit pattern, then overwrite those
+// slots with Pass2Dt around the second call. Offsets are remembered (never raw pointers)
+// and every write is preceded by a bit-exact match check, so a reallocated struct or a
+// changed layout degrades to "no swap this pass", not corruption.
+struct DtSlot { int base; int deep; uint32_t ptrOff; uint32_t off; };
+DtSlot g_dtSlots[16];
+int    g_dtSlotCount = -1;       // -1 = not scanned yet
+
+// SEH-wrapped primitives: POD locals only, no logging inside.
+int TryReadU32(uint8_t* p, uint32_t* out) {
+    __try { *out = *(volatile uint32_t*)p; return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int TryWriteU32(uint8_t* p, uint32_t v) {
+    __try { *(volatile uint32_t*)p = v; return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int TryWriteU8(uint8_t* p, uint8_t v) {
+    __try { *(volatile uint8_t*)p = v; return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int ScanFlat(uint8_t* p, size_t len, uint32_t bits, uint32_t* outOff, int maxOut) {
+    int n = 0;
+    __try {
+        for (size_t o = 0; o + 4 <= len && n < maxOut; o += 4)
+            if (*(uint32_t*)(p + o) == bits) outOff[n++] = (uint32_t)o;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+uint8_t* DerefPtr(uint8_t* p, uint32_t off) {
+    __try {
+        uint8_t* q = *(uint8_t**)(p + off);
+        return ((uintptr_t)q > 0x10000 && (uintptr_t)q < 0x7FFFFFFF0000ull) ? q : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+// Hardware-breakpoint capture of the engine's frame-timing struct. The dt write is
+// `mov [rbx+disp8], imm32` (C7 43 dd ii ii ii ii) at PatchesFrameDtImm()-3, executed on the
+// frame thread each frame. A one-shot execute breakpoint there hands us RBX = the timing
+// struct; pass 2 then swaps [rbx+disp8] directly. Version-proof: address and disp8 are read
+// from the live instruction, nothing hard-coded.
+std::atomic<uint8_t*> g_dtStruct{nullptr};
+std::atomic<int>      g_dtBpState{0};   // 0 idle | 1 armed | 2 captured | -1 failed
+uint8_t               g_dtDisp = 0;
+
+// The staged-steps copy `mov [rbx+0xdc], eax` (exe+0xb19633 on 2.6.2.0, AOB-resolved):
+// runs twice per OUTER frame before the passes, staging the frame's step count into the
+// task-runner object(s) whose dispatch the passes then consume. Dr1 captures the rbx
+// destinations (dedup, up to 4) and disarms after a dozen hits.
+uint8_t*          g_stepsCopyIns = nullptr;
+uint8_t*          g_stepsDst[4] = {};
+std::atomic<int>  g_stepsDstN{0};
+std::atomic<int>  g_stepsHits{0};
+
+// FD4TaskData capture (Dr2): the IGT caller reads dt via `movss xmm0,[rdi+8]` - rdi IS the
+// FD4TaskData handed to the task body. Capture a handful of hits to learn the pointer AND
+// whether it is stable across frames (a reused member => patchable between passes).
+uint8_t*              g_fd4Ins = nullptr;
+std::atomic<uint8_t*> g_fd4Data{nullptr};
+std::atomic<int>      g_fd4Hits{0};
+uint8_t*              g_fd4Seen[4] = {};
+std::atomic<int>      g_fd4SeenN{0};
+
+LONG CALLBACK DtVeh(EXCEPTION_POINTERS* xp) {
+    if (xp->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+    uint8_t* addr = (uint8_t*)xp->ExceptionRecord->ExceptionAddress;
+    float* imm = PatchesFrameDtImm();
+    if (imm && addr == (uint8_t*)imm - 3) {
+        g_dtStruct.store((uint8_t*)xp->ContextRecord->Rbx, std::memory_order_release);
+        g_dtBpState.store(2, std::memory_order_release);
+        xp->ContextRecord->Dr0 = 0;                   // disarm: one shot is all we need
+        xp->ContextRecord->Dr7 &= ~1ull;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (g_fd4Ins && addr == g_fd4Ins) {
+        uint8_t* rdi = (uint8_t*)xp->ContextRecord->Rdi;
+        g_fd4Data.store(rdi, std::memory_order_release);
+        const int n = g_fd4SeenN.load(std::memory_order_relaxed);
+        bool known = false;
+        for (int i = 0; i < n; ++i) if (g_fd4Seen[i] == rdi) known = true;
+        if (!known && n < 4) { g_fd4Seen[n] = rdi; g_fd4SeenN.store(n + 1, std::memory_order_release); }
+        // One-time: the task-data is stack-built, so name the BUILDER - scan the caller
+        // frames for .text return addresses (same trick as PanicVeh).
+        static std::atomic<bool> s_chainLogged{false};
+        if (!s_chainLogged.exchange(true)) {
+            auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+            uint64_t* sp = (uint64_t*)xp->ContextRecord->Rsp;
+            char line[500]; int lp = 0; line[0] = 0;
+            for (int k = 0; k < 96 && lp < 440; ++k) {
+                const uint64_t v = sp[k];
+                if (v > (uint64_t)(uintptr_t)base + 0x1000 &&
+                    v < (uint64_t)(uintptr_t)base + 0x29a2c00)
+                    lp += snprintf(line + lp, sizeof(line) - lp, " +0x%llx",
+                                   (unsigned long long)(v - (uint64_t)(uintptr_t)base));
+            }
+            LOGI("[stereo] fd4 dispatch chain (stack scan, fd4=%p):%s", (void*)rdi, line);
+        }
+        xp->ContextRecord->EFlags |= 1u << 16;
+        if (g_fd4Hits.fetch_add(1, std::memory_order_relaxed) + 1 >= 16) {
+            xp->ContextRecord->Dr2 = 0;
+            xp->ContextRecord->Dr7 &= ~0x10ull;
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (g_stepsCopyIns && addr == g_stepsCopyIns) {
+        uint8_t* rbx = (uint8_t*)xp->ContextRecord->Rbx;
+        const int n = g_stepsDstN.load(std::memory_order_relaxed);
+        bool known = false;
+        for (int i = 0; i < n; ++i) if (g_stepsDst[i] == rbx) known = true;
+        if (!known && n < 3) { g_stepsDst[n] = rbx; g_stepsDstN.store(n + 1, std::memory_order_release); }
+        xp->ContextRecord->EFlags |= 1u << 16;        // RF: run this instruction this once
+        if (g_stepsHits.fetch_add(1, std::memory_order_relaxed) + 1 >= 12) {
+            xp->ContextRecord->Dr1 = 0;
+            xp->ContextRecord->Dr7 &= ~4ull;
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void ArmDtBreakpoint(DWORD tid) {
+    uint8_t* ins = (uint8_t*)PatchesFrameDtImm() - 3;
+    if (ins[0] != 0xC7 || ins[1] != 0x43) {           // expect mov [rbx+disp8], imm32
+        LOGW("[stereo] pass-2 dt: unexpected dt-write encoding %02X %02X - hw-bp capture skipped",
+             ins[0], ins[1]);
+        g_dtBpState.store(-1);
+        return;
+    }
+    g_dtDisp = ins[2];
+    static bool s_veh = false;
+    if (!s_veh) { s_veh = true; AddVectoredExceptionHandler(1, DtVeh); }
+    // Second breakpoint: the staged-steps copy (see g_stepsCopyIns). AOB keeps it
+    // version-proof; +10 skips the rip-relative load and the [rax+0x18] read.
+    if (uint8_t* hit = AobScan("48 8B 05 ?? ?? ?? ?? 8B 40 18 89 83 DC 00 00 00 C6 83 D8 00 00 00 01"))
+        g_stepsCopyIns = hit + 10;
+    else
+        LOGW("[stereo] pass-2 steps: staged-copy pattern not found; destination capture off");
+    // The IGT caller's dt load: movss xmm0,[rdi+8]; call ..; movss xmm1,[rdi+8].
+    if (uint8_t* hit = AobScan("F3 0F 10 47 08 E8 ?? ?? ?? ?? F3 0F 10 4F 08"))
+        g_fd4Ins = hit;
+    else
+        LOGW("[stereo] pass-2 dt: FD4TaskData load pattern not found; fd4 capture off");
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                          FALSE, tid);
+    if (!h) { g_dtBpState.store(-1); LOGW("[stereo] pass-2 dt: OpenThread(%lu) failed", tid); return; }
+    bool ok = false;
+    if (SuspendThread(h) != (DWORD)-1) {
+        CONTEXT c{};
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(h, &c)) {
+            c.Dr0 = (DWORD64)(uintptr_t)ins;
+            c.Dr7 = (c.Dr7 & ~(0xFull << 16)) | 1;    // L0 enabled, exec, len 1
+            if (g_stepsCopyIns) {
+                c.Dr1 = (DWORD64)(uintptr_t)g_stepsCopyIns;
+                c.Dr7 = (c.Dr7 & ~(0xFull << 20)) | 4;   // L1 enabled, exec, len 1
+            }
+            // Dr2 (FD4TaskData capture) stays DISARMED: it served its diagnostic purpose
+            // (proved the task data is stack-built and named the builder), and while armed
+            // it kept overwriting g_fd4Seen with stack pointers. Re-enable only for RE.
+            ok = SetThreadContext(h, &c) != 0;
+        }
+        ResumeThread(h);
+    }
+    CloseHandle(h);
+    if (ok) LOGI("[stereo] pass-2 dt: hw breakpoints armed at %p + %p (frame thread %lu, disp 0x%02X)",
+                 ins, g_stepsCopyIns, tid, g_dtDisp);
+    else { g_dtBpState.store(-1); LOGW("[stereo] pass-2 dt: setting debug registers failed"); }
+}
+
+// The engine's OWN frame-rate override, found in the timing update's tail (2.6.2.0 rva
+// 0xe82c1c..0xe82c53, reached every frame AFTER the adaptive dt switch): when the byte at
+// [struct+0x2c8] is set and [struct+0x2c9] is clear (and the mode at [struct+0xc] != 6),
+// the engine itself computes dt = 1.0f / [struct+0x2c4] - overriding whatever the switch
+// picked. This is FromSoft's dormant debug override and the ONLY reliable dt control:
+// patching the framelock imm covers one switch case, and the engine falls back to the
+// UNPATCHED 1/60 case whenever the loop misses the target (measured 2026-08-21: pumped
+// windows at 58 pairs/s ran IGT at 1.75x with the imm at 1/120). With the override armed
+// at 120 Hz, every pass advances exactly 1/120 s regardless of load, so a stereo pair is
+// always 1/60 - realtime, degrading to smooth slow-motion (never fast-forward) under load.
+// DO NOT arm the [struct+0x2c8] "debug fps override" byte: tried 2026-08-21 - instead of
+// pinning dt to 1/[struct+0x2c4] it latched the whole session into a persistent 4x-speed
+// state (dt 1/30 at 120 presents/s) that clearing the byte did NOT undo. Whatever that
+// path latches is not understood; treat it as radioactive.
+
+void ScanDtSlots(uint8_t* a, uint8_t* b, uint32_t bits) {
+    g_dtSlotCount = 0;
+    uint8_t* bases[2] = {a, b};
+    char msg[256]; int mp = 0; msg[0] = 0;
+    for (int bi = 0; bi < 2 && g_dtSlotCount < 16; ++bi) {
+        if (!bases[bi]) continue;
+        uint32_t offs[8];
+        const int n = ScanFlat(bases[bi], 0x800, bits, offs, 8);
+        for (int k = 0; k < n && g_dtSlotCount < 16; ++k) {
+            g_dtSlots[g_dtSlotCount++] = {bi, 0, 0, offs[k]};
+            mp += snprintf(msg + mp, sizeof(msg) - mp, " %c+0x%x", bi ? 'b' : 'a', offs[k]);
+        }
+    }
+    if (!g_dtSlotCount) {
+        // One pointer hop: the dt may live in a struct the args point AT rather than in them.
+        for (int bi = 0; bi < 2 && g_dtSlotCount < 16; ++bi) {
+            if (!bases[bi]) continue;
+            for (uint32_t po = 0; po < 0x200 && g_dtSlotCount < 16; po += 8) {
+                uint8_t* q = DerefPtr(bases[bi], po);
+                if (!q) continue;
+                uint32_t offs[4];
+                const int n = ScanFlat(q, 0x200, bits, offs, 4);
+                for (int k = 0; k < n && g_dtSlotCount < 16; ++k) {
+                    g_dtSlots[g_dtSlotCount++] = {bi, 1, po, offs[k]};
+                    mp += snprintf(msg + mp, sizeof(msg) - mp, " [%c+0x%x]+0x%x",
+                                   bi ? 'b' : 'a', po, offs[k]);
+                }
+            }
+        }
+    }
+    if (g_dtSlotCount)
+        LOGI("[stereo] pass-2 runtime dt: %d slot(s) matching frame dt bits 0x%08X:%s "
+             "- pass 2 will run at Pass2Dt", g_dtSlotCount, bits, msg);
+    else
+        LOGW("[stereo] pass-2 runtime dt: NO slot matching 0x%08X found in queue_tasks args "
+             "(direct 0x800 + one hop 0x200) - pass 2 keeps the REAL dt and runs fast", bits);
+}
+
+// ---- baked-entry dt candidates -----------------------------------------------------------
+// Every upstream patch (timing-struct float, steps field, staged copies, dispatch [obj+
+// 0x1a8]) left the per-pass advance untouched: the frame's dt is BAKED into per-entry
+// structures before queue_tasks runs, and pass 2 replays the baked list. So find the baked
+// values themselves: scan the dispatch object and its 0x170-stride entry array for numbers
+// that look like a frame dt (float or double), remember the addresses, and zero them for
+// pass 2 with plausibility re-checks (entries may be rebuilt; a stale address then just
+// fails the check and is skipped).
+struct BakedDt { uint8_t* p; int dbl; };
+BakedDt g_baked[32];
+int     g_bakedN = -1;
+
+int PlausibleDtF(uint32_t bits) {
+    float v; memcpy(&v, &bits, 4);
+    return v > 0.0005f && v < 0.12f;
+}
+int TryReadU64(uint8_t* p, uint64_t* out) {
+    __try { *out = *(volatile uint64_t*)p; return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int TryWriteU64(uint8_t* p, uint64_t v) {
+    __try { *(volatile uint64_t*)p = v; return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+int ScanBaked(uint8_t* base, size_t len, float ref, BakedDt* out, int maxOut) {
+    int n = 0;
+    __try {
+        for (size_t o = 0; o + 8 <= len && n < maxOut; o += 4) {
+            float f = *(float*)(base + o);
+            if (f > 0.f && f<0.12f && f> 0.0005f && f > ref * 0.5f && f < ref * 2.f)
+                out[n++] = {base + o, 0};
+            if ((o & 7) == 0) {
+                double d = *(double*)(base + o);
+                if (d > 0.0005 && d < 0.12 && d > ref * 0.5 && d < ref * 2.0 && n < maxOut)
+                    out[n++] = {base + o, 1};
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+
+// ---- IGT-advance trace -------------------------------------------------------------------
+// [Experimental] IgtTrace: hook the IGT-advance function (takes xmm0 = this call's dt in
+// seconds) and log its CALLER + dt + pass for the first distinct callers. The caller's
+// disassembly then shows where the per-pass dt is actually loaded from - the ground truth
+// the upstream patches kept missing.
+using PfnIgtAdvance = void(__fastcall*)(float);
+PfnIgtAdvance g_origIgtAdvance = nullptr;
+
+void __fastcall HkIgtAdvance(float dt) {
+    static std::atomic<long> s_n{0};
+    const long n = s_n.fetch_add(1, std::memory_order_relaxed);
+    if (n < 24) {
+        auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+        uint8_t* ret = (uint8_t*)_ReturnAddress();
+        LOGI("[igt] advance #%ld: dt=%.6f pass=%d caller=exe+0x%llx", n, dt,
+             FramePumpCurrentPass(),
+             (unsigned long long)(ret - base));
+    }
+    g_origIgtAdvance(dt);
+}
+
+void InstallIgtTrace() {
+    if (!Cfg().igtTrace) return;
+    uint8_t* fn = AobScan("48 83 EC 58 48 C7 44 24 20 FE FF FF FF 0F 29 74 24 40 0F 28 F0 48 8B 0D");
+    if (!fn) { LOGW("[igt] advance-function pattern not found"); return; }
+    if (MH_CreateHook(fn, (void*)&HkIgtAdvance, (void**)&g_origIgtAdvance) == MH_OK &&
+        MH_EnableHook(fn) == MH_OK)
+        LOGI("[igt] advance hook installed at %p", fn);
+    else
+        LOGW("[igt] advance hook failed");
+}
+
+// Writes newDt into every remembered slot whose current value is bit-exactly expectBits.
+// Returns a mask of slots written; RestoreDtSlots puts expectBits back into exactly those.
+uint32_t ApplyDtSlots(uint8_t* a, uint8_t* b, uint32_t expectBits, float newDt) {
+    uint8_t* bases[2] = {a, b};
+    uint32_t newBits; memcpy(&newBits, &newDt, 4);
+    uint32_t mask = 0;
+    for (int k = 0; k < g_dtSlotCount; ++k) {
+        uint8_t* p = bases[g_dtSlots[k].base];
+        if (!p) continue;
+        if (g_dtSlots[k].deep && !(p = DerefPtr(p, g_dtSlots[k].ptrOff))) continue;
+        p += g_dtSlots[k].off;
+        uint32_t cur;
+        if (!TryReadU32(p, &cur) || cur != expectBits) continue;
+        if (TryWriteU32(p, newBits)) mask |= 1u << k;
+    }
+    if (uint8_t* s = g_dtStruct.load(std::memory_order_acquire)) {
+        uint8_t* p = s + g_dtDisp;
+        uint32_t cur;
+        if (TryReadU32(p, &cur) && cur == expectBits && TryWriteU32(p, newBits)) {
+            mask |= 0x80000000u;
+            static bool s_logged = false;
+            if (!s_logged) {
+                s_logged = true;
+                LOGI("[stereo] pass-2 dt: swapping timing struct [%p+0x%02X] per pass "
+                     "- pass 2 now really runs at Pass2Dt", (void*)s, g_dtDisp);
+            }
+        }
+    }
+    return mask;
+}
+void RestoreDtSlots(uint8_t* a, uint8_t* b, uint32_t mask, uint32_t expectBits) {
+    uint8_t* bases[2] = {a, b};
+    for (int k = 0; k < g_dtSlotCount; ++k) {
+        if (!(mask & (1u << k))) continue;
+        uint8_t* p = bases[g_dtSlots[k].base];
+        if (!p) continue;
+        if (g_dtSlots[k].deep && !(p = DerefPtr(p, g_dtSlots[k].ptrOff))) continue;
+        TryWriteU32(p + g_dtSlots[k].off, expectBits);
+    }
+    if (mask & 0x80000000u) {
+        if (uint8_t* s = g_dtStruct.load(std::memory_order_acquire))
+            TryWriteU32(s + g_dtDisp, expectBits);
+    }
+}
+
+// Set by FlowTransitionCheck (defined below, run at every pass-1 entry) whenever the
+// ENGINE changes a task-group active byte - a gameflow transition marker.
+ULONGLONG g_flowChangeTick = 0;
+
 void DoSecondPass(void* self, void* a, void* b) {
     // Stereo mode: only pump frames for which the game stashed the second eye's camera -
     // and write that camera FIRST, while every writer is quiescent. Menus, loading and
@@ -759,6 +1115,15 @@ void DoSecondPass(void* self, void* a, void* b) {
         static ULONGLONG s_lastInactive = GetTickCount64();
         if (!GameERPlayerActive()) { s_lastInactive = GetTickCount64(); return; }
         if (GetTickCount64() - s_lastInactive < 8000) return;
+        // Teleport guard: fast travel tears the world down around a still-active player;
+        // running a second pass in that window fires (previously fatal) engine asserts.
+        if (GameERTeleportGraceActive()) return;
+        // Flow-transition guard: the engine flipped task lines recently (map transfer,
+        // cutscene, flow change) - the world is mid-transition, sit the pass out.
+        if (g_flowChangeTick && GetTickCount64() - g_flowChangeTick < 2500) return;
+        // Fade guard: the screen just faded to black - fast travel / death warp teardown
+        // is underway (both fast-travel crashes fired in exactly this window).
+        if (StereoFadeGuardActive()) return;
         if (!GameERApplySecondEyeCamera()) return;
     }
     // Content probe (experiment mode): make pass 2's render unmistakable - the harness then
@@ -779,16 +1144,15 @@ void DoSecondPass(void* self, void* a, void* b) {
     const bool fullFrame = keyFF >= 0 ? keyFF != 0 : Cfg().vrPass2FullFrame;
     float dtSaved = 0.f;
     bool dtSwapped = false;
-    static const char* kFullFrameKeep = "0-8,10,12-159,161-165,167,168";
-    const bool* keepSet;
-    if (fullFrame) {
-        static std::string s_ffSpec;
-        static bool s_ffKeep[256];
-        if (s_ffSpec != kFullFrameKeep) {   // parse once
-            s_ffSpec = kFullFrameKeep;
-            ParseKeepSpec(kFullFrameKeep, s_ffKeep);
-        }
-        keepSet = s_ffKeep;
+    const bool* keepSet = Pass2KeepSet(fullFrame ? Cfg().vrPass2FullFrameKeep : Cfg().vrPass2Keep);
+    // Pass2Dt <= 0 = HALF-DT MODE: no freeze attempt at all. The production combination is
+    // [Patches] FpsTarget=120 + full-frame pass 2: each engine frame advances 1/120 s, so a
+    // stereo PAIR advances exactly 1/60 - realtime by construction, every system at correct
+    // speed, eyes 8.3 ms apart in sim time. Chosen after the freeze approach failed twice
+    // (2026-08-20/21): the framelock imm never re-executes inside the pass, and even the
+    // hw-bp-captured timing struct [rbx+0x1C] is COPIED downstream before queue_tasks (IGT
+    // ratio stayed ~1.8x with the struct swapped) - the copy chain is not worth chasing.
+    if (fullFrame && Cfg().vrPass2Dt > 0.f) {
         float* imm = PatchesFrameDtImm();
         if (imm) {
             memcpy(&dtSaved, imm, 4);
@@ -797,12 +1161,199 @@ void DoSecondPass(void* self, void* a, void* b) {
         static bool s_ffLogged = false;
         if (!s_ffLogged) {
             s_ffLogged = true;
-            LOGI("[stereo] pass 2 FULL-FRAME mode: dt %s (saved %.5f -> %.7f), keep %s",
+            LOGI("[stereo] pass 2 FULL-FRAME mode: dt %s (saved %.5f -> %.7f)",
                  dtSwapped ? "swapped" : "NOT SWAPPED (framelock imm unresolved!)",
-                 dtSaved, Cfg().vrPass2Dt, kFullFrameKeep);
+                 dtSaved, Cfg().vrPass2Dt);
         }
-    } else {
-        keepSet = Pass2KeepSet();
+    }
+    // The imm swap above only matters if the dt-writing instruction re-executes inside the
+    // pass; measured 2026-08-21 it does NOT - the RUNTIME slots are what pass 2 reads.
+    // Capture the timing struct once (one-shot hw breakpoint; we ARE the frame thread here,
+    // so it is planted from a helper thread). Needed by the dt CamWatch and any future
+    // per-pass dt control.
+    if (fullFrame) {
+        int expected = 0;
+        if (g_dtBpState.compare_exchange_strong(expected, 1)) {
+            const DWORD tid = GetCurrentThreadId();
+            std::thread(ArmDtBreakpoint, tid).detach();
+        }
+    }
+    uint32_t dtBits = 0, dtSlotMask = 0;
+    if (fullFrame && dtSwapped) {
+        memcpy(&dtBits, &dtSaved, 4);
+        if (g_dtSlotCount < 0) ScanDtSlots((uint8_t*)a, (uint8_t*)b, dtBits);
+        dtSlotMask = ApplyDtSlots((uint8_t*)a, (uint8_t*)b, dtBits, Cfg().vrPass2Dt);
+    }
+    // Pass-2 steps override. The dt census (2026-08-21) showed the sim consumes the timing
+    // struct's STEPS field [s+0x18] fresh on EVERY pass (exe+0xb19630 copies it into the
+    // task dispatch, x2 per pumped frame), while the float dt [s+0x1c] only becomes limiter
+    // ticks. ELDEN RING advances in fixed 1/60 quanta and steps is how many quanta this
+    // frame represents - so steps=0 for pass 2 = a full engine frame that advances NOTHING:
+    // true same-sim-time stereo. Restored right after the pass.
+    uint32_t stepsSaved = 0; bool stepsSwapped = false;
+    uint32_t dstSaved[4] = {}; uint32_t dstMask = 0;
+    uint64_t bakedSaved[32] = {}; uint32_t bakedMask = 0;
+    // FD4TaskData dt swap - the ACTUAL consumer path (IgtTrace 2026-08-21: task bodies read
+    // dt from their FD4TaskData at +0x8 via `movss xmm0,[rdi+8]`, and the queue_tasks args
+    // ARE the task-data blocks). The value is MEASURED wall dt - which is why the original
+    // bit-exact scan for the 1/60 pattern missed it. Offsets found once by range-match, then
+    // re-verified by range every pass (a value that stopped looking like a dt is skipped).
+    static struct { int base; uint32_t off; } s_fd4[16];
+    static int s_fd4N = -1;
+    static float* s_dtGlobal = nullptr;
+    static bool s_dtGlobalTried = false;
+    uint32_t fd4Saved[16] = {}; uint32_t fd4Mask = 0;
+    uint32_t dtGSaved = 0; bool dtGSwapped = false;
+    if (fullFrame && Cfg().vrPass2Steps >= 0) {
+        uint8_t* fdBases[2] = {(uint8_t*)a, (uint8_t*)b};
+        if (s_fd4N < 0) {
+            s_fd4N = 0;
+            char msg[192]; int mp = 0; msg[0] = 0;
+            for (int bi = 0; bi < 2; ++bi) {
+                if (!fdBases[bi]) continue;
+                for (uint32_t o = 0; o + 4 <= 0x100 && s_fd4N < 16; o += 4) {
+                    uint32_t bits;
+                    if (!TryReadU32(fdBases[bi] + o, &bits)) break;
+                    if (PlausibleDtF(bits)) {
+                        s_fd4[s_fd4N++] = {bi, o};
+                        mp += snprintf(msg + mp, sizeof(msg) - mp, " %c+0x%x", bi ? 'b' : 'a', o);
+                    }
+                }
+            }
+            LOGI("[stereo] FD4TaskData dt scan: %d in-range float(s):%s", s_fd4N, msg);
+        }
+        const float tiny = 1e-6f; uint32_t tb; memcpy(&tb, &tiny, 4);
+        for (int i = 0; i < s_fd4N; ++i) {
+            uint8_t* p = fdBases[s_fd4[i].base] + s_fd4[i].off;
+            uint32_t cur;
+            if (!TryReadU32(p, &cur) || !PlausibleDtF(cur)) continue;
+            if (TryWriteU32(p, tb)) { fd4Saved[i] = cur; fd4Mask |= 1u << i; }
+        }
+        // THE frame-dt global (fd4-builder disasm, 2026-08-21, exe+0x26d5500): every task
+        // invocation builds its FD4TaskData ON THE STACK and copies dt from ONE static
+        // float (2.6.2.0: exe+0x3C62508) - `lea rax,[vftable]; mov [rsp+28],rax; movss
+        // xmm0,[rip+dtGlobal]; movss [rsp+30],xmm0; call task->execute`. It holds the
+        // MEASURED wall dt (why every bit-exact 1/60 scan missed) and is read fresh for
+        // every task of BOTH passes. Swapping IT around pass 2 is the true freeze.
+        if (!s_dtGlobalTried) {
+            s_dtGlobalTried = true;
+            // Anchored on the builder's own prologue tail (movsxd rdi,r9d + the vftable
+            // lea) so it cannot hit the other fd4-construction that uses an .rdata 1/30
+            // CONSTANT - the first attempt matched that one, poisoning a shared constant.
+            // Layout: movsxd(3) + mov rbx,[rip](7) + lea rax,[rip](7) + mov [rsp+28],rax(5)
+            // = 22 bytes to the movss; its disp32 sits at +26 within the 8-byte instruction.
+            if (uint8_t* hit = AobScan("49 63 F9 48 8B 1D ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? "
+                                       "48 89 44 24 28 F3 0F 10 05 ?? ?? ?? ?? F3 0F 11 44 24 30"))
+                s_dtGlobal = (float*)ResolveRipRelative(hit + 22, 4, 8);
+            if (s_dtGlobal) {
+                // Must be a mutable .data cell holding a plausible measured dt - never a
+                // read-only constant.
+                MEMORY_BASIC_INFORMATION mbi{};
+                const bool writable =
+                    VirtualQuery(s_dtGlobal, &mbi, sizeof(mbi)) &&
+                    (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE));
+                uint32_t cur = 0;
+                TryReadU32((uint8_t*)s_dtGlobal, &cur);
+                if (!writable || !PlausibleDtF(cur)) {
+                    LOGW("[stereo] frame-dt global %p rejected (writable=%d, value bits 0x%08X)",
+                         (void*)s_dtGlobal, (int)writable, cur);
+                    s_dtGlobal = nullptr;
+                } else {
+                    float v; memcpy(&v, &cur, 4);
+                    LOGI("[stereo] frame-dt global resolved: %p (current %.6f, mutable .data)",
+                         (void*)s_dtGlobal, v);
+                }
+            } else {
+                LOGW("[stereo] frame-dt global NOT found (fd4-builder AOB miss)");
+            }
+        }
+        if (s_dtGlobal) {
+            uint32_t cur;
+            if (TryReadU32((uint8_t*)s_dtGlobal, &cur) && PlausibleDtF(cur) &&
+                TryWriteU32((uint8_t*)s_dtGlobal, tb)) {
+                dtGSaved = cur;
+                dtGSwapped = true;
+            }
+        }
+    }
+    if (fullFrame && Cfg().vrPass2Steps >= 0) {
+        if (uint8_t* s = g_dtStruct.load(std::memory_order_acquire)) {
+            if (TryReadU32(s + 0x18, &stepsSaved) &&
+                TryWriteU32(s + 0x18, (uint32_t)Cfg().vrPass2Steps)) stepsSwapped = true;
+        }
+        // The staged copies were made BEFORE pass 1 (source-field swaps miss them - measured:
+        // igt unchanged), so patch the DESTINATIONS the dispatch consumes.
+        const int nd = g_stepsDstN.load(std::memory_order_acquire);
+        for (int i = 0; i < nd; ++i) {
+            uint8_t* p = g_stepsDst[i] + 0xdc;
+            if (TryReadU32(p, &dstSaved[i]) && TryWriteU32(p, (uint32_t)Cfg().vrPass2Steps))
+                dstMask |= 1u << i;
+        }
+        // The TERMINAL store (census chain 2026-08-21): the once-per-frame prep reads the
+        // staged steps and calls a setter that is just `mov [obj+0x1a8], edx; ret` on the
+        // global step-dispatch object *[exe+0x47EF360] (AOB-resolved). This is the field
+        // the frame's task iteration consumes - patch IT between the passes.
+        static uint8_t** s_stepObj = nullptr;
+        static bool s_stepObjTried = false;
+        if (!s_stepObjTried) {
+            s_stepObjTried = true;
+            if (uint8_t* hit = AobScan("48 8B 1D ?? ?? ?? ?? 8B 97 DC 00 00 00 48 8B CB"))
+                s_stepObj = (uint8_t**)ResolveRipRelative(hit, 3, 7);
+            if (!s_stepObj) LOGW("[stereo] pass-2 steps: step-dispatch global not found (AOB miss)");
+        }
+        if (s_stepObj) {
+            uint8_t* obj = nullptr;
+            if (SafeRead(s_stepObj, &obj, sizeof(obj)) && obj) {
+                uint8_t* p = obj + 0x1a8;
+                if (TryReadU32(p, &dstSaved[3]) && TryWriteU32(p, (uint32_t)Cfg().vrPass2Steps)) {
+                    dstMask |= 1u << 3;
+                    g_stepsDst[3] = obj;   // reuse the restore path
+                }
+                if (g_bakedN < 0) {
+                    float ref = 1.f / 60.f;
+                    if (float* imm = PatchesFrameDtImm()) { if (*imm > 1e-5f && *imm < 0.12f) ref = *imm; }
+                    g_bakedN = ScanBaked(obj, 0x400, ref, g_baked, 16);
+                    uint8_t *arr = nullptr, *beg = nullptr, *end = nullptr;
+                    if (SafeRead(obj + 8, &arr, 8) && arr &&
+                        SafeRead(arr + 8, &beg, 8) && SafeRead(arr + 0x10, &end, 8) &&
+                        beg && end > beg && (size_t)(end - beg) <= 0x170u * 64u)
+                        g_bakedN += ScanBaked(beg, (size_t)(end - beg), ref, g_baked + g_bakedN,
+                                              32 - g_bakedN);
+                    char offs[192]; int op = 0; offs[0] = 0;
+                    for (int i = 0; i < g_bakedN && op < 170; ++i)
+                        op += snprintf(offs + op, sizeof(offs) - op, " %p%s",
+                                       (void*)g_baked[i].p, g_baked[i].dbl ? "d" : "f");
+                    LOGI("[stereo] pass-2 baked-dt scan: %d candidate(s):%s", g_bakedN, offs);
+                }
+            }
+        }
+        // Baked-entry dt zeroing: the values the pass actually consumes.
+        for (int i = 0; i < g_bakedN && i < 32; ++i) {
+            uint8_t* p = g_baked[i].p;
+            if (g_baked[i].dbl) {
+                uint64_t cur;
+                if (!TryReadU64(p, &cur)) continue;
+                double d; memcpy(&d, &cur, 8);
+                if (d < 0.0005 || d > 0.12) continue;   // stale/rebuilt entry: skip
+                double tiny = 1e-6;
+                uint64_t nb; memcpy(&nb, &tiny, 8);
+                if (TryWriteU64(p, nb)) { bakedSaved[i] = cur; bakedMask |= 1u << i; }
+            } else {
+                uint32_t cur;
+                if (!TryReadU32(p, &cur) || !PlausibleDtF(cur)) continue;
+                float tiny = 1e-6f;
+                uint32_t nb; memcpy(&nb, &tiny, 4);
+                if (TryWriteU32(p, nb)) { bakedSaved[i] = cur; bakedMask |= 1u << i; }
+            }
+        }
+        static bool s_logged = false;
+        if (!s_logged && (stepsSwapped || dstMask || bakedMask)) {
+            s_logged = true;
+            LOGI("[stereo] pass-2 steps override ACTIVE: source %s, %d staged dst, dispatch "
+                 "[obj+0x1A8] %s, baked dt slots 0x%X -> %d per pass",
+                 stepsSwapped ? "swapped" : "miss", nd,
+                 (dstMask & 8) ? "swapped" : "miss", bakedMask, Cfg().vrPass2Steps);
+        }
     }
     uint8_t saved[256];
     const int n = g_table.count < 256 ? g_table.count : 256;
@@ -816,6 +1367,23 @@ void DoSecondPass(void* self, void* a, void* b) {
     g_curPass.store(1, std::memory_order_release);
     QueryPerformanceCounter(&t1);
     for (int i = 0; i < n; ++i) WriteActiveRaw(i, saved[i]);
+    if (stepsSwapped) {
+        if (uint8_t* s = g_dtStruct.load(std::memory_order_acquire))
+            TryWriteU32(s + 0x18, stepsSaved);
+    }
+    for (int i = 0; i < 3; ++i)
+        if (dstMask & (1u << i)) TryWriteU32(g_stepsDst[i] + 0xdc, dstSaved[i]);
+    if (dstMask & 8) TryWriteU32(g_stepsDst[3] + 0x1a8, dstSaved[3]);   // dispatch object
+    for (int i = 0; i < g_bakedN && i < 32; ++i) {
+        if (!(bakedMask & (1u << i))) continue;
+        if (g_baked[i].dbl) TryWriteU64(g_baked[i].p, bakedSaved[i]);
+        else                TryWriteU32(g_baked[i].p, (uint32_t)bakedSaved[i]);
+    }
+    { uint8_t* fdBases[2] = {(uint8_t*)a, (uint8_t*)b};
+      for (int i = 0; i < s_fd4N; ++i)
+          if (fd4Mask & (1u << i)) TryWriteU32(fdBases[s_fd4[i].base] + s_fd4[i].off, fd4Saved[i]); }
+    if (dtGSwapped) TryWriteU32((uint8_t*)s_dtGlobal, dtGSaved);
+    if (dtSlotMask) RestoreDtSlots((uint8_t*)a, (uint8_t*)b, dtSlotMask, dtBits);
     if (dtSwapped) PatchesWriteFrameDt(dtSaved);
     // Symmetric protection: pass 2's image is read by the GPU while the NEXT frame's pass 1
     // uploads - drain again so its data survives until its draws complete.
@@ -830,11 +1398,44 @@ void DoSecondPass(void* self, void* a, void* b) {
     }
 }
 
+// Gameflow-transition guard. The engine's own flow machine flips task-group active bytes
+// when entering/leaving map transfers, cutscenes, title flow, ... - the exact windows where
+// a second pass replays the frame over half-torn-down world state. Fast travel crashed
+// twice through DIFFERENT mechanisms (a DL_PANIC 2026-08-21 10:14, then a raw INT_OVERFLOW
+// in a protected code region 10:34 that no assert-eater can catch), both in the fade-out
+// BEFORE any camera jump - so the guard keys on the engine's own earliest signal instead:
+// ANY active-byte change (that the engine made, observed at pass-1 entry) suspends pass 2
+// for a short tail. Normal play never flips lines, so the cost is a moment of mono exactly
+// when the screen is fading anyway. (g_flowChangeTick is declared above DoSecondPass.)
+void FlowTransitionCheck() {
+    if (!g_table.valid) return;
+    static uint8_t s_prev[256];
+    static bool s_have = false;
+    const int n = g_table.count < 256 ? g_table.count : 256;
+    bool changed = false;
+    for (int i = 0; i < n; ++i) {
+        const uint8_t v = ReadActiveRaw(i);
+        if (s_have && v != s_prev[i]) {
+            changed = true;
+            static long s_logged = 0;
+            if (s_logged < 24 && ++s_logged) {
+                const wchar_t* nm = (const wchar_t*)(g_table.entry0 + (size_t)i * g_table.stride + kNameOff);
+                LOGI("[stereo] flow transition: group %d (%S) active %d -> %d; pass 2 suspended",
+                     i, nm, (int)s_prev[i], (int)v);
+            }
+        }
+        s_prev[i] = v;
+    }
+    s_have = true;
+    if (changed) g_flowChangeTick = GetTickCount64();
+}
+
 uint64_t __fastcall Hook_QueueTasks(void* self, void* a, void* b) {
     const long i = InterlockedIncrement(&g_qtCalls);
     LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
     g_qtLastEnterQpc = t0.QuadPart;
     g_qtArgA = a; g_qtArgB = b;
+    FlowTransitionCheck();
     if (i <= 3) {
         void* frames[12] = {};
         const USHORT got = RtlCaptureStackBackTrace(1, 12, frames, nullptr);
@@ -1379,6 +1980,7 @@ void FrameProbeTick() {
         // The table is built during engine init, so early attempts can legitimately miss.
         for (int attempt = 1; attempt <= 6; ++attempt) {
             if (RunOnce(attempt)) {
+                InstallIgtTrace();
                 if (fullStereo) {
                     // Production: install the frame-driver hook and arm the stereo pump.
                     // Pass 2 only runs on frames where the game stashed a second eye, so
@@ -1422,6 +2024,23 @@ void FrameProbeOnPresent(const Dx12Frame& f) {
 }
 
 void FrameProbeSetPass2Keep(const char* spec) { SetPass2Override(spec ? spec : ""); }
+
+uint8_t* FramePumpStepsDstWatchTarget(uint32_t* outLen) {
+    if (g_stepsDstN.load(std::memory_order_acquire) < 1) return nullptr;
+    // The staged frame-state block in the task-runner: steps at +0xdc, flag at +0xd8; the
+    // dt float the dispatch hands to tasks should be staged nearby. 0x40 bytes of context.
+    if (outLen) *outLen = 0x40;
+    return g_stepsDst[0] + 0xc0;
+}
+
+uint8_t* FramePumpDtWatchTarget(uint32_t* outLen) {
+    uint8_t* s = g_dtStruct.load(std::memory_order_acquire);
+    if (!s) return nullptr;
+    // steps int at +0x18, dt float at +0x1c, cached qword at +0x20: whoever COPIES the
+    // frame dt downstream reads in here - the census names the copy site.
+    if (outLen) *outLen = 0xC;
+    return s + 0x18;
+}
 
 bool FramePumpReady() { return g_origQueueTasks != nullptr && g_pumpMode == 2; }
 int  FramePumpCurrentPass() { return g_curPass.load(std::memory_order_acquire); }

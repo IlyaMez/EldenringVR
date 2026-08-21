@@ -24,6 +24,9 @@ void StereoShutdown();
 // Render-thread callbacks from reshade_addon.cpp.
 void StereoOnPresent(const Dx12Frame& frame);
 void StereoOnDeviceLost();
+// True while the screen is faded to (near-)black after being normal - a world transition
+// (fast travel, death warp) is in progress and the frame pump must not run a second pass.
+bool StereoFadeGuardActive();
 void StereoOnSwapchainResize();
 
 // ---- the eye baton (render thread <-> game thread) ---------------------------------
