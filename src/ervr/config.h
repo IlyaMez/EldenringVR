@@ -65,6 +65,48 @@ struct Config {
     // plus head-motion shear, measured 2026-08-21). Set false to fall back to 16:9 targets.
     bool  vrGameResAspectFix = true;
 
+    // [HUD]  the in-game UI, lifted out of the frame onto its own world-space quad layer.
+    // See hud.h for how the UI draws are recognised and redirected.
+    std::string hudMode = "quad";       // off | quad
+    // Which render target the UI is painted onto. It MOVES during a session (measured on
+    // 1.16.2, 2026-08-21): the title screen paints onto the back buffer, but in-game the
+    // engine tonemaps into a full-size offscreen R8G8B8A8 target, draws the HUD onto that,
+    // and copies it over in one draw. "auto" re-derives the target whenever the current
+    // choice goes quiet, in both directions; "backbuffer" pins it.
+    std::string hudTarget = "auto";     // auto | backbuffer
+    // How many draws into that target belong to the FRAME rather than to the UI. On this
+    // game the first one is the tonemap/output pass and everything after it is UI, so 1 -
+    // verified in both places the UI lives (2 UI draws at the title, ~23 in-game).
+    // Numpad 8 steps it live; [HUD] Probe prints the census that tells you the right value.
+    int   hudFirstDraw = 1;
+    bool  hudProbe = false;             // log the frame's render-target/draw census once a second
+    // Where the panel hangs. body = world-locked with a lazy follow (default: the compositor
+    // can reproject it perfectly, unlike head-locked content at one XR frame per stereo
+    // pair), head = welded to the view, world = dropped in the world and left there.
+    std::string hudLock = "body";       // body | head | world
+    float hudDistance = 2.0f;           // metres in front of the eyes
+    float hudWidth = 2.4f;              // metres; height follows the captured frame's aspect
+    float hudHeightOffset = 0.f;        // metres up (+) or down (-) from eye level
+    float hudYawDeg = 0.f, hudPitchDeg = 0.f;
+    float hudOpacity = 1.0f;            // 0..1, multiplied into the layer's coverage
+    // Where the panel's coverage comes from. ELDEN RING's UI pipelines never write the
+    // alpha channel, so there is nothing to read: keyed on brightness, every black menu
+    // panel and text outline came out invisible. "dual" solves for coverage instead, by
+    // capturing the same UI over two known backgrounds - see BlitParams::Alpha.
+    std::string hudKey = "dual";        // dual | max | alpha | luma
+    // Test switch: redirect the UI even when there is no VR session to submit the panel
+    // into. Normally the redirect stands down in that case, because taking the HUD out of
+    // the frame with nowhere to put it just loses it - but that also makes the capture path
+    // untestable in an unattended flat run, which is the only kind this repo can automate.
+    bool  hudRedirectWithoutVR = false;
+    // Composite the reconstructed panel back onto the game's own frame. Off for play (the
+    // panel belongs in the headset, and drawing it twice is just a cost); on to see what the
+    // capture actually produced - coverage, colour, whether the menu is there - without
+    // putting a headset on. Pairs with RedirectWithoutVR for unattended runs.
+    bool  hudMirrorPanel = false;
+    float hudFollowDeg = 25.f;          // body lock: head turn that re-places the panel
+    float hudFollowRadius = 0.5f;       // body lock: head travel (m) that re-places it
+
     // [Buttons]  Touch -> XInput. Values are XInput button names or "none".
     std::string btnA = "A", btnB = "B", btnX = "X", btnY = "Y";
     std::string btnLThumb = "LS", btnRThumb = "RS", btnMenu = "START";
@@ -279,8 +321,24 @@ struct Config {
     // Havok cloth solver run twice per frame with pass 2's ~0 dt goes visibly unstable
     // ("cloth going haywire"); gating it renders pass 1's cloth state in pass 2 - the same
     // sim instant, exactly what same-sim-time stereo wants anyway.
+    // The Havok RIGID-BODY solver is excluded for the same reason (2026-08-21, "dead enemy
+    // ragdolls and broken fences go haywire"): 97 HavokWorldUpdate_Pre + 99
+    // HavokWorldUpdate_Post (gated TOGETHER - they bracket the world step), 82
+    // ChrIns_RagdollSafe, and the destructible/dynamic map-prop feed 89-91
+    // LocationUpdate_PrePhysics* + 92-94 LocationUpdate_PostCloth* (each family whole).
+    // Free bodies - ragdolls and broken geometry - are the one thing in the world with no
+    // animation to re-drive them, so they are pure solver output: stepping the solver a
+    // second time at dt~0 divides by that dt in constraint/penetration recovery and the
+    // bodies get flung. Gating renders pass 1's rigid-body state in pass 2, the same sim
+    // instant, which is the point. 98 RenderingSystemUpdate sits BETWEEN 97 and 99 and is
+    // the renderer, not physics - it stays kept.
+    // NOT gated here: the character pre/post-physics feed (77-79, 81, 113-114). It is the
+    // exact analogue of the cloth gate and is offered as a Numpad 2 variant, but the arm
+    // solve rides CS::NoUpdateInterface vft[10] (see game_er.cpp HkHandler) and pass 2 must
+    // re-apply the VR arm pose, so the narrow gate is the default until the wide one is
+    // confirmed in-headset to still solve arms in pass 2.
     // Hot-reloads; Numpad 2 cycles stabilisation variants.
-    std::string vrPass2FullFrameKeep = "0-7,10-25,27-84,86-99,106-109,113-142,144-160,164,168";
+    std::string vrPass2FullFrameKeep = "0-7,10-25,27-81,83-84,86-88,95-96,98,106-109,113-142,144-160,164,168";
     // 1 = each Present carries the PREVIOUS pass's render (pipelined renderer): the XR frame
     // opens at pass 2's present (left eye) and closes at pass 1's (right). MEASURED on
     // 2026-08-20 with the pitch probe: pass-2 content lands at pass-1's present (tilting
@@ -339,6 +397,15 @@ struct Config {
     float autoPilotPeriod = 0.6f;     // press/release cycle; menus must see the release
     std::string autoPilotButton = "A";
     int   autoPilotWiggleSeconds = 0; // after spawn: pan the camera (right stick only) this long
+    // Post-spawn menu probe. Once the player is in the world (and any wiggle is done), tap
+    // this button every MenuPeriod seconds for MenuSeconds, so an unattended run can capture
+    // what the renderer does with a FULL-SCREEN menu open - which is a different draw path
+    // from the in-world HUD and needs its own census. START = equipment/inventory,
+    // BACK = map. Both only open and close a menu, so unlike the A-press script this is safe
+    // to run after spawn: it cannot talk to an NPC, use an item or touch a grace.
+    int   autoPilotMenuSeconds = 0;
+    float autoPilotMenuPeriod = 6.f;
+    std::string autoPilotMenuButton = "START";
 
     void Load(const std::wstring& iniPath);
 };

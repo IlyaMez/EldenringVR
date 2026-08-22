@@ -92,6 +92,30 @@ bool AutoPilotMerge(XINPUT_GAMEPAD& pad) {
                 return true;
             }
         }
+        // Menu probe: open and close a full-screen menu on a slow cycle. A menu is drawn by
+        // a different part of the renderer than the in-world HUD, so "does the HUD layer see
+        // it" has to be asked separately - and this is the only way to ask it unattended.
+        if (c.autoPilotMenuSeconds > 0) {
+            static std::atomic<double> s_m0{0};
+            double m0 = s_m0.load(std::memory_order_relaxed);
+            if (m0 == 0.0) {
+                s_m0.store(now); m0 = now;
+                LOGI("[autopilot] player active; tapping %s every %.1f s for %d s (menu probe)",
+                     c.autoPilotMenuButton.c_str(), c.autoPilotMenuPeriod, c.autoPilotMenuSeconds);
+            }
+            const double m = now - m0;
+            if (m < c.autoPilotMenuSeconds) {
+                // A short tap at the start of each period: held long enough for the game to
+                // see the edge, released long enough that the menu stays open in between.
+                const double period = c.autoPilotMenuPeriod > 0.5 ? c.autoPilotMenuPeriod : 6.0;
+                const double phase = std::fmod(m, period);
+                if (phase < 0.15) {
+                    pad.wButtons |= ButtonByName(c.autoPilotMenuButton);
+                    return true;
+                }
+                return false;   // still inside the probe window: hold the input released
+            }
+        }
         if (!g_finished.exchange(true)) LOGI("[autopilot] player is in the world; input released");
         return false;
     }

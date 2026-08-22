@@ -19,6 +19,7 @@
 #include "patches_er.h"
 #include "frame_probe.h"
 #include "cam_watch.h"
+#include "hud.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -209,8 +210,18 @@ DWORD WINAPI Worker(LPVOID) {
                  rs.registered, rs.d3d12, ss.graphicsBound, rs.presents, ss.frames, ss.stereoFrames, ss.submitFails, ss.blitFails,
                  rs.width, rs.height, (unsigned)rs.format, ss.cropU * 100.f, ss.cropV * 100.f, ss.lastSubmitMs,
                  pumpHz, FramePumpLastMs(), FramePumpGpuSyncLastMs(), igtRate);
-            if (ss.eyeBlitL || ss.eyeBlitR || ss.eyeDesync)
-                LOGD("hb: eyes: L %ld / R %ld blits, desync %ld", ss.eyeBlitL, ss.eyeBlitR, ss.eyeDesync);
+            if (ss.eyeBlitL || ss.eyeBlitR || ss.eyeDesync || ss.monoStalls)
+                LOGD("hb: eyes: L %ld / R %ld blits, desync %ld, flat frames (no second pass) %ld",
+                     ss.eyeBlitL, ss.eyeBlitR, ss.eyeDesync, ss.monoStalls);
+            if (HudEnabled()) {
+                // "captures 0 / misses high" means the UI draws are not where detection
+                // expects them; [HUD] Probe prints the census that says where they are.
+                HudStats hs = HudGetStats();
+                LOGD("hb: hud: layers %ld | 5s: captures %ld, misses %ld, redirected draws %ld | "
+                     "draws into the frame's final target %d (first %d kept), capture target %d",
+                     ss.hudFrames, hs.captures, hs.misses, hs.redirects, hs.lastDrawsIntoTarget,
+                     hs.firstDraw, (int)hs.targetFound);
+            }
             // The engine's sim step is a FIXED 1/60 s, so a loop below 60 Hz is not just
             // lower fps - the whole game runs at loopHz/60 speed. Under stereo the loop is
             // usually GPU-bound; the fix is lowering the game's resolution/settings.

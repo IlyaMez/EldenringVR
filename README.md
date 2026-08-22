@@ -36,6 +36,7 @@ VR runtime R.E.A.L. has open inside the game process and feeds the game input.
 | Tap/hold layers | Menu tap = START, hold = BACK (map). Left‑stick click tap = crouch, hold+tilt = D‑pad (quick slots). |
 | Movement options | Hand‑relative locomotion (move where the left controller points), snap‑turn pulses. |
 | Hand aim (experimental) | Camera yaw/pitch follow the right controller while gripping — needs a camera pointer (see below). |
+| HUD on its own layer | The in‑game UI is lifted out of the rendered frame and submitted as a separate world‑space quad, at a distance and size you choose. See below. |
 | Hot reload | Edit `ERVR\ERVR.ini` while playing; changes apply within a second. |
 
 ## Requirements
@@ -222,6 +223,126 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
   for `CameraYawSource=ervr` + `RightStick=body`. Locked on, the game aims the body.
 * Version gate: RVAs are used only when the exe is 2.6.2.0; otherwise erfps2's AOBs are tried. AOB check script:
   see `tools/verify_signatures.py`.
+
+## The HUD on its own floating quad (`[HUD]`)
+
+**The problem.** In full stereo ERVR renders **one** very wide game frame per pass — the camera is widened to
+roughly 110° vertical so that a single image can contain a whole eye's field of view — and each eye is a *crop* of
+it. The HUD, though, is laid out in **screen space**, so the engine paints it along the edges of that widened
+frame: 50°+ off‑axis, half of it outside the eye crop, the rest smeared across the periphery at the wrong depth.
+No camera setting fixes this. The HUD is not in the world; it is on the film.
+
+**The fix.** Take it off the film. ERVR is already a ReShade add‑on, which means it sees ELDEN RING's own D3D12
+command stream. The moment the first UI draw of a frame is issued, ERVR swaps the render target underneath it for
+a texture of its own, cleared transparent:
+
+* the game's frame comes out with **no UI in it** — the eye crops are pure world, and nothing about the stereo
+  path changes;
+* ERVR's texture comes out holding **the UI alone, over transparency**;
+* that texture is submitted as a second `XrCompositionLayerQuad`, blended over the projection layer by the
+  compositor with `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT` — at *headset* resolution, not the
+  game's, so text is sharper on the panel than it ever was in the frame.
+
+No shader is patched, no draw is skipped, no game code is hooked. The whole mechanism is one `OMSetRenderTargets`
+per UI draw batch.
+
+### Finding the UI draws
+
+ERVR does not need to know which shaders draw the HUD. It counts draws **per render target**: everything after
+the first `FirstDraw` draws into the frame's final target is UI. On ELDEN RING that first draw is the
+tonemap/output pass and everything after it is Scaleform plus the sprite HUD, so `FirstDraw=1` is the default.
+
+Which target that *is* changes mid-session — measured on 1.16.2 (2026‑08‑21) with `Probe=true`:
+
+| | back-buffer draws / frame | where the UI is |
+|---|---|---|
+| boot logos, title screen | 3 | straight onto the back buffer (1 output blit + 2 UI batches) |
+| in game | 1 | a full‑size offscreen `R8G8B8A8` target takes ~11–24 batches (133 with a menu open), then one copy to the back buffer |
+
+`Target=auto` (the default) follows that: it starts on the back buffer, and after ~1 s with no UI found it
+re‑derives the target as the last full‑size one the frame drew into — in both directions, so quitting to the
+title moves it back.
+
+If a game patch (or another add‑on in the ReShade chain) moves things around, three knobs find it again without
+leaving the headset:
+
+| | |
+|---|---|
+| `[HUD] Probe=true` | Logs the frame's render‑target census once a second — which target took how many draws, in what order, and which of them are back buffers. Read `FirstDraw` straight off it. |
+| **Numpad 8** | Cycles `FirstDraw` 0…8 live. Buzzes *value + 1* times so you can count the current setting blind. |
+| **Numpad 7** | HUD layer on/off — the instant undo if detection ever grabs a post‑processing pass instead of the HUD. |
+| **Numpad .** | Re‑centres the panel on where you are looking (the only thing that moves it under `Lock=world`). |
+
+### Getting the coverage right
+
+Lifting the UI out is only half of it — the panel also has to know **which of its pixels are
+UI**, and ELDEN RING gives no help at all: its UI pipelines never write the alpha channel.
+Keyed on the captured alpha the whole HUD is invisible; keyed on brightness, every *black*
+part of it is — text outlines, icon frames, the character portrait box, the dimming behind a
+full-screen menu. That is why the first build made the inventory menu look like it simply
+never appeared.
+
+So `Key=dual` (the default) does not key at all — it **solves** for coverage. The same UI is
+captured twice in the same frame: once over a transparent-black clear, once over an
+opaque-white one (each UI draw is issued a second time into the second target). For any
+src-over blend,
+
+```
+over black:  B = s·a            over white:  W = s·a + (1 − a)
+       ⇒     a = 1 − (W − B)    and the premultiplied colour is B
+```
+
+which is exact, needs nothing from the game, and degrades sensibly for the other blend modes
+the UI uses (an additive overlay comes out additive, a multiply-dim comes out as the dim it
+is). Opaque black is opaque; half-transparent is half-transparent. It costs one extra
+full-size render target and one extra draw call per UI draw — around 24 of them in the
+world, 133 with a menu open, against a ~700-draw frame.
+
+`luma`, `alpha` and `max` remain as fallbacks.
+
+### Seeing it without a headset
+
+`[HUD] MirrorPanel=true` composites the reconstructed panel back onto the game's own frame,
+with the same premultiplied blend the compositor performs. What lands on the monitor is what
+the headset gets — which makes a screenshot a regression test for the entire capture, and is
+the only way an unattended run can check any of this. `[HUD] RedirectWithoutVR=true` goes
+with it, since the redirect otherwise stands down when there is no session to submit into.
+
+### If a menu does not appear
+
+Worth knowing, because it looks like a HUD bug and is not one. The frame pump only runs a
+second engine pass on frames where the game stashed a second-eye camera, and a full-screen
+menu stops it doing that — so pass 2 simply stops arriving. With `PresentLag=1` the closing
+branch used to wait for a pair that was never coming and submit **nothing at all**, which the
+compositor answers by reprojecting the last frame: a frozen world, and no menu, for as long
+as the menu was open. It now gives up after 120 ms and submits a flat frame plus the HUD
+layer. The heartbeat counts these as `flat frames (no second pass)`, and the first one logs
+`[stereo] no second pass for N ms`; both are normal while a menu is open.
+
+### Placing it
+
+`Distance` and `Width` together *are* the angular size — 2.4 m wide at 2.0 m away spans about 62°, against the
+~110° the raw frame spans, which is the entire point. `Lock=body` (the default) is world‑locked with a lazy
+follow: the panel stays put while you look around and re‑places itself once you turn past `FollowDeg` or walk
+past `FollowRadius`. World‑locked is deliberate — the compositor reprojects world‑locked content perfectly at any
+submit rate, while head‑locked content has to move *with* the head between submits, and submissions run at one XR
+frame per stereo pair. `Lock=head` (welded to the view) and `Lock=world` (dropped and left) are there if you want
+them.
+
+`Key=` controls where the panel's transparency comes from. The UI is captured over a transparent clear, so in
+principle its own alpha is the coverage mask — but the game's back buffer is `R10G10B10A2`, i.e. **two bits** of
+alpha, far too coarse for soft text edges. `luma` treats anything not black as UI, and the default `max` takes
+whichever of the two claims more coverage.
+
+`[HUD] Mode` is read **once, at startup** — watching the draw stream costs something on every draw the game
+issues, so a session that does not want the HUD layer installs no hooks at all and pays nothing. Changing `Mode`
+needs a restart; everything else in the section hot‑reloads as usual, and Numpad 7 toggles the panel within a
+session that started with `Mode=quad`.
+
+**One expected side effect:** the monitor mirror loses the HUD as well, because the HUD genuinely is no longer in
+the frame. That is the feature working. The redirect only runs while there *is* a live VR session to submit the
+panel into, though — start the game with the headset not streaming and the UI is left in the frame where it is at
+least visible, with one line in the log saying so.
 
 ## Physical melee (v0.3) — swings invoke the game's attack event
 

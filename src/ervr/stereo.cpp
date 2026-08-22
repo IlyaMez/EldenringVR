@@ -2,6 +2,7 @@
 #include "debug_keys.h"
 #include "dx12_blit.h"
 #include "frame_probe.h"
+#include "hud.h"
 #include "vr_backend.h"
 #include "config.h"
 #include "log.h"
@@ -21,6 +22,9 @@ ID3D12Device*  g_boundDevice = nullptr;
 std::atomic<long>  g_frames{0}, g_submitFails{0}, g_blitFails{0}, g_stereoFrames{0};
 std::atomic<long>  g_eyeBlits[2]{};   // successful per-eye blits (L, R)
 std::atomic<long>  g_eyeDesync{0};    // report popped with the wrong eye for the pass
+std::atomic<long>  g_hudFrames{0};    // HUD layers submitted since the last read
+std::atomic<long>  g_monoStalls{0};   // presents that fell back because pass 2 stopped
+bool               g_pumpStalled = false;   // render thread only; drives the log line
 std::atomic<float> g_lastSubmitMs{0.f};
 std::atomic<int>   g_mode{(int)StereoMode::Off};
 std::atomic<float> g_cropU{1.f}, g_cropV{1.f};
@@ -59,7 +63,14 @@ bool      g_submitValid[2]{};
 // every present (the main-loop thread), so plain bools are fine.
 bool        g_frameOpen = false;
 VRFrameInfo g_openFi;
-bool        g_quadPending = false;
+// When the last pass-2 present arrived. The frame pump only runs a second pass on frames
+// where the game stashed a second-eye camera, and a full-screen menu stops it doing that -
+// so pass 2 simply stops coming. The closing branch below used to wait for it forever,
+// submitting NOTHING in the meantime, which the compositor answers by reprojecting the last
+// frame: a frozen world and no menu, for as long as the menu is open. This is how it
+// notices instead.
+ULONGLONG   g_lastOpenTick = 0;
+constexpr ULONGLONG kPumpStallMs = 120;   // ~7 pairs at 60 Hz; well past a dropped frame
 
 double NowMs() {
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
@@ -133,7 +144,7 @@ void ReleaseLocked() {
     g_bound = false;
     g_boundDevice = nullptr;
     g_frameOpen = false;
-    g_quadPending = false;
+    g_lastOpenTick = 0;
     std::lock_guard<std::mutex> b(g_batonMtx);
     g_reqActive = false;
     g_repHead = g_repCount = 0;
@@ -213,6 +224,15 @@ void StereoReportEye(const StereoEyeReport& r) {
 bool ReportsLive() {
     std::lock_guard<std::mutex> b(g_batonMtx);
     return g_repCount > 0 && GetTickCount64() - g_lastReportTick <= 500;
+}
+
+// Throws away every queued report. Used when the pump stops: the game thread keeps
+// reporting cameras even with no second pass, so the queue would otherwise stay
+// permanently "live" and mis-phase the first pair after it resumes.
+void ResetReports() {
+    std::lock_guard<std::mutex> b(g_batonMtx);
+    g_repHead = g_repCount = 0;
+    g_submitValid[0] = g_submitValid[1] = false;
 }
 
 bool PopReport(StereoEyeReport& rep) {
@@ -363,6 +383,66 @@ bool BlitQuad(IVRBackend* vr, const Dx12Frame& f, BlitParams bp) {
     return false;
 }
 
+// ---- the HUD layer ---------------------------------------------------------------------
+// hud.cpp has already taken the UI out of the frame the eyes are cropped from and left it,
+// alone and over transparency, in a texture of its own. All that is left here is to move it
+// into the runtime's swapchain and say where in the world it hangs.
+//
+// Note the ORDER this runs in: the placement fields are filled into the same VRSubmitLayer
+// the eyes (or the cinema quad) already own, so one xrEndFrame carries the world and the UI
+// together and the compositor blends them at headset resolution rather than at the game's.
+BlitParams::Alpha HudAlphaMode(const HudFrame& hf) {
+    const std::string& k = Cfg().hudKey;
+    if (k == "alpha") return BlitParams::Alpha::Src;
+    if (k == "luma") return BlitParams::Alpha::Luma;
+    if (k == "max") return BlitParams::Alpha::Max;
+    // "dual" - but only when the pair was actually captured. hud.cpp declines to replay the
+    // UI draws if any of them depth-tests, and then there is only the one image to key on.
+    return hf.texOverWhite ? BlitParams::Alpha::Dual : BlitParams::Alpha::Max;
+}
+
+int HudLock() {
+    const std::string& l = Cfg().hudLock;
+    if (l == "head") return QuadLockHead;
+    if (l == "world") return QuadLockWorld;
+    return QuadLockBody;
+}
+
+void ComposeHud(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& layer) {
+    HudFrame hf;
+    if (!HudTakeFrame(hf)) return;                     // HUD off, or this pass drew no UI
+    if (!vr->EnsureHudSwapchain(hf.width, hf.height)) return;
+    ID3D12Resource* dst = vr->AcquireHudImage();
+    if (!dst) { g_blitFails.fetch_add(1, std::memory_order_relaxed); return; }
+    BlitParams bp;
+    bp.dstFormat = vr->HudFormat();
+    // The capture target is ours and SRV-able, so it is sampled where it lies - no staging
+    // copy, and the staging ring stays keyed to the back buffer for the eye blits.
+    bp.srcIsShaderResource = true;
+    bp.linearizeSrc = Cfg().vrColorFix == "none"
+                          ? false
+                          : (Cfg().vrColorFix == "srgb" || Dx12Blitter::StorageIsGammaEncoded(hf.format));
+    bp.alphaMode = HudAlphaMode(hf);
+    bp.src2 = hf.texOverWhite;
+    bp.alphaScale = Clamp(Cfg().hudOpacity, 0.f, 1.f);
+    const bool ok = g_blit.Copy(f.queue, hf.tex, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                dst, D3D12_RESOURCE_STATE_RENDER_TARGET, bp);
+    vr->ReleaseHudImage();
+    if (!ok) { g_blitFails.fetch_add(1, std::memory_order_relaxed); return; }
+
+    layer.hudValid = true;
+    layer.hudDistanceM = Clamp(Cfg().hudDistance, 0.3f, 20.f);
+    layer.hudWidthM = Clamp(Cfg().hudWidth, 0.2f, 40.f);
+    layer.hudHeightOffsetM = Cfg().hudHeightOffset;
+    layer.hudYawDeg = Cfg().hudYawDeg;
+    layer.hudPitchDeg = Cfg().hudPitchDeg;
+    layer.hudLock = HudLock();
+    layer.hudFollowDeg = Clamp(Cfg().hudFollowDeg, 1.f, 180.f);
+    layer.hudFollowRadiusM = Clamp(Cfg().hudFollowRadius, 0.05f, 5.f);
+    layer.hudRecenter = HudTakeRecenter();
+    g_hudFrames.fetch_add(1, std::memory_order_relaxed);
+}
+
 // ---- full stereo: two engine passes, two presents, one XR frame ------------------------
 // The frame pump runs a draw-only second engine pass after each real frame; Present is
 // synchronous with each pass (measured), so pass 1's present carries the LEFT eye and
@@ -424,14 +504,22 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
             // A stereo pair started (left eye blitted) but its pass 2 never presented -
             // rare stall. Close the dangling XR frame with whatever we have.
             VRSubmitLayer layer;
-            layer.quadValid = g_quadPending;
+            // The pair never completed, so there is no stereo to submit - fall back to the
+            // flat screen rather than an empty frame. (This used to read a g_quadPending
+            // flag that nothing ever set, i.e. it always submitted nothing.)
+            if (BlitQuad(vr, f, bp)) layer.quadValid = true;
             layer.quadDistanceM = Cfg().vrCinemaDistance;
             layer.quadWidthM = Cfg().vrCinemaWidth;
+            ComposeHud(vr, f, layer);
             if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
             else g_frames.fetch_add(1, std::memory_order_relaxed);
             g_frameOpen = false;
-            g_quadPending = false;
         }
+        if (g_pumpStalled) {
+            g_pumpStalled = false;
+            LOGI("[stereo] second pass is back; stereo pairs resume");
+        }
+        g_lastOpenTick = GetTickCount64();
         VRFrameInfo fi;
         if (!vr->WaitBeginFrame(fi)) return;
         g_openFi = fi;
@@ -453,6 +541,7 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
             if (fi.shouldRender && BlitQuad(vr, f, bp)) layer.quadValid = true;
             layer.quadDistanceM = Cfg().vrCinemaDistance;
             layer.quadWidthM = Cfg().vrCinemaWidth;
+            ComposeHud(vr, f, layer);
             if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
             else g_frames.fetch_add(1, std::memory_order_relaxed);
         }
@@ -461,7 +550,26 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
             // With PresentLag=1 the closing pass is pass 1 - the ONLY pass menus and mono
             // frames ever present from - so the immediate cinema treatment lives here.
             if (lag == 1) {
-                if (ReportsLive()) return;   // stereo pair in flight; pass 2 will open it
+                // Normally a live report queue means "a pair is in flight, pass 2 will open
+                // it" and this present has nothing to do. But if pass 2 has not arrived for
+                // kPumpStallMs there is no pair coming - the game has stopped stashing a
+                // second-eye camera (a full-screen menu does exactly this) - and continuing
+                // to wait submits nothing at all. Fall through to the flat path instead.
+                const ULONGLONG now = GetTickCount64();
+                const bool pumpStalled = !g_lastOpenTick || now - g_lastOpenTick > kPumpStallMs;
+                if (ReportsLive() && !pumpStalled) return;
+                if (pumpStalled) {
+                    // Stale reports would otherwise keep the queue permanently "live" and
+                    // mis-phase the first pair when the pump comes back.
+                    ResetReports();
+                    if (!g_pumpStalled) {
+                        g_pumpStalled = true;
+                        LOGI("[stereo] no second pass for %llu ms - the game is not producing "
+                             "stereo pairs (menu, cutscene); submitting flat frames until it "
+                             "does. The HUD layer keeps going.", now - g_lastOpenTick);
+                    }
+                    g_monoStalls.fetch_add(1, std::memory_order_relaxed);
+                }
                 VRFrameInfo fi;
                 if (!vr->WaitBeginFrame(fi)) return;
                 PublishEyeRequest(vr, f, fi);
@@ -469,6 +577,7 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
                 if (fi.shouldRender && BlitQuad(vr, f, bp)) layer.quadValid = true;
                 layer.quadDistanceM = Cfg().vrCinemaDistance;
                 layer.quadWidthM = Cfg().vrCinemaWidth;
+                ComposeHud(vr, f, layer);
                 if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
                 else g_frames.fetch_add(1, std::memory_order_relaxed);
                 g_lastSubmitMs.store((float)(NowMs() - t0), std::memory_order_relaxed);
@@ -484,18 +593,19 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
             layer.projectionValid = true;
             layer.views[0] = g_submit[0];
             layer.views[1] = g_submit[1];
-        } else if (g_quadPending) {
-            layer.quadValid = true;
+        } else {
+            // Half a pair is not a stereo frame; show the flat screen rather than nothing.
+            if (BlitQuad(vr, f, bp)) layer.quadValid = true;
             layer.quadDistanceM = Cfg().vrCinemaDistance;
             layer.quadWidthM = Cfg().vrCinemaWidth;
         }
+        ComposeHud(vr, f, layer);
         if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
         else {
             g_frames.fetch_add(1, std::memory_order_relaxed);
             if (didStereo) g_stereoFrames.fetch_add(1, std::memory_order_relaxed);
         }
         g_frameOpen = false;
-        g_quadPending = false;
     }
     g_lastSubmitMs.store((float)(NowMs() - t0), std::memory_order_relaxed);
 }
@@ -524,6 +634,10 @@ void StereoOnPresent(const Dx12Frame& f) {
     }
 
     if (!vr->EnsureQuadSwapchain(f.width, f.height, f.format)) return;
+
+    // There is a live session with graphics bound, so there IS a layer to hang the UI on.
+    // hud.cpp only redirects the UI out of the game's frame while this keeps ticking.
+    HudNoteSubmitLive();
 
     // The game's back buffer holds gamma-encoded pixels; every XR swapchain format we pick
     // is read as linear (FLOAT) or hardware-decoded (_SRGB). Let the blit shader convert.
@@ -575,6 +689,7 @@ void StereoOnPresent(const Dx12Frame& f) {
         layer.quadWidthM = Cfg().vrCinemaWidth;
     }
 
+    ComposeHud(vr, f, layer);
     if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
     else {
         g_frames.fetch_add(1, std::memory_order_relaxed);
@@ -595,6 +710,8 @@ StereoStats StereoGetStats() {
     s.eyeBlitL = g_eyeBlits[0].exchange(0);
     s.eyeBlitR = g_eyeBlits[1].exchange(0);
     s.eyeDesync = g_eyeDesync.exchange(0);
+    s.hudFrames = g_hudFrames.exchange(0);
+    s.monoStalls = g_monoStalls.exchange(0);
     s.lastSubmitMs = g_lastSubmitMs.load();
     s.cropU = g_cropU.load();
     s.cropV = g_cropV.load();

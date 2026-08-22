@@ -1,5 +1,6 @@
 #include "reshade_addon.h"
 #include "frame_probe.h"
+#include "hud.h"
 #include "stereo.h"
 #include "log.h"
 #include <windows.h>
@@ -41,6 +42,7 @@ void OnInitDevice(reshade::api::device* dev) {
 void OnDestroyDevice(reshade::api::device*) {
     g_device.store(nullptr);
     g_queue.store(nullptr);
+    HudOnDeviceLost();
     StereoOnDeviceLost();
 }
 
@@ -101,7 +103,14 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* sc,
         }
     }
 
+    // Before the stereo path consumes the capture: optionally paint the panel onto the
+    // game's own frame, so the monitor shows what the headset gets ([HUD] MirrorPanel).
+    HudMirrorPanel(f);
     StereoOnPresent(f);
+    // After the layer has been composed: closes this pass's UI capture and re-arms for the
+    // next one, so a pass that draws no UI reports "no HUD" instead of re-submitting a
+    // stale image. Cheap no-op when the HUD layer is off.
+    HudOnPresent(sc);
 }
 
 } // namespace
@@ -118,6 +127,7 @@ bool ReShadeAddonInstall(void* selfModule) {
     reshade::register_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
     reshade::register_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
     reshade::register_event<reshade::addon_event::present>(&OnPresent);
+    HudRegisterEvents();
     g_eventsUp.store(true);
     return true;
 }
@@ -132,6 +142,7 @@ void ReShadeAddonShutdown() {
         reshade::unregister_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
         reshade::unregister_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
         reshade::unregister_event<reshade::addon_event::present>(&OnPresent);
+        HudUnregisterEvents();
     }
     reshade::unregister_addon(g_self);
     LOGI("[reshade] add-on unregistered");

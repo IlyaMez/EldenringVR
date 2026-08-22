@@ -1,5 +1,6 @@
 #include "debug_keys.h"
 #include "frame_probe.h"
+#include "hud.h"
 #include "vr_backend.h"
 #include "config.h"
 #include "log.h"
@@ -57,9 +58,19 @@ int                g_pitchState = 0;    // 0 off | 1 pitch pass 2 | 2 pitch pass
 // post-physics half crashes. The sets below are diagnostics only.
 // An empty spec means "follow the ini default of the active mode".
 struct KeepSet { const char* spec; const char* what; };
+// Physics gating (2026-08-21). Set 0 is the ini default: cloth AND the Havok rigid-body
+// solver (97/99 + 82 ChrIns_RagdollSafe + the 89-94 LocationUpdate map-prop feed) gated, so
+// pass 2 renders pass 1's rigid-body state - ragdolls and broken fences stop being flung by
+// a second solver step at dt~0. Set 1 widens that to the character pre/post-physics feed
+// (77-79, 81 + 113-114), the exact analogue of the cloth gate; try it if ragdolls still
+// twitch, and watch the ARMS - the VR arm solve rides CS::NoUpdateInterface vft[10] and if
+// that vtable is driven from the pre/post-physics band the arms will stop re-solving in
+// pass 2 (symptom: arms correct in one eye, stale in the other). Set 2 puts all of it back.
 const KeepSet kKeeps[] = {
-    {"",                                          "ini default (full frame, dt frozen, no cloth in pass 2)"},
-    {"0-7,10-25,27-84,86-142,144-160,164,168",    "cloth back in pass 2 (haywire reference)"},
+    {"",                                          "ini default (full frame, dt frozen; no cloth, no rigid-body/ragdoll in pass 2)"},
+    {"0-7,10-25,27-76,80,83-84,86-88,95-96,98,106-109,115-142,144-160,164,168",
+                                                  "wide physics gate: also gate the ChrIns pre/post-physics feed (check the arms)"},
+    {"0-7,10-25,27-84,86-142,144-160,164,168",    "cloth + physics back in pass 2 (haywire reference)"},
     {"106,118,123-125,144-158,164",               "draw-only (dark reference)"},
 };
 constexpr int kKeepCount = (int)(sizeof(kKeeps) / sizeof(kKeeps[0]));
@@ -90,12 +101,13 @@ void Announce() {
     const int lag = g_presentLag.load();
     const float pitch = g_pass2Pitch.load();
     const int sync = g_gpuSync.load();
-    LOGI("[keys] PresentLag=%s  Pass2Keep=%s  pitch=%s  GpuSync=%s",
+    LOGI("[keys] PresentLag=%s  Pass2Keep=%s  pitch=%s  GpuSync=%s  HUD=%s/%d",
          lag < 0 ? "(ini)" : (lag ? "1" : "0"),
          g_keepIdx < 0 ? "(ini)" : kKeeps[g_keepIdx].what,
          g_pitchState == 0 ? (pitch < 0.f ? "(ini)" : "off")
                            : (g_pitchState == 1 ? "pass2 30deg" : "pass1 30deg"),
-         sync < 0 ? "(ini)" : (sync == 0 ? "0" : (sync == 1 ? "1" : "2")));
+         sync < 0 ? "(ini)" : (sync == 0 ? "0" : (sync == 1 ? "1" : "2")),
+         HudEnabled() ? "quad" : "off", HudFirstDraw());
 }
 
 } // namespace
@@ -167,6 +179,26 @@ void DebugKeysTick() {
         LOGI("[keys] Pass2FullFrame -> %d (%s)", next,
              next ? "pass 2 = complete engine frame at dt~0" : "pass 2 = draw-only gated pass");
         Buzz(next ? 2 : 1);
+    }
+    if (Pressed(VK_NUMPAD7)) {
+        // The UI on its own world-space quad, or back in the rendered frame where the eye
+        // crop mangles it. Worth a key of its own: it is also the instant undo if the draw
+        // detection ever grabs a post-processing pass instead of the HUD.
+        const int next = HudEnabled() ? 0 : 1;
+        HudSetEnabledOverride(next);
+        LOGI("[keys] HUD layer -> %s", next ? "own quad" : "off (UI back in the frame)");
+        Buzz(next ? 2 : 1);
+    }
+    if (Pressed(VK_NUMPAD8)) {
+        // Cycles 0..8 so one key can sweep the whole useful range blind. Each press buzzes
+        // (value + 1) times, so the current setting is countable without looking.
+        const int next = (HudFirstDraw() + 1) % 9;
+        HudStepFirstDraw(next - HudFirstDraw());
+        Buzz(next + 1);
+    }
+    if (Pressed(VK_DECIMAL)) {
+        HudRequestRecenter();
+        Buzz(1);
     }
     const bool hand6 = Pressed(VK_NUMPAD6), hand9 = Pressed(VK_NUMPAD9);
     if (hand6 || hand9) {

@@ -58,6 +58,7 @@ add_library(ERVR SHARED
   src/ervr/reshade_addon.cpp
   src/ervr/dx12_blit.cpp
   src/ervr/stereo.cpp
+  src/ervr/hud.cpp
   src/ervr/xinput_hook.cpp
   src/ervr/virtual_pad.cpp
   src/ervr/gestures.cpp

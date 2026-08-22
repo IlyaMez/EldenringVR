@@ -295,10 +295,8 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
             // The runtime's real recommendation lands in the cache on the first VR session.
             ew = 2064; eh = 2208;
         }
-        float s = c.vrGameResScale;
-        s = s < 0.25f ? 0.25f : (s > 2.f ? 2.f : s);
-        w = (uint32_t)(ew * s);
-        h = (uint32_t)(eh * s);
+        w = ew;
+        h = eh;   // GameResScale is applied to the FITTED height below, not here
     } else if (sscanf_s(c.vrGameRes.c_str(), "%ux%u", &w, &h) != 2 &&
                sscanf_s(c.vrGameRes.c_str(), "%uX%u", &w, &h) != 2) {
         LOGW("[patch] [VR] GameRes=\"%s\" is not off/auto/WxH; resolution untouched",
@@ -325,14 +323,28 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
         g_fakeDeskW.store(w + 16);
         g_fakeDeskH.store(h + 16);
         InstallMonitorHooks();
-    } else if (w > screenW || h > screenH) {
-        const uint32_t fh = std::min({h, screenH, (uint32_t)((uint64_t)screenW * 9 / 16)});
+    } else if (c.vrGameRes == "auto") {
+        // ALWAYS, not only when the target overflows: the headset's own eye size is nearly
+        // square, so an auto target left alone on a large desktop (one running DSR, say)
+        // would be non-16:9 and bring the mask and its shear straight back.
+        // GameResScale lands HERE, on the fitted height, so it reads as "fraction of the
+        // sharpest frame this desktop allows". Applied to the headset's raw recommendation
+        // instead it would do nothing at all until it dropped below the desktop cap.
+        const uint32_t maxH = std::min({screenH, (uint32_t)((uint64_t)screenW * 9 / 16)});
+        const float s = std::min(2.f, std::max(0.25f, c.vrGameResScale));
+        const uint32_t fh = std::min({(uint32_t)(std::min(h, maxH) * s), maxH});
         const uint32_t fw = (uint32_t)((uint64_t)fh * 16 / 9);
-        LOGI("[patch] GameRes %ux%u exceeds the %ux%u desktop (the game will not render larger "
-             "than it); using %ux%u - the tallest 16:9 frame that fits, and height is what "
-             "per-eye sharpness depends on. A larger desktop (NVIDIA DSR) raises this ceiling.",
-             w, h, screenW, screenH, fw, fh);
+        if (fw != w || fh != h)
+            LOGI("[patch] GameRes target %ux%u -> %ux%u: the tallest 16:9 frame that fits the "
+                 "%ux%u desktop. The game renders no larger than the desktop and masks any "
+                 "other aspect back to 16:9, and per-eye sharpness depends on height alone - "
+                 "so a larger desktop (NVIDIA DSR) is what raises this ceiling.",
+                 w, h, fw, fh, screenW, screenH);
         w = fw; h = fh;
+    } else if (w > screenW || h > screenH) {
+        LOGW("[patch] GameRes %ux%u is larger than the %ux%u desktop; the game will clamp it "
+             "to a built-in size. Lower it, or enable DSR for a bigger desktop.",
+             w, h, screenW, screenH);
     }
     // Multiple-of-8 keeps every downstream size (swapchain, crops, video encoders) happy.
     w = (w + 4u) & ~7u;

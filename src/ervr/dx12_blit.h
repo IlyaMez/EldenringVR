@@ -33,8 +33,43 @@ struct BlitParams {
     // format the swapchain was CREATED with does, and guessing wrong silently skips (or
     // doubles) the hardware sRGB encode. Always pass the swapchain's declared format.
     DXGI_FORMAT dstFormat = DXGI_FORMAT_UNKNOWN;
+    // Where the destination's alpha comes from. The world layers are opaque (the game's
+    // alpha channel is not a coverage mask), but the HUD layer IS a coverage mask: it is
+    // the UI drawn over a transparent clear, and the compositor blends it over the world.
+    //   Opaque - force 1 (every projection/cinema blit)
+    //   Src    - pass the source alpha through
+    //   Luma   - derive it from brightness: anything not black is UI. Needed because the
+    //            game's back-buffer format is R10G10B10A2 - two bits of alpha - so the
+    //            redirected UI draws leave almost no usable coverage behind.
+    //   Max    - max(src alpha, luma). Catches dark UI only if it has alpha, which on
+    //            ELDEN RING it does not - the UI pipelines never write the channel.
+    //   Dual   - the exact answer, and the HUD's default. The same UI is captured TWICE,
+    //            once over a black clear and once over a white one (hud.cpp replays each
+    //            draw into a second target). For any src-over blend:
+    //                B = s*a          W = s*a + (1-a)
+    //            so coverage is a = 1 - (W - B) and the premultiplied colour is B, with no
+    //            alpha channel needed from the game at all. Opaque black UI - menu panels,
+    //            text outlines - comes out opaque instead of invisible.
+    enum class Alpha { Opaque = 0, Src, Luma, Max, Dual };
+    Alpha alphaMode = Alpha::Opaque;
+    // Multiplies the result. Applied to RGB as well, because a HUD captured over a
+    // transparent clear is premultiplied - scaling only the alpha would brighten it.
+    float alphaScale = 1.f;
+    // The source is already a shader-readable texture we own (the HUD capture target), so
+    // the staging copy can be skipped: the SRV is created straight on it. Also keeps the
+    // staging ring from thrashing between two source formats every frame.
+    bool  srcIsShaderResource = false;
+    // Blend the result over what is already in the destination, premultiplied
+    // (ONE, INV_SRC_ALPHA), instead of overwriting it. Used by [HUD] MirrorPanel to draw
+    // the reconstructed panel onto the game's own frame exactly as the compositor would.
+    bool  blendOver = false;
+    // Alpha::Dual only: the same image captured over a white clear. Must match `src` in
+    // size and format, and is assumed to be in the same resource state.
+    ID3D12Resource* src2 = nullptr;
     bool  Identity() const {
-        return !linearizeSrc && uvScaleX == 1.f && uvScaleY == 1.f && uvOffsetX == 0.f && uvOffsetY == 0.f;
+        return !linearizeSrc && alphaMode == Alpha::Opaque && alphaScale == 1.f && !src2 &&
+               !blendOver &&
+               uvScaleX == 1.f && uvScaleY == 1.f && uvOffsetX == 0.f && uvOffsetY == 0.f;
     }
 };
 
@@ -70,7 +105,7 @@ public:
     static bool StorageIsGammaEncoded(DXGI_FORMAT f);
 
 private:
-    ID3D12PipelineState* PipelineFor(DXGI_FORMAT rtvFormat);
+    ID3D12PipelineState* PipelineFor(DXGI_FORMAT rtvFormat, bool blend);
     bool EnsureShaderRoot();
     bool EnsureIntermediate(const D3D12_RESOURCE_DESC& srcDesc);
     bool ShaderBlit(ID3D12Resource* src, D3D12_RESOURCE_STATES srcState,
@@ -80,7 +115,7 @@ private:
     void SubmitList();
 
     static constexpr int kRing = 3;
-    static constexpr int kPso  = 4;    // one per destination format in play (eyes + quad)
+    static constexpr int kPso  = 6;    // one per (destination format, blend) in play
     ID3D12Device*              dev_ = nullptr;
     ID3D12CommandQueue*        queue_ = nullptr;      // set for the duration of one Copy
     ID3D12CommandAllocator*    alloc_[kRing]{};
@@ -100,6 +135,7 @@ private:
     ID3D12RootSignature*  rootSig_ = nullptr;
     ID3D12PipelineState*  pso_[kPso]{};              // cached by RTV format, so alternating
     DXGI_FORMAT           psoFormat_[kPso]{};        // eye/quad blits do not thrash the PSO
+    bool                  psoBlend_[kPso]{};
     ID3D12DescriptorHeap* srvHeap_ = nullptr;   // shader-visible, kRing slots
     ID3D12DescriptorHeap* rtvHeap_ = nullptr;   // kRing slots
     UINT                  srvStride_ = 0;

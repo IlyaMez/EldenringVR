@@ -59,8 +59,9 @@ void Barrier(ID3D12GraphicsCommandList* l, ID3D12Resource* r, D3D12_RESOURCE_STA
 // the SOURCE needed decoding first, which gLinearize answers.
 const char kHLSL[] =
     "Texture2D gTex : register(t0);\n"
+    "Texture2D gTexW : register(t1);\n"     // Alpha::Dual: the same UI captured over white
     "SamplerState gSmp : register(s0);\n"
-    "cbuffer Params : register(b0) { float4 gUv; uint gLinearize; uint3 gPad; };\n"
+    "cbuffer Params : register(b0) { float4 gUv; uint gLinearize; uint gAlphaMode; float gAlphaScale; uint gPad; };\n"
     "struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
     "VSOut VSMain(uint id : SV_VertexID) {\n"
     "  VSOut o; float2 t = float2((id << 1) & 2, id & 2);\n"
@@ -70,11 +71,39 @@ const char kHLSL[] =
     "  float3 hi = pow(max(c + 0.055, 1e-5) / 1.055, 2.4);\n"
     "  return lerp(hi, lo, step(c, 0.04045)); }\n"
     "float4 PSMain(VSOut i) : SV_Target {\n"
-    "  float4 c = gTex.Sample(gSmp, i.uv * gUv.xy + gUv.zw);\n"
+    "  float2 uv = i.uv * gUv.xy + gUv.zw;\n"
+    "  float4 c = gTex.Sample(gSmp, uv);\n"
+    // Dual: recover coverage from the pair of captures BEFORE anything else touches
+    // the colour. B = s*a over black, W = s*a + (1-a) over white, so W - B is exactly
+    // (1 - a) - per channel, and the SMALLEST difference is the honest one (a pure red
+    // overlay leaves green and blue looking fully transparent). This needs no alpha
+    // channel from the game, which is the point: ELDEN RING never writes one.
+    "  if (gAlphaMode == 4) {\n"
+    "    float3 w = gTexW.Sample(gSmp, uv).rgb;\n"
+    "    float3 d = saturate(w - c.rgb);\n"
+    "    float a = saturate(1 - min(d.r, min(d.g, d.b)));\n"
+    "    float3 s = a > 0.003 ? saturate(c.rgb / a) : 0;\n"
+    // Unpremultiply -> convert -> re-premultiply. Linearising the premultiplied value
+    // instead would darken every translucent pixel by its own coverage.
+    "    if (gLinearize != 0) s = SrgbToLinear(s);\n"
+    "    a *= gAlphaScale;\n"
+    "    return float4(s * a, a);\n"
+    "  }\n"
+    // Keep the stored (gamma) brightness: the luma key is a "did anything draw here"
+    // test, and reading it off linear light makes every dim UI pixel near-transparent.
+    "  float stored = max(c.r, max(c.g, c.b));\n"
     "  if (gLinearize != 0) c.rgb = SrgbToLinear(c.rgb);\n"
-    "  return float4(c.rgb, 1); }\n";   // opaque: the game's alpha channel is not a coverage mask
+    // Opaque (0) is every world blit: the game's alpha is not a coverage mask. The
+    // other keys are fallbacks for when the UI cannot be captured twice.
+    "  float a = 1;\n"
+    "  if (gAlphaMode == 1) a = c.a;\n"
+    "  else if (gAlphaMode == 2) a = saturate(stored * 4);\n"
+    "  else if (gAlphaMode == 3) a = max(c.a, saturate(stored * 4));\n"
+    // Premultiplied: scale colour with coverage, or a faded HUD gets brighter.
+    "  if (gAlphaMode != 0) { a *= gAlphaScale; c.rgb *= gAlphaScale; }\n"
+    "  return float4(c.rgb, a); }\n";
 
-struct RootConsts { float uv[4]; uint32_t linearize; uint32_t pad[3]; };
+struct RootConsts { float uv[4]; uint32_t linearize; uint32_t alphaMode; float alphaScale; uint32_t pad; };
 
 } // namespace
 
@@ -167,7 +196,7 @@ bool Dx12Blitter::EnsureShaderRoot() {
     if (rootSig_) return true;
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 1;
+    range.NumDescriptors = 2;      // t0 = the image, t1 = its over-white twin (Alpha::Dual)
     range.BaseShaderRegister = 0;
     D3D12_ROOT_PARAMETER param[2]{};
     param[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -198,7 +227,7 @@ bool Dx12Blitter::EnsureShaderRoot() {
     if (!srvHeap_) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        hd.NumDescriptors = kRing;
+        hd.NumDescriptors = kRing * 2;   // two SRVs per in-flight slot (t0, t1)
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(dev_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&srvHeap_)))) { LOGE("[blit] SRV heap failed"); return false; }
         srvStride_ = dev_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -215,10 +244,10 @@ bool Dx12Blitter::EnsureShaderRoot() {
 
 // One PSO per destination format, cached: stereo alternates eye (sRGB) and quad (FLOAT16)
 // targets, and recreating the pipeline on every switch would stall the render thread.
-ID3D12PipelineState* Dx12Blitter::PipelineFor(DXGI_FORMAT rtvFormat) {
+ID3D12PipelineState* Dx12Blitter::PipelineFor(DXGI_FORMAT rtvFormat, bool blend) {
     if (!EnsureShaderRoot()) return nullptr;
     for (int i = 0; i < kPso; ++i)
-        if (pso_[i] && psoFormat_[i] == rtvFormat) return pso_[i];
+        if (pso_[i] && psoFormat_[i] == rtvFormat && psoBlend_[i] == blend) return pso_[i];
 
     static ID3DBlob* s_vs = nullptr; static ID3DBlob* s_ps = nullptr;
     if (!s_vs || !s_ps) {
@@ -240,6 +269,18 @@ ID3D12PipelineState* Dx12Blitter::PipelineFor(DXGI_FORMAT rtvFormat) {
     pd.VS = {s_vs->GetBufferPointer(), s_vs->GetBufferSize()};
     pd.PS = {s_ps->GetBufferPointer(), s_ps->GetBufferSize()};
     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (blend) {
+        // Premultiplied source-over: the shader already multiplied colour by coverage, which
+        // is the same arrangement the compositor uses for the HUD layer.
+        auto& rt = pd.BlendState.RenderTarget[0];
+        rt.BlendEnable = TRUE;
+        rt.SrcBlend = D3D12_BLEND_ONE;
+        rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        rt.BlendOp = D3D12_BLEND_OP_ADD;
+        rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+        rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    }
     pd.SampleMask = UINT_MAX;
     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -254,8 +295,9 @@ ID3D12PipelineState* Dx12Blitter::PipelineFor(DXGI_FORMAT rtvFormat) {
     int slot = 0;
     while (slot < kPso && pso_[slot]) ++slot;
     if (slot == kPso) { slot = 0; pso_[0]->Release(); }   // never happens with 2 formats in play
-    pso_[slot] = pso; psoFormat_[slot] = rtvFormat;
-    LOGI("[blit] shader blit pipeline ready (RTV fmt %u)", (unsigned)rtvFormat);
+    pso_[slot] = pso; psoFormat_[slot] = rtvFormat; psoBlend_[slot] = blend;
+    LOGI("[blit] shader blit pipeline ready (RTV fmt %u%s)", (unsigned)rtvFormat,
+         blend ? ", blended" : "");
     return pso;
 }
 
@@ -285,28 +327,33 @@ bool Dx12Blitter::ShaderBlit(ID3D12Resource* src, D3D12_RESOURCE_STATES srcState
                              const BlitParams& params) {
     const D3D12_RESOURCE_DESC sd = src->GetDesc();
     const D3D12_RESOURCE_DESC dd = dst->GetDesc();
-    if (!EnsureIntermediate(sd)) return false;
+    // The HUD capture target is ours and already SRV-able, so it is sampled in place. That
+    // is not just a saved copy: staging is keyed on the source's size AND format, and the
+    // HUD blit alternates with the eye blits, so routing it through the ring would tear the
+    // staging textures down and rebuild them twice a frame.
+    const bool direct = params.srcIsShaderResource;
+    if (!direct && !EnsureIntermediate(sd)) return false;
     // The XR image is typically TYPELESS; both the PSO and the RTV need a concrete format,
     // and it has to be the one the swapchain was CREATED with - resolving the typeless
     // resource ourselves cannot tell _UNORM from _UNORM_SRGB, and picking the wrong one
     // drops the hardware sRGB encode, which the runtime then decodes anyway: a dark image.
     const DXGI_FORMAT rtvFmt = params.dstFormat != DXGI_FORMAT_UNKNOWN ? params.dstFormat
                                                                        : RtvFormat(dd.Format);
-    ID3D12PipelineState* pso = PipelineFor(rtvFmt);
+    ID3D12PipelineState* pso = PipelineFor(rtvFmt, params.blendOver);
     if (!pso) return false;
 
     ID3D12GraphicsCommandList* l = nullptr;
     if (!BeginList(&l)) return false;
     const int slot = lastSlot_;                 // BeginList already waited for this slot
-    ID3D12Resource* stage = inter_[slot];
+    ID3D12Resource* stage = direct ? src : inter_[slot];
 
     // Per-slot descriptors: the GPU reads these at execute time, so a single shared slot
     // would race with frames still in flight.
     D3D12_CPU_DESCRIPTOR_HANDLE srvCpu = srvHeap_->GetCPUDescriptorHandleForHeapStart();
     D3D12_GPU_DESCRIPTOR_HANDLE srvGpu = srvHeap_->GetGPUDescriptorHandleForHeapStart();
     D3D12_CPU_DESCRIPTOR_HANDLE rtv    = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-    srvCpu.ptr += (SIZE_T)slot * srvStride_;
-    srvGpu.ptr += (UINT64)slot * srvStride_;
+    srvCpu.ptr += (SIZE_T)slot * 2 * srvStride_;
+    srvGpu.ptr += (UINT64)slot * 2 * srvStride_;
     rtv.ptr    += (SIZE_T)slot * rtvStride_;
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -315,17 +362,28 @@ bool Dx12Blitter::ShaderBlit(ID3D12Resource* src, D3D12_RESOURCE_STATES srcState
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
     dev_->CreateShaderResourceView(stage, &srv, srvCpu);
+    // t1 always gets a real descriptor: an unpopulated slot inside a bound table is
+    // undefined behaviour even when the shader never samples it, so when there is no
+    // second source it simply aliases the first.
+    D3D12_CPU_DESCRIPTOR_HANDLE srvCpu2 = srvCpu;
+    srvCpu2.ptr += srvStride_;
+    dev_->CreateShaderResourceView(params.src2 ? params.src2 : stage, &srv, srvCpu2);
 
     D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
     rtvDesc.Format = rtvFmt;
     rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
     dev_->CreateRenderTargetView(dst, &rtvDesc, rtv);
 
-    // Stage the back buffer into the SRV-able copy (same format => plain copy).
-    Barrier(l, src, srcState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    l->CopyResource(stage, src);
-    Barrier(l, stage, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Barrier(l, src, D3D12_RESOURCE_STATE_COPY_SOURCE, srcState);
+    if (direct) {
+        Barrier(l, src, srcState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (params.src2) Barrier(l, params.src2, srcState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    } else {
+        // Stage the back buffer into the SRV-able copy (same format => plain copy).
+        Barrier(l, src, srcState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        l->CopyResource(stage, src);
+        Barrier(l, stage, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        Barrier(l, src, D3D12_RESOURCE_STATE_COPY_SOURCE, srcState);
+    }
 
     // Draw the fullscreen triangle into the XR image.
     Barrier(l, dst, dstState, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -343,6 +401,8 @@ bool Dx12Blitter::ShaderBlit(ID3D12Resource* src, D3D12_RESOURCE_STATES srcState
     rc.uv[0] = params.uvScaleX; rc.uv[1] = params.uvScaleY;
     rc.uv[2] = params.uvOffsetX; rc.uv[3] = params.uvOffsetY;
     rc.linearize = params.linearizeSrc ? 1u : 0u;
+    rc.alphaMode = (uint32_t)params.alphaMode;
+    rc.alphaScale = params.alphaScale;
     l->SetGraphicsRoot32BitConstants(1, 8, &rc, 0);
     l->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     l->DrawInstanced(3, 1, 0, 0);
@@ -350,8 +410,11 @@ bool Dx12Blitter::ShaderBlit(ID3D12Resource* src, D3D12_RESOURCE_STATES srcState
     // OpenXR expects the released image in RENDER_TARGET, so leave it there; only revert
     // if the caller asked for something else.
     Barrier(l, dst, D3D12_RESOURCE_STATE_RENDER_TARGET, dstState);
-    // Return this slot's staging texture to COPY_DEST for its next turn.
-    Barrier(l, stage, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    if (direct) {  // hand the caller's own textures back in the state they were lent in
+        Barrier(l, src, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srcState);
+        if (params.src2) Barrier(l, params.src2, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srcState);
+    } else          // return this slot's staging texture to COPY_DEST for its next turn
+        Barrier(l, stage, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     SubmitList();
 
     // A blown descriptor or barrier shows up here as device removal; say so plainly
@@ -375,7 +438,10 @@ void Dx12Blitter::Release() {
     for (auto& a : alloc_) if (a) { a->Release(); a = nullptr; }
     if (fence_)   { fence_->Release();   fence_ = nullptr; }
     if (event_)   { CloseHandle(event_); event_ = nullptr; }
-    for (int i = 0; i < kPso; ++i) { if (pso_[i]) pso_[i]->Release(); pso_[i] = nullptr; psoFormat_[i] = DXGI_FORMAT_UNKNOWN; }
+    for (int i = 0; i < kPso; ++i) {
+        if (pso_[i]) pso_[i]->Release();
+        pso_[i] = nullptr; psoFormat_[i] = DXGI_FORMAT_UNKNOWN; psoBlend_[i] = false;
+    }
     if (rootSig_) { rootSig_->Release(); rootSig_ = nullptr; }
     if (srvHeap_) { srvHeap_->Release(); srvHeap_ = nullptr; }
     if (rtvHeap_) { rtvHeap_->Release(); rtvHeap_ = nullptr; }

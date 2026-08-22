@@ -90,6 +90,19 @@ struct Swap {
     }
 };
 
+// A quad's lazy world anchor. World-locked content is what the compositor can reproject
+// perfectly at any submit rate; view-locked content has to move WITH the head between
+// submits, which reads as judder the moment submissions run below the display rate (they
+// always do here, at one XR frame per stereo pair). So the quads are placed in the world
+// and simply re-placed whenever the head has turned or walked far enough to lose them.
+struct Anchor {
+    bool  valid = false;
+    Vec3  origin;      // where the head was when the quad was last placed
+    Quat  yaw;         // the head's yaw at that moment, flattened to the horizon
+    Vec3  fwd;         // and the forward it implies, kept for the re-anchor test
+    float dist = 0.f;
+};
+
 // ---- action set ---------------------------------------------------------------
 struct Actions {
     XrActionSet set = XR_NULL_HANDLE;
@@ -168,6 +181,7 @@ public:
     }
     DXGI_FORMAT EyeFormat() const override { return (DXGI_FORMAT)eyeFormat_; }
     DXGI_FORMAT QuadFormat() const override { return (DXGI_FORMAT)quad_.format; }
+    DXGI_FORMAT HudFormat() const override { return (DXGI_FORMAT)hud_.format; }
 
     bool EnsureEyeSwapchains(uint32_t w, uint32_t h) override {
         std::lock_guard<std::recursive_mutex> g(g_mtx);
@@ -210,6 +224,24 @@ public:
         if (fmt == 0) { LOGE("[xr] runtime offers no usable quad format"); return false; }
         if (!CreateSwap(quad_, w, h, fmt)) return false;
         LOGI("[xr] quad swapchain %ux%u fmt %lld (back buffer fmt %u)", w, h, (long long)fmt, (unsigned)bbFormat);
+        return true;
+    }
+
+    bool EnsureHudSwapchain(uint32_t w, uint32_t h) override {
+        std::lock_guard<std::recursive_mutex> g(g_mtx);
+        if (!bound_ || w == 0 || h == 0) return false;
+        if (hud_.handle != XR_NULL_HANDLE && hud_.w == w && hud_.h == h) return true;
+        hud_.Destroy();
+        // Unlike every other swapchain here, this one's ALPHA is the payload: the layer is
+        // blended over the world, so a format whose alpha the runtime would ignore (or
+        // quantise to two bits, as the game's own R10G10B10A2 back buffer does) defeats the
+        // whole point. Eight bits of alpha minimum, in that order of preference.
+        int64_t fmt = PickFormat({DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                  DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                  DXGI_FORMAT_B8G8R8A8_UNORM});
+        if (fmt == 0) { LOGE("[xr] runtime offers no usable HUD format"); return false; }
+        if (!CreateSwap(hud_, w, h, fmt)) return false;
+        LOGI("[xr] HUD swapchain %ux%u fmt %lld", w, h, (long long)fmt);
         return true;
     }
 
@@ -270,6 +302,77 @@ public:
     void ReleaseEyeImage(VREye eye) override { ReleaseTo(eyes_[eye]); }
     ID3D12Resource* AcquireQuadImage() override { return AcquireFrom(quad_); }
     void ReleaseQuadImage() override { ReleaseTo(quad_); }
+    ID3D12Resource* AcquireHudImage() override { return AcquireFrom(hud_); }
+    void ReleaseHudImage() override { ReleaseTo(hud_); }
+
+    // Places a quad layer in space.
+    //
+    // Body/World locks put the quad in the app (stage) space and re-place it only when the
+    // head has moved away from it - the compositor can then reproject it perfectly however
+    // late the submission is, which head-locking cannot survive at one XR frame per stereo
+    // pair. Head lock is kept for the case where the player wants the HUD welded to their
+    // face, and as the fallback whenever tracking is not reportable.
+    void PlaceQuad(XrCompositionLayerQuad& q, Anchor& a, int lock, float distM,
+                   float followDeg, float followRadiusM, float heightOffsetM,
+                   float yawDeg, float pitchDeg, bool recenter) {
+        const Quat off = (Quat::YawQ(Deg2Rad(yawDeg)) * Quat::AxisAngle({1, 0, 0}, Deg2Rad(pitchDeg)))
+                             .Normalized();
+        // The quad hangs `distM` along the anchor's forward, offset by the player's own
+        // yaw/pitch/height nudges. Rotating first and translating after is what makes the
+        // yaw offset swing the panel around the player rather than slide it sideways.
+        auto place = [&](const Vec3& origin, const Quat& yawq) {
+            const Quat rot = (yawq * off).Normalized();
+            const Vec3 pos = origin + rot.Rotate({0.f, 0.f, -distM}) + Vec3{0.f, heightOffsetM, 0.f};
+            q.pose.orientation = {rot.x, rot.y, rot.z, rot.w};
+            q.pose.position = {pos.x, pos.y, pos.z};
+        };
+        auto headLock = [&] {
+            a.valid = false;
+            q.space = viewSpace_;
+            place({}, Quat{});
+        };
+        if (lock == QuadLockHead) { headLock(); return; }
+
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        const bool located =
+            XR_SUCCEEDED(xrLocateSpace(viewSpace_, appSpace_, displayTime_.load(), &loc)) &&
+            (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
+            (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
+        Vec3 fwd;
+        if (located) {
+            const XrQuaternionf& hq = loc.pose.orientation;
+            Vec3 f = Quat{hq.x, hq.y, hq.z, hq.w}.Forward();
+            f.y = 0.f;
+            if (f.Length() > 0.2f) fwd = f.Normalized();   // else: staring straight up or down
+        }
+        if (fwd.Length() < 0.5f) {
+            // No usable heading. Holding the existing anchor is right if there is one -
+            // the panel simply stays where it was - and only a cold start falls back to
+            // the head.
+            if (!a.valid) { headLock(); return; }
+            q.space = appSpace_;
+            place(a.origin, a.yaw);
+            return;
+        }
+
+        const Vec3 hp{loc.pose.position.x, loc.pose.position.y, loc.pose.position.z};
+        bool replace = !a.valid || recenter || a.dist != distM;
+        if (!replace && lock != QuadLockWorld) {
+            const float dx = hp.x - a.origin.x, dz = hp.z - a.origin.z;
+            replace = fwd.x * a.fwd.x + fwd.z * a.fwd.z < std::cos(Deg2Rad(followDeg)) ||
+                      dx * dx + dz * dz > followRadiusM * followRadiusM ||
+                      std::fabs(hp.y - a.origin.y) > 0.5f;
+        }
+        if (replace) {
+            a.valid = true;
+            a.origin = hp;
+            a.fwd = fwd;
+            a.dist = distM;
+            a.yaw = Quat::YawQ(std::atan2(-fwd.x, -fwd.z));
+        }
+        q.space = appSpace_;
+        place(a.origin, a.yaw);
+    }
 
     bool EndFrame(const VRSubmitLayer& layer) override {
         std::lock_guard<std::recursive_mutex> g(g_mtx);
@@ -279,7 +382,8 @@ public:
         XrCompositionLayerProjectionView pv[2]{};
         XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-        const XrCompositionLayerBaseHeader* layers[2]{};
+        XrCompositionLayerQuad hudQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+        const XrCompositionLayerBaseHeader* layers[3]{};
         uint32_t count = 0;
 
         if (layer.projectionValid && eyes_[0].handle != XR_NULL_HANDLE) {
@@ -304,51 +408,29 @@ public:
             quad.subImage.imageArrayIndex = 0;
             quad.subImage.imageRect = {{0, 0}, {(int32_t)quad_.w, (int32_t)quad_.h}};
             quad.size = {layer.quadWidthM, layer.quadWidthM / aspect};
-            // WORLD-locked screen with a lazy follow, not head-locked. The compositor can
-            // reproject world-locked content perfectly at any submit rate, but view-locked
-            // content must move WITH the head between submits - which reads as judder the
-            // moment submissions run below the display rate (they always do here). The
-            // screen re-anchors only when the head has turned/moved enough to lose it.
-            XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-            bool world = false;
-            if (XR_SUCCEEDED(xrLocateSpace(viewSpace_, appSpace_, displayTime_.load(), &loc)) &&
-                (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) &&
-                (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-                const XrQuaternionf& q = loc.pose.orientation;
-                // head forward = q * (0,0,-1), flattened to the horizon
-                XrVector3f fwd{-2.f * (q.x * q.z + q.w * q.y),
-                               0.f,
-                               -(1.f - 2.f * (q.x * q.x + q.y * q.y))};
-                const float len = std::sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
-                if (len > 0.2f) {   // not staring straight up/down
-                    fwd.x /= len; fwd.z /= len;
-                    const XrVector3f& hp = loc.pose.position;
-                    const float dxa = hp.x - quadAnchorHead_.x, dza = hp.z - quadAnchorHead_.z;
-                    const float dot = fwd.x * quadAnchorFwd_.x + fwd.z * quadAnchorFwd_.z;
-                    if (!quadAnchorValid_ || layer.quadDistanceM != quadAnchorDist_ ||
-                        dot < 0.75f /* ~41 deg */ || dxa * dxa + dza * dza > 0.5f * 0.5f ||
-                        std::fabs(hp.y - quadAnchorHead_.y) > 0.5f) {
-                        const float th = std::atan2(-fwd.x, -fwd.z);
-                        quadAnchor_.orientation = {0.f, std::sin(th * 0.5f), 0.f, std::cos(th * 0.5f)};
-                        quadAnchor_.position = {hp.x + fwd.x * layer.quadDistanceM,
-                                                hp.y,
-                                                hp.z + fwd.z * layer.quadDistanceM};
-                        quadAnchorHead_ = hp;
-                        quadAnchorFwd_ = fwd;
-                        quadAnchorDist_ = layer.quadDistanceM;
-                        quadAnchorValid_ = true;
-                    }
-                    quad.space = appSpace_;
-                    quad.pose = quadAnchor_;
-                    world = true;
-                }
-            }
-            if (!world) {   // tracking lost: fall back to the old head-locked placement
-                quadAnchorValid_ = false;
-                quad.space = viewSpace_;
-                quad.pose = {{0, 0, 0, 1}, {0, 0, -layer.quadDistanceM}};
-            }
+            quad.layerFlags = 0;   // the cinema screen is the whole picture: opaque
+            // ~41 deg of head turn or half a metre of walking re-places the screen.
+            PlaceQuad(quad, cinemaAnchor_, QuadLockBody, layer.quadDistanceM,
+                      41.f, 0.5f, 0.f, 0.f, 0.f, false);
             layers[count++] = (const XrCompositionLayerBaseHeader*)&quad;
+        }
+        if (layer.hudValid && hud_.handle != XR_NULL_HANDLE) {
+            const float aspect = hud_.h ? (float)hud_.w / (float)hud_.h : 1.f;
+            hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            hudQuad.subImage.swapchain = hud_.handle;
+            hudQuad.subImage.imageArrayIndex = 0;
+            hudQuad.subImage.imageRect = {{0, 0}, {(int32_t)hud_.w, (int32_t)hud_.h}};
+            hudQuad.size = {layer.hudWidthM, layer.hudWidthM / aspect};
+            // The one layer here whose alpha means something. The UI was drawn over a
+            // transparent clear with ordinary src-over blending, which leaves the colour
+            // already multiplied by coverage - so PREMULTIPLIED (i.e. no UNPREMULTIPLIED
+            // flag) is the correct reading, and it is also the one that does not fringe
+            // dark halos around white text.
+            hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            PlaceQuad(hudQuad, hudAnchor_, layer.hudLock, layer.hudDistanceM,
+                      layer.hudFollowDeg, layer.hudFollowRadiusM, layer.hudHeightOffsetM,
+                      layer.hudYawDeg, layer.hudPitchDeg, layer.hudRecenter);
+            layers[count++] = (const XrCompositionLayerBaseHeader*)&hudQuad;
         }
 
         XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};
@@ -873,6 +955,9 @@ private:
         std::lock_guard<std::recursive_mutex> g(g_mtx);
         for (auto& e : eyes_) e.Destroy();
         quad_.Destroy();
+        hud_.Destroy();
+        cinemaAnchor_ = Anchor{};
+        hudAnchor_ = Anchor{};
         for (auto& s : actions_.handSpace) if (s) { xrDestroySpace(s); s = XR_NULL_HANDLE; }
         if (actions_.set) { xrDestroyActionSet(actions_.set); actions_ = Actions{}; }
         if (appSpace_ != XR_NULL_HANDLE)  { xrDestroySpace(appSpace_);  appSpace_ = XR_NULL_HANDLE; }
@@ -892,13 +977,10 @@ private:
     XrSpace     appSpace_ = XR_NULL_HANDLE, viewSpace_ = XR_NULL_HANDLE;
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     std::vector<XrViewConfigurationView> viewConfig_;
-    Swap        eyes_[2], quad_;
-    // Lazy world anchor for the cinema quad (render thread only).
-    bool        quadAnchorValid_ = false;
-    XrPosef     quadAnchor_{};
-    XrVector3f  quadAnchorHead_{};
-    XrVector3f  quadAnchorFwd_{};
-    float       quadAnchorDist_ = 0.f;
+    Swap        eyes_[2], quad_, hud_;
+    // The HUD quad keeps its own anchor: it follows on a different (tighter) leash than the
+    // cinema screen, and in World lock it must not be dragged along by the cinema quad.
+    Anchor      cinemaAnchor_, hudAnchor_;
     int64_t     eyeFormat_ = 0;
     Actions     actions_;
     ID3D12Device* device_ = nullptr;

@@ -58,13 +58,36 @@ struct VRFrameInfo {
     uint64_t pairIndex = 0;
 };
 
-// What EndFrame composes. A frame may carry a projection layer, a quad layer, or both.
+// Where a quad hangs. Cinema and the HUD both use this.
+//   Body  - world-locked with a lazy follow: it stays put for small head movements and
+//           re-anchors when the head has turned or walked away far enough. The compositor
+//           reprojects world-locked content perfectly at any submit rate, which view-locked
+//           content cannot be, so this is the comfortable default.
+//   Head  - view space, rigidly in front of the eyes.
+//   World - anchored once and left there, until the player recentres it.
+enum VRQuadLock { QuadLockBody = 0, QuadLockHead, QuadLockWorld };
+
+// What EndFrame composes. A frame may carry a projection layer, the flat cinema/menu quad,
+// the HUD quad, or any combination - they are submitted in that order, back to front.
 struct VRSubmitLayer {
     bool projectionValid = false;   // stereo: views[] are the poses/fovs the eyes were RENDERED with
     VREyeView views[2];
-    bool  quadValid = false;        // flat layer: cinema mode, menus, HUD
+    bool  quadValid = false;        // flat layer: cinema mode, menus, mono fallback
     float quadDistanceM = 2.5f;
     float quadWidthM = 4.0f;        // height follows the quad image's aspect
+
+    // The UI, lifted out of the frame by hud.cpp and composited on top of everything else.
+    // Its image has real coverage in the alpha channel, so unlike every other layer here it
+    // is submitted with source-alpha blending.
+    bool  hudValid = false;
+    float hudDistanceM = 2.0f;
+    float hudWidthM = 2.4f;         // height follows the HUD image's aspect
+    float hudHeightOffsetM = 0.f;   // raise/lower the quad relative to eye level
+    float hudYawDeg = 0.f, hudPitchDeg = 0.f;
+    int   hudLock = QuadLockBody;
+    float hudFollowDeg = 25.f;      // Body lock: head turn that re-anchors the quad
+    float hudFollowRadiusM = 0.5f;  // Body lock: head travel that re-anchors it
+    bool  hudRecenter = false;      // one-shot: drop the anchor where the head is looking now
 };
 
 class IVRBackend {
@@ -92,8 +115,13 @@ public:
     // belongs to an eye, so asking for the recommended size would upscale a crop and pay
     // for pixels that carry no information. No-op unless the size really changed.
     virtual bool EnsureEyeSwapchains(uint32_t w, uint32_t h) = 0;
-    // Cinema/HUD quad, sized to the game window. No-op once created.
+    // Cinema quad, sized to the game window. No-op once created.
     virtual bool EnsureQuadSwapchain(uint32_t w, uint32_t h, DXGI_FORMAT backBufferFormat) = 0;
+    // HUD quad. Separate from the cinema quad because it needs an ALPHA channel the
+    // compositor will honour, and because in full stereo both can be live at once
+    // (the cinema quad during a menu-only mono frame, the HUD quad over the world).
+    virtual bool EnsureHudSwapchain(uint32_t w, uint32_t h) = 0;
+    virtual DXGI_FORMAT HudFormat() const = 0;
 
     // -- frame loop (render thread only; stereo.cpp is the sole caller) --
     virtual bool WaitBeginFrame(VRFrameInfo& out) = 0;                       // xrWaitFrame + xrBeginFrame + event pump
@@ -108,6 +136,8 @@ public:
     virtual void ReleaseEyeImage(VREye eye) = 0;
     virtual ID3D12Resource* AcquireQuadImage() = 0;
     virtual void ReleaseQuadImage() = 0;
+    virtual ID3D12Resource* AcquireHudImage() = 0;
+    virtual void ReleaseHudImage() = 0;
     virtual bool EndFrame(const VRSubmitLayer& layer) = 0;
 
     // -- pose/input plane (worker thread; unchanged, consumers untouched) --

@@ -14,6 +14,11 @@
 //                               per pass or once per sim frame)
 //   Numpad 4  GpuSync           cycles 0 -> 1 -> 2 (drain the GPU between the engine passes)
 //   Numpad 5  Pass2FullFrame    0 <-> 1 (pass 2 = complete engine frame at dt~0)
+//   Numpad 7  HUD layer        on <-> off (the UI on its own world quad, or back in the frame)
+//   Numpad 8  HUD FirstDraw    +1, wrapping at 8 -> 0: how many draws into the frame's final
+//                              target stay in the frame. Step it until the UI leaves the world
+//                              image and lands on the panel, then bake it into [HUD] FirstDraw
+//   Numpad .  re-centre the HUD panel on the current view
 //   Numpad 6 / 9  hand grip calibration: -15 / +15 deg pitch on the controller->hand
 //                 mapping (HandRotOffsetX), for dialling out the "weapon points at me"
 //                 grip-pose offset live; bake the logged winner into the ini

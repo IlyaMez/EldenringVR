@@ -109,6 +109,23 @@ void Config::Load(const std::wstring& path) {
     debugKeys        = GetB(ini, L"VR", L"DebugKeys", debugKeys);
     vrDebugPass2Pitch = GetF(ini, L"VR", L"DebugPass2Pitch", vrDebugPass2Pitch);
 
+    hudMode         = GetS(ini, L"HUD", L"Mode", hudMode);
+    hudTarget       = GetS(ini, L"HUD", L"Target", hudTarget);
+    hudFirstDraw    = GetI(ini, L"HUD", L"FirstDraw", hudFirstDraw);
+    hudProbe        = GetB(ini, L"HUD", L"Probe", hudProbe);
+    hudLock         = GetS(ini, L"HUD", L"Lock", hudLock);
+    hudDistance     = GetF(ini, L"HUD", L"Distance", hudDistance);
+    hudWidth        = GetF(ini, L"HUD", L"Width", hudWidth);
+    hudHeightOffset = GetF(ini, L"HUD", L"HeightOffset", hudHeightOffset);
+    hudYawDeg       = GetF(ini, L"HUD", L"YawDeg", hudYawDeg);
+    hudPitchDeg     = GetF(ini, L"HUD", L"PitchDeg", hudPitchDeg);
+    hudOpacity      = GetF(ini, L"HUD", L"Opacity", hudOpacity);
+    hudKey          = GetS(ini, L"HUD", L"Key", hudKey);
+    hudRedirectWithoutVR = GetB(ini, L"HUD", L"RedirectWithoutVR", hudRedirectWithoutVR);
+    hudMirrorPanel  = GetB(ini, L"HUD", L"MirrorPanel", hudMirrorPanel);
+    hudFollowDeg    = GetF(ini, L"HUD", L"FollowDeg", hudFollowDeg);
+    hudFollowRadius = GetF(ini, L"HUD", L"FollowRadius", hudFollowRadius);
+
     btnA = GetS(ini, L"Buttons", L"A", btnA); btnB = GetS(ini, L"Buttons", L"B", btnB);
     btnX = GetS(ini, L"Buttons", L"X", btnX); btnY = GetS(ini, L"Buttons", L"Y", btnY);
     btnLThumb = GetS(ini, L"Buttons", L"LeftStickClick", btnLThumb);
@@ -296,6 +313,9 @@ void Config::Load(const std::wstring& path) {
     autoPilotPeriod  = GetF(ini, L"Experimental", L"AutoPilotPeriod", autoPilotPeriod);
     autoPilotButton  = GetS(ini, L"Experimental", L"AutoPilotButton", autoPilotButton);
     autoPilotWiggleSeconds = GetI(ini, L"Experimental", L"AutoPilotWiggleSeconds", autoPilotWiggleSeconds);
+    autoPilotMenuSeconds = GetI(ini, L"Experimental", L"AutoPilotMenuSeconds", autoPilotMenuSeconds);
+    autoPilotMenuPeriod  = GetF(ini, L"Experimental", L"AutoPilotMenuPeriod", autoPilotMenuPeriod);
+    autoPilotMenuButton  = GetS(ini, L"Experimental", L"AutoPilotMenuButton", autoPilotMenuButton);
 }
 
 Config& Cfg() { return g_cfg; }
