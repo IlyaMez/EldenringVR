@@ -72,6 +72,8 @@ const KeepSet kKeeps[] = {
                                                   "wide physics gate: also gate the ChrIns pre/post-physics feed (check the arms)"},
     {"0-7,10-25,27-84,86-142,144-160,164,168",    "cloth + physics back in pass 2 (haywire reference)"},
     {"106,118,123-125,144-158,164",               "draw-only (dark reference)"},
+    {"0-7,10-25,27-81,83-84,86-88,95-96,98,106-109,113-142,144-160,164,168",
+                                                  "menu logic back in pass 2 (pre-2026-08-24 full set: the pause menu opens and closes in the same pair)"},
 };
 constexpr int kKeepCount = (int)(sizeof(kKeeps) / sizeof(kKeeps[0]));
 

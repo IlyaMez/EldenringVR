@@ -554,6 +554,22 @@ std::wstring CachePath() {
 }
 
 // The target the settings file should hold; false = feature off / stereo off.
+// The oversize auto target: a 16:9 frame carrying the same pixel budget as the headset's
+// own (near-square) eye recommendation, times GameResScale. 16:9 on purpose - the game's
+// projection carries a constant 1.778 aspect (camera struct +0x54, measured 2026-08-23
+// even on a 0.94 buffer), so a 16:9 frame has exactly the geometry of the fitted frame
+// the stereo math is proven on, just denser; the eye-shaped frame of 08-22/23 is where
+// every geometry regression lived. Equal pixel budget = equal GPU cost to the shape the
+// user already ran. Pure arithmetic: shared with the DllMain-time config write, which
+// must land on the identical numbers or the settings-apply rejects the request.
+void Auto169Target(uint32_t eyeW, uint32_t eyeH, double scale, uint32_t& w, uint32_t& h) {
+    const double budget = (double)eyeW * (double)eyeH;
+    double fh = std::sqrt(budget * 9.0 / 16.0) * scale;
+    if (fh < 480.0) fh = 480.0;
+    h = (uint32_t)(fh + 0.5);
+    w = (uint32_t)(fh * 16.0 / 9.0 + 0.5);
+}
+
 bool ResolveResTarget(uint32_t& w, uint32_t& h) {
     const Config& c = Cfg();
     if (c.vrStereoMode == "off" || c.vrGameRes == "off" || c.vrGameRes.empty()) return false;
@@ -586,10 +602,12 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
     const bool oversize = c.vrGameResOversize && PatchSizeCheck();
     if (oversize) {
         if (c.vrGameRes == "auto") {
-            // With no ceiling, GameResScale means what it says: fraction of the headset's
-            // own recommendation, applied to the near-square eye size directly.
-            w = (uint32_t)((float)w * s + 0.5f);
-            h = (uint32_t)((float)h * s + 0.5f);
+            // No ceiling: a 16:9 frame at the eye recommendation's pixel budget (see
+            // Auto169Target), GameResScale scaling that height.
+            const uint32_t ew = w, eh = h;
+            Auto169Target(ew, eh, s, w, h);
+            LOGI("[patch] GameRes auto: 16:9 frame %ux%u at the headset's %ux%u pixel budget"
+                 " (x%.2f) - fitted-frame geometry, oversize density", w, h, ew, eh, s);
         }
         if (w > screenW || h > screenH) {
             g_fakeDeskW.store(w + 16);
@@ -785,7 +803,7 @@ void PatchesEarlyGraphicsConfigWrite(void* module) {
     // are accepted through the normal patched-table path, and a clean exit leaves the file
     // at the fitted size anyway - writing a raw eye size here in fitted mode would just ask
     // the boot clamp to knock it back down.
-    GetPrivateProfileStringW(L"VR", L"GameResOversize", L"false", buf, 64, ini.c_str());
+    GetPrivateProfileStringW(L"VR", L"GameResOversize", L"true", buf, 64, ini.c_str());
     if (_wcsicmp(buf, L"true") != 0 && wcscmp(buf, L"1") != 0) return;
     GetPrivateProfileStringW(L"VR", L"GameRes", L"auto", buf, 64, ini.c_str());
     uint32_t w = 0, h = 0;
@@ -797,8 +815,9 @@ void PatchesEarlyGraphicsConfigWrite(void* module) {
         if (!w || !h) { w = 2064; h = 2208; }   // first run: Quest 3-sized default
         GetPrivateProfileStringW(L"VR", L"GameResScale", L"1.0", buf, 64, ini.c_str());
         const double s = std::min(2.0, std::max(0.25, _wtof(buf) > 0.01 ? _wtof(buf) : 1.0));
-        w = (uint32_t)((double)w * s + 0.5);
-        h = (uint32_t)((double)h * s + 0.5);
+        // Same arithmetic as ResolveResTarget's oversize branch - the two MUST agree.
+        const uint32_t ew = w, eh = h;
+        Auto169Target(ew, eh, s, w, h);
     } else if (swscanf_s(buf, L"%ux%u", &w, &h) != 2 && swscanf_s(buf, L"%uX%u", &w, &h) != 2) {
         return;
     }
@@ -885,10 +904,17 @@ void PatchesApplyGameResolution() {
 }
 
 void PatchesNoteBackbufferSize(uint32_t w, uint32_t h) {
-    (void)w;
     if (g_displayLiesOff.load(std::memory_order_relaxed)) return;
     const uint32_t fh = g_fakeDeskH.load(std::memory_order_relaxed);
-    if (!fh || h + 16 < fh) return;   // lies not armed, or the oversize has not landed yet
+    if (!fh) return;   // lies not armed
+    // "Landed" = the back buffer is past the REAL desktop in either dimension, not "equals
+    // the request": the game snaps a request to its nearest built-in size (4224x2376 asked,
+    // 3840x2160 delivered, 2026-08-23), and waiting for the exact request left the height
+    // lie standing all session - the vertical head-motion warp again. SM_CYSCREEN is never
+    // lied to, so it is the truthful comparand here.
+    const uint32_t realW = (uint32_t)std::max(640, GetSystemMetrics(SM_CXSCREEN));
+    const uint32_t realH = (uint32_t)std::max(480, GetSystemMetrics(SM_CYSCREEN));
+    if (w <= realW && h <= realH) return;   // still the boot-fitted swapchain
     g_displayLiesOff.store(true);
     LOGI("[patch] oversized swapchain landed (%ux%u): desktop-size lies DISARMED - the "
          "game's in-play display-metric polls see the true desktop again (a standing "

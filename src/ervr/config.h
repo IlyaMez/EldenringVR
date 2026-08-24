@@ -65,13 +65,12 @@ struct Config {
     // 3440x1440 monitor. Two parts: the settings-apply pass's own too-big-for-the-screen
     // entry check is NOPed (kPatSizeCheck in patches_er.cpp), and the Windows max-track
     // window clamp is lifted by the monitor-info hooks.
-    // DEFAULT OFF since 2026-08-23: the oversized (non-16:9) frame is where every geometry
-    // regression of 08-22/23 lived - the written-fov reference-height mismatch (fixed) and
-    // the still-open horizontal-aspect question (the camera struct carries a constant 1.778
-    // aspect field even on a 0.94 buffer). OFF = the known-good fitted 16:9 frame, immune
-    // to all of it. Turn ON to re-try full-height sharpness once the flat probes settle the
-    // horizontal semantics.
-    bool  vrGameResOversize = false;
+    // The auto target under it is a 16:9 frame at the headset's pixel budget (Auto169Target
+    // in patches_er.cpp) - NOT the eye-shaped frame of 08-22/23, where every geometry
+    // regression lived (the game's projection carries a constant 1.778 aspect; a 0.94 buffer
+    // fought it). A tall 16:9 frame has exactly the fitted frame's proven geometry, denser.
+    // Falls back to fit-to-desktop when the size-check pattern is missing, so ON is safe.
+    bool  vrGameResOversize = true;
     // Diagnostic for the oversize hunt: PAGE_GUARD the patched resolution-table slots for the
     // first GameResScanSeconds of the run and log every reader/writer ("[reswatch]" lines):
     // rip, registers, instruction bytes. This is the census that names the code doing the
@@ -395,7 +394,16 @@ struct Config {
     // besides crashing on deleted enemies), 130-132 HavokAi_World/formation. Validated:
     // the kill repro with only the dead-guard bypassed crashed 2/2 before, 0/2 after,
     // pass 2 pumping 72 Hz through the whole teardown.
-    std::string vrPass2FullFrameKeep = "0-7,10-25,27-81,83-84,86-88,95-96,98,106-109,113-142,144-160,164,168";
+    // MENU stepping gated too (2026-08-24): 29-31 (the InGame/Title/CommonMenu task lines),
+    // 126 MenuMan and 134-136 GameFlowInGame_{InGame,Title,Common}Menu run only in pass 1.
+    // PadStep (9) is gated, so the "START just pressed" edge computed in pass 1 is still set
+    // when pass 2 runs the same frame - and the pause menu is a START TOGGLE: pass 1 opened
+    // it, pass 2 closed it again in the same stereo pair, so it never reached a present
+    // (log: pad sent 0x0010 for ~90 ms, the game polled it 5-6 times, nothing ever drew).
+    // Same principle as the character pipeline: pass 2 renders the same sim instant, so
+    // menus must not advance between the eyes. ScaleformStep (142) stays kept - it is the
+    // UI DRAW, not the menu logic, and the HUD layer is captured from it.
+    std::string vrPass2FullFrameKeep = "0-7,10-25,27-28,32-81,83-84,86-88,95-96,98,106-109,113-125,127-133,137-142,144-160,164,168";
     // SAFE variant, active during the settle window after any pass-2 guard releases (and
     // whenever a guard holds, trivially). Differs from the full set by gating ONLY the
     // GameFlowInGame_MoveMap_PostPhysics family (118, 123-125): measured 2026-08-22, that
@@ -404,7 +412,7 @@ struct Config {
     // crasher (it walks the WorldBlockChr grid and task lists, which teardown/arrival
     // rebuilds under it - the whole exe+0xc7f88b/0x3f9b2b/0x513baa/0x32b04a family).
     // Steady-state play needs it for stereo depth; the settle window must not run it.
-    std::string vrPass2SafeKeep = "0-7,10-25,27-81,83-84,86-88,95-96,98,106-109,113-117,119-122,126-142,144-160,164,168";
+    std::string vrPass2SafeKeep = "0-7,10-25,27-28,32-81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-133,137-142,144-160,164,168";
     // Seconds of SAFE keep set after the last guard releases. Was 20 (timer-guess era),
     // then 8; now 1.5 (2026-08-24 pt2, user asked for 1-2 s transitions): post-load
     // streaming is not a special state for full-set pass 2 - the open world streams
