@@ -3,6 +3,9 @@
 #include <windows.h>
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <string>
+#include <thread>
+#include <vector>
 #pragma comment(lib, "d3dcompiler.lib")
 
 namespace ervr {
@@ -595,5 +598,142 @@ bool Dx12SampleBackbuffer(ID3D12CommandQueue* queue, ID3D12Resource* src,
         g_sr.slotPending[slot] = true;
     }
     return produced;
+}
+
+// One-shot full back-buffer readback to a PPM file. BLOCKS the calling thread on a fence
+// (~tens of ms) - harness/diagnostic use only. Exists because every desktop screenshot is
+// post-DWM window scaling, which normalizes away exactly the question a raster probe asks
+// (what aspect the projection really rasterized with); this is the buffer itself, pixel for
+// pixel. Ad-hoc objects, all released before returning.
+bool Dx12DumpBackbuffer(ID3D12CommandQueue* queue, ID3D12Resource* src, const wchar_t* path) {
+    if (!queue || !src || !path) return false;
+    ID3D12Device* dev = nullptr;
+    if (FAILED(src->GetDevice(IID_PPV_ARGS(&dev)))) return false;
+    const D3D12_RESOURCE_DESC sd = src->GetDesc();
+    const uint32_t w = (uint32_t)sd.Width, h = sd.Height;
+    const uint32_t pitch = (w * 4 + 255) & ~255u;
+    bool ok = false;
+    const char* stage = "start";
+    HRESULT shr = S_OK;
+    ID3D12Resource* rb = nullptr;
+    ID3D12CommandAllocator* alloc = nullptr;
+    ID3D12GraphicsCommandList* cl = nullptr;
+    ID3D12Fence* fence = nullptr;
+    HANDLE ev = nullptr;
+    do {
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (uint64_t)pitch * h; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        stage = "readback-alloc";
+        if (FAILED(shr = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb)))) break;
+        stage = "cmd-alloc";
+        if (FAILED(shr = dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)))) break;
+        stage = "cmd-list";
+        if (FAILED(shr = dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc, nullptr, IID_PPV_ARGS(&cl)))) break;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = src;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        // At the ReShade present event the back buffer is in PRESENT state - the per-frame
+        // eye blits copy from it with exactly this StateBefore (see BlitEyeFromReport).
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        cl->ResourceBarrier(1, &b);
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = rb;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint.Footprint = {sd.Format, w, h, 1, pitch};
+        D3D12_TEXTURE_COPY_LOCATION sl{};
+        sl.pResource = src;
+        sl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        sl.SubresourceIndex = 0;
+        cl->CopyTextureRegion(&dst, 0, 0, 0, &sl, nullptr);
+        std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+        cl->ResourceBarrier(1, &b);
+        stage = "close";
+        if (FAILED(shr = cl->Close())) break;
+        ID3D12CommandList* lists[] = {cl};
+        queue->ExecuteCommandLists(1, lists);
+        stage = "fence";
+        if (FAILED(shr = dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) break;
+        if (FAILED(shr = queue->Signal(fence, 1))) break;
+        // NEVER wait here: present is synchronous with the engine's Flip task, and a
+        // blocking fence wait inside it stalls the frame ~50 ms and crashed the game
+        // (09:54 run, movups on reused heap - same class as the fade-guard crash). The
+        // wait, map and file write all happen on a detached worker; it owns every object
+        // captured below and releases them when done.
+        ok = true;
+        {
+            ID3D12Resource* trb = rb;            rb = nullptr;
+            ID3D12CommandAllocator* tal = alloc; alloc = nullptr;
+            ID3D12GraphicsCommandList* tcl = cl; cl = nullptr;
+            ID3D12Fence* tfc = fence;            fence = nullptr;
+            const DXGI_FORMAT fmt = sd.Format;
+            std::wstring wpath = path;
+            std::thread([trb, tal, tcl, tfc, fmt, wpath, w, h, pitch] {
+                bool wok = false;
+                HANDLE tev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                if (tev) {
+                    if (tfc->GetCompletedValue() < 1) {
+                        tfc->SetEventOnCompletion(1, tev);
+                        WaitForSingleObject(tev, 5000);
+                    }
+                    if (tfc->GetCompletedValue() >= 1) {
+                        void* mem = nullptr;
+                        D3D12_RANGE rr{0, (SIZE_T)pitch * h};
+                        if (SUCCEEDED(trb->Map(0, &rr, &mem))) {
+                            HANDLE fh = CreateFileW(wpath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                            if (fh != INVALID_HANDLE_VALUE) {
+                                char hdr[64];
+                                int hl = snprintf(hdr, sizeof(hdr), "P6\n%u %u\n255\n", w, h);
+                                DWORD wr = 0;
+                                WriteFile(fh, hdr, hl, &wr, nullptr);
+                                std::vector<uint8_t> row((size_t)w * 3);
+                                const bool tenBit = fmt == DXGI_FORMAT_R10G10B10A2_UNORM;
+                                const bool bgra = fmt == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                                                  fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+                                for (uint32_t y = 0; y < h; ++y) {
+                                    const uint8_t* s = (const uint8_t*)mem + (size_t)y * pitch;
+                                    for (uint32_t x = 0; x < w; ++x) {
+                                        if (tenBit) {
+                                            const uint32_t v = ((const uint32_t*)s)[x];
+                                            row[x * 3 + 0] = (uint8_t)((v & 0x3FF) >> 2);
+                                            row[x * 3 + 1] = (uint8_t)(((v >> 10) & 0x3FF) >> 2);
+                                            row[x * 3 + 2] = (uint8_t)(((v >> 20) & 0x3FF) >> 2);
+                                        } else {
+                                            row[x * 3 + 0] = s[x * 4 + (bgra ? 2 : 0)];
+                                            row[x * 3 + 1] = s[x * 4 + 1];
+                                            row[x * 3 + 2] = s[x * 4 + (bgra ? 0 : 2)];
+                                        }
+                                    }
+                                    WriteFile(fh, row.data(), (DWORD)row.size(), &wr, nullptr);
+                                }
+                                CloseHandle(fh);
+                                wok = true;
+                            }
+                            D3D12_RANGE wr0{0, 0};
+                            trb->Unmap(0, &wr0);
+                        }
+                    }
+                    CloseHandle(tev);
+                }
+                if (wok) LOGI("[dx12] backbuffer dump written (%ux%u)", w, h);
+                else     LOGW("[dx12] backbuffer dump worker failed");
+                tfc->Release(); tcl->Release(); tal->Release(); trb->Release();
+            }).detach();
+        }
+    } while (false);
+    if (!ok) LOGW("[dx12] backbuffer dump failed at %s (hr 0x%08X)", stage, (unsigned)shr);
+    if (ev) CloseHandle(ev);
+    if (fence) fence->Release();
+    if (cl) cl->Release();
+    if (alloc) alloc->Release();
+    if (rb) rb->Release();
+    dev->Release();
+    return ok;
 }
 }

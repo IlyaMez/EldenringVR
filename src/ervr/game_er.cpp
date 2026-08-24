@@ -106,7 +106,38 @@ uint8_t* g_camWallRecovery = nullptr;    // address of the camera wall-recovery 
 uint8_t** g_worldChrManPtr = nullptr;    // address of the WorldChrMan* global
 uint8_t** g_fieldAreaPtr = nullptr;      // address of the FieldArea* global
 uint8_t** g_gameDataManPtr = nullptr;    // address of the GameDataMan* global (stats cheat)
+uint8_t** g_gameManPtr = nullptr;        // address of the GameMan* global (warp_requested)
+uint8_t** g_eventFlagManPtr = nullptr;   // address of the CSEventFlagMan* global (loading byte)
+std::atomic<ULONGLONG> g_warpReqTick{0}; // last tick GameMan.warp_requested read TRUE
+std::atomic<ULONGLONG> g_loadingTick{0}; // last tick the loading-screen event byte read TRUE
 std::atomic<ULONGLONG> g_bigJumpTick{0}; // last >100 m camera jump (teleport) tick
+std::atomic<ULONGLONG> g_lastStashTick{0}; // last frame a second-eye camera was stashed
+                                           // (gameplay heartbeat; goes quiet in menus)
+
+// The pass's eye report, held back until pass end. The game's camera step re-smooths the
+// final render camera AFTER our write (yaw in ~100% of frames, position >5 cm in ~half,
+// measured 2026-08-22 20:13), so a report pushed at write time describes a camera the image
+// was NOT rendered with - the compositor answers with head-motion skew and noisy stereo.
+// UpdateCamera / GameERApplySecondEyeCamera stash here (last write of the pass wins, its
+// written camera alongside); the frame pump calls GameERFinalizePassReport after each
+// pass's queue_tasks returns - every writer done, Flip presented, same thread - which reads
+// the camera the renderer REALLY used, folds the written->final delta into the pose, and
+// only then pushes the report.
+struct PendingReport {
+    StereoEyeReport rep;
+    Quat qWritten; Vec3 pWritten;   // the camera we wrote, game space
+    bool valid = false;
+};
+std::mutex g_pendingRepMtx;
+PendingReport g_pendingRep;
+
+void StashPendingReport(const StereoEyeReport& rep, const Quat& qW, const Vec3& pW) {
+    std::lock_guard<std::mutex> g(g_pendingRepMtx);
+    g_pendingRep.rep = rep;
+    g_pendingRep.qWritten = qW;
+    g_pendingRep.pWritten = pW;
+    g_pendingRep.valid = true;
+}
 FnCameraStep g_origCameraStep = nullptr;
 using FnMmsUpdate = void (__fastcall*)(void*);
 using FnFollow = void (__fastcall*)(void* followCam, float dt, void* c);
@@ -129,6 +160,14 @@ std::mutex g_camMtxLock;
 FnGetDmyPos  g_getDmyPos = nullptr;
 void* g_hkOrig = nullptr; void** g_hkSlot = nullptr;
 GameERStatus g_status;
+// Foreign-camera-FOV detector. The map screen (the only road to fast travel), cutscenes and
+// other full-screen takeovers write their own FOV into the camera we own every frame - the
+// 13:18 crash log shows fov 0.838 in the pre-write dumps the whole time the map was open,
+// against the 1.938 we keep writing. So "the FOV we wrote last frame is not the FOV we read
+// this frame" = some game system has taken the camera = a warp can be requested at any
+// moment; the stereo pump uses it to sit out the request window that no other guard covers.
+std::atomic<ULONGLONG> g_foreignFovTick{0};
+std::atomic<float>     g_lastFovWrite{0.f};
 std::mutex g_vrMtx;
 VRTracking g_vrTr; VRInputState g_vrIn; bool g_vrValid = false;
 // ONE VR sample per render cycle. BuildFrame runs from four write points (pose hook, camera step, model-pos,
@@ -209,7 +248,37 @@ void CamBasis(float yaw, float pitch, Vec3& right, Vec3& up, Vec3& fwd) {
     fwd   = {std::sin(yaw) * std::cos(pitch), -std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
     up    = fwd.Cross(right);
 }
+// Cached "the world is dying" check for the per-frame write paths (evaluated at most every
+// 30 ms - the full check walks the HP chain plus two singleton reads). On the RISING edge it
+// also drops the cached follow-cam pointer: that cache is the one write target with no
+// per-use liveness check, and the 22:21:45 death crash (pass 1 teardown dereferencing a
+// FLOAT bit pattern inside CS::CSWorldGeomIns bookkeeping, with our matrix/pose writes
+// running at full rate through the whole death window) is exactly what a 64-byte float
+// blob landing in freed-and-reused memory looks like.
+bool WorldDyingNow() {
+    static std::atomic<ULONGLONG> s_next{0};
+    static std::atomic<bool> s_val{false};
+    const ULONGLONG now = GetTickCount64();
+    ULONGLONG next = s_next.load(std::memory_order_relaxed);
+    if (now >= next && s_next.compare_exchange_strong(next, now + 30)) {
+        const bool d = GameERWorldDying();
+        const bool was = s_val.load(std::memory_order_relaxed);
+        if (d && !was) {
+            g_followCamPtr.store(nullptr, std::memory_order_relaxed);
+            LOGI("[guard] world dying - game-state writes stand down (camera/pose/facing)");
+        } else if (!d && was) {
+            LOGI("[guard] world stable - game-state writes resume");
+        }
+        s_val.store(d, std::memory_order_relaxed);
+    }
+    return s_val.load(std::memory_order_relaxed);
+}
+
 void WriteCamMatrix(uint8_t* cam, const Vec3& r, const Vec3& u, const Vec3& f, const Vec3& p) {
+    // Single choke point for every camera-matrix write ERVR makes (pers cams, chr cam,
+    // follow cam, aim view, second eye, debug pitch): while the world is dying, the game's
+    // own camera (death cam included - erfps2 stands down for it too) owns the view.
+    if (WorldDyingNow()) return;
     float m[16] = { r.x, r.y, r.z, 0.f, u.x, u.y, u.z, 0.f, f.x, f.y, f.z, 0.f, p.x, p.y, p.z, 1.f };
     SafeWrite(cam, m, sizeof(m));
 }
@@ -333,6 +402,9 @@ void SetPartVisible(uint8_t* asmIns, int idx, bool visible) {
     if (nf != f) WR(disp + off::Disp_Flags1, nf);
 }
 void ApplyHeadVisibility(uint8_t* player, bool hideHead, bool hideSheathed) {
+    // Model-part flag writes stand down while the world is dying (see WorldDyingNow); the
+    // flags keep their last state, so nothing changes visually during the death cam.
+    if (WorldDyingNow()) return;
     uint8_t* asmIns = Deref(player + off::PI_AsmModelIns);
     if (asmIns) {
         static const int kHead[] = {0, 2, 6, 21, 22, 23, 24, 25};
@@ -893,6 +965,9 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
 void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw) {
     const Config& c = Cfg();
     if (!c.fpFaceCamera || c.fpFaceCameraMode == "off") return;
+    // Facing/lock-state choke point: while the world is dying, do not pin a dying body's
+    // physics orientation or write lock flags - the ragdoll/death anim owns the character.
+    if (WorldDyingNow()) return;
     int64_t enemy = -1; RD(player + off::PI_LockedEnemy, enemy);
     bool realLock = enemy != -1 && enemy != 0;
     if (uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl)) WR(ctrl + off::Ctrl_IsUnlocked, (uint8_t)0);
@@ -1067,10 +1142,52 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
     // value comes from the render thread, which is the only side that knows what the headset
     // needs; it then crops back down to the runtime's exact asymmetric FOV, so too wide only
     // costs resolution while too narrow costs field of view.
-    if (stereo && el.req.fovWrite > 0.01f) {
-        float fov = el.req.fovWrite;
-        for (int i = 0; i < npc; ++i) SafeWrite(pcs[i] + off::Cam_Fov, &fov, 4);
-        if (uint8_t* cc = ChrCam()) SafeWrite(cc + off::Cam_Fov, &fov, 4);
+    // [FirstPerson] ForceFovDeg: write Cam_Fov WITHOUT a VR session, so the fov-semantics
+    // A/B (which height does a WRITTEN fov apply across - boot or current?) can run in the
+    // flat harness. The stereo path never sets it; 0 = off.
+    const bool fovOn = (stereo && el.req.fovWrite > 0.01f) || Cfg().fpForceFovDeg > 1.f;
+    if (fovOn) {
+        float fov = Cfg().fpForceFovDeg > 1.f ? Deg2Rad(Cfg().fpForceFovDeg) : el.req.fovWrite;
+        // Before overwriting: did the game change the FOV back since OUR last write?
+        // A single foreign read is NOT enough: the game resets the FOV occasionally in
+        // ordinary play too (measured 2026-08-22: 9% of pre-write samples were the game's
+        // 0.838 during pure gameplay - and those isolated blips kept the guard's 3 s tail
+        // refreshed for a whole session, which is the "always in cinema mode" bug). What
+        // separates a takeover from a blip is PERSISTENCE: with one FOV-write call per
+        // frame, the map/cutscene camera wins the write race every consecutive frame
+        // (16 consecutive in the map burst at 14:41), while gameplay blips are isolated.
+        // So arm only on a streak - ~20 frames = ~300 ms of map, far less time than it
+        // takes to pick a destination, and a length ordinary play never strings together.
+        const float lastW = g_lastFovWrite.load(std::memory_order_relaxed);
+        float cur = 0.f;
+        if (npc > 0 && lastW > 0.01f && SafeRead(pcs[0] + off::Cam_Fov, &cur, 4)) {
+            // Majority over a sliding window, NOT a consecutive streak. With stereo live
+            // this code runs twice per frame, and only PASS 1 sees the menu camera's value
+            // (pass 2 pre-reads our own pass-1 write) - so a takeover reads foreign, ours,
+            // foreign, ours... and a consecutive streak NEVER arms. That is exactly how the
+            // 14:53 fast-travel crash got through: map open, guard silent. Rates measured
+            // 2026-08-22: map/menu >= 50% of reads foreign (100% in mono), ordinary
+            // gameplay <= 9% in isolated blips. 16-of-40 (40%) splits those cleanly and
+            // arms within ~13 frames of the map opening.
+            static uint8_t s_win[40] = {};
+            static int s_head = 0, s_sum = 0;
+            const uint8_t f = std::fabs(cur - lastW) > 0.05f ? 1 : 0;
+            s_sum += f - s_win[s_head];
+            s_win[s_head] = f;
+            s_head = (s_head + 1) % 40;
+            if (s_sum >= 16) {
+                g_foreignFovTick.store(GetTickCount64(), std::memory_order_relaxed);
+                static long s_logged = 0;
+                if (s_logged < 16 && ++s_logged)
+                    LOGI("[cam] foreign FOV %.3f (ours %.3f), %d of last 40 reads - "
+                         "menu/cutscene camera owns the view", cur, lastW, s_sum);
+            }
+        }
+        if (!WorldDyingNow()) {   // fov writes stand down with the matrix writes
+            for (int i = 0; i < npc; ++i) SafeWrite(pcs[i] + off::Cam_Fov, &fov, 4);
+            if (uint8_t* cc = ChrCam()) SafeWrite(cc + off::Cam_Fov, &fov, 4);
+            g_lastFovWrite.store(fov, std::memory_order_relaxed);
+        }
     }
     // World-origin-shift telemetry: an origin rebase (BeginShiftWorldPosition, group 160)
     // moves every world coordinate at once, so the camera jumps farther in one frame than any
@@ -1115,13 +1232,24 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
         rep.fovY = (fov > 0.05f && fov < 3.2f) ? fov : 0.f;
         rep.headPos = ToGame(f.headP);
         rep.headRot = ToGame(f.headQ);
-        StereoReportEye(rep);
+        // The report is NOT pushed here: the game's own step re-smooths the final camera
+        // after this write (measured 20:13 session: yaw off in 3270 of 3270 checks,
+        // position off >5 cm in half), so the image is rendered with a camera this pose
+        // does not describe - a standing image/pose mismatch the compositor turns into
+        // head-motion skew. The report is STASHED and completed at pass end by
+        // GameERFinalizePassReport, which reads the camera the renderer really used.
+        // Pass 2's re-assert calls come through here too with the frame's PASS-1 latch -
+        // they must not overwrite pass 2's own pending report (stashed by
+        // GameERApplySecondEyeCamera between the passes).
+        if (FramePumpCurrentPass() != 2)
+            StashPendingReport(rep, Quat::FromBasis(r, u, fw), pos);
         // Full mode: stash the second eye for the pump. Overwritten by every UpdateCamera
         // call in the frame, so the pump gets the LAST (freshest) camera state, exactly
         // like the report queue does.
         std::lock_guard<std::mutex> g(g_secondEye.mtx);
         g_secondEye.valid = el.req.haveOther;
         if (el.req.haveOther) {
+            g_lastStashTick.store(GetTickCount64(), std::memory_order_relaxed);
             g_secondEye.haveHeadBasis = haveHeadBasis;
             g_secondEye.qHead = qHead;
             g_secondEye.r = r; g_secondEye.u = u; g_secondEye.fw = fw;
@@ -1242,6 +1370,10 @@ bool CaptureTemplate(uint8_t* chr, const char* why) {
 
 void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
     const Config& c = Cfg();
+    // Pose-write choke point: while the world is dying (death anim, warp, load) the game's
+    // own animation (ragdoll, death anim) owns the body, and our bulk pose write is 720
+    // bytes of floats going into memory teardown is about to free - stand down.
+    if (WorldDyingNow()) return;
     if (g_skel.chr != player || !g_skel.hkb) { if (!BuildSkeleton(player)) return; }
     HkQsTransform* pose = g_skel.LivePose(); if (!pose) return;
     // Same root the camera anchor was built from - the bones must be solved in the frame they are drawn in.
@@ -1593,6 +1725,26 @@ bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
         g_lastCamDump = NowSec(); DumpMatrix("game chr_cam (before write)", ChrCam()); DumpMatrix("game pers_cam_1 (before write)", PersCam1());
         LOGD("[cam] foreign yaw found before %ld of %ld writes in this window; our yaw %.1f", g_camForeign, g_camChecks, Rad2Deg(f.baseYaw));
     }
+    // fov-semantics probe: with ForceFovDeg armed, dump the pers-cam struct as floats a few
+    // times, ~10 s in (after the late resize AND with our fov write long since applied). The
+    // projection terms live somewhere in here - m11 = 1/tan(vFov/2) and m00 = m11/aspect -
+    // and WHICH aspect appears (buffer 0.94 / 1.78 vs boot 1.78 vs desktop 2.39) answers,
+    // from memory instead of screenshots, which height a WRITTEN fov applies across.
+    if (c.fpForceFovDeg > 1.f) {
+        static int s_dumps = 0; static double s_lastStructDump = 0;
+        if (s_dumps < 3 && NowSec() - s_lastStructDump > 12.0) {
+            ++s_dumps; s_lastStructDump = NowSec();
+            if (uint8_t* pc = PersCam1()) {
+                float v[80];
+                if (SafeRead(pc, v, sizeof(v))) {
+                    char line[1024]; int p = 0;
+                    for (int i = 0; i < 80 && p < (int)sizeof(line) - 16; ++i)
+                        p += snprintf(line + p, sizeof(line) - p, "%.4g ", v[i]);
+                    LOGI("[cam] pers_cam_1 floats +0x00..+0x140: %s", line);
+                }
+            }
+        }
+    }
     ApplyHeadVisibility(player, c.fpHideHead, c.fpHideSheathed);
     if (c.fpCameraMode == "passthrough") { skipOriginal = false; return false; }
     if (c.fpCameraMode == "post" && !afterOriginal) { skipOriginal = false; return false; }   // come back after the original
@@ -1605,6 +1757,11 @@ bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
         return true;
     }
     UpdateCamera(player, f);
+    // fov-semantics probe, part 2 ([FirstPerson] ForcePitchDeg): pitch the written camera a
+    // KNOWN angle; a landmark's on-screen displacement divided by it measures px/deg
+    // directly, immune to camera position. Flat harness only; hot-reloads for one-session
+    // before/after shots.
+    if (c.fpForcePitchDeg != 0.f) GameERDebugPitchCamera(c.fpForcePitchDeg);
     g_lastWrittenYaw = f.baseYaw; g_haveWrittenYaw = true;
     if (dump) { DumpMatrix("ervr chr_cam (after write)", ChrCam()); DumpMatrix("ervr pers_cam_1 (after write)", PersCam1()); }
     skipOriginal = (c.fpCameraMode == "block");
@@ -1655,6 +1812,7 @@ void __fastcall Hook_UpdateFollowCam(void* fc) {
 // Replay our camera after the game's own camera finalizer. Cheap by design: no frame rebuild, no bone solve -
 // just the matrix we already computed, written back into every camera object we know of.
 void ReassertCameraMatrix() {
+    if (WorldDyingNow()) return;   // stand down with every other camera write
     if (!g_haveCamMtx.load(std::memory_order_relaxed)) return;
     float m[16];
     { std::lock_guard<std::mutex> g(g_camMtxLock); memcpy(m, g_lastCamMtx, sizeof(m)); }
@@ -1663,8 +1821,21 @@ void ReassertCameraMatrix() {
     if (uint8_t* cc = ChrCam()) SafeWrite(cc + off::Cam_Matrix, m, sizeof(m));
     if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) SafeWrite(fc + off::Cam_Matrix, m, sizeof(m));
 }
+// Pass-1 finalize call, captured fresh every frame for the pass-2 replay below. Pass 1
+// always runs the full camera chain natively (our pass-2 gating never touches pass 1), so
+// these are at most one frame old and their objects are the live camera system.
+struct { std::atomic<void*> a{nullptr}, b{nullptr}, c{nullptr}, d{nullptr};
+         std::atomic<ULONGLONG> tick{0}; } g_finArgs;
+
 uint64_t __fastcall Hook_CamFinalize(void* a, void* b, void* c, void* d) {
     CountPass(g_cntFinalize);
+    if (FramePumpCurrentPass() != 2) {
+        g_finArgs.a.store(a, std::memory_order_relaxed);
+        g_finArgs.b.store(b, std::memory_order_relaxed);
+        g_finArgs.c.store(c, std::memory_order_relaxed);
+        g_finArgs.d.store(d, std::memory_order_relaxed);
+        g_finArgs.tick.store(GetTickCount64(), std::memory_order_release);
+    }
     uint64_t rv = g_origCamFinalize(a, b, c, d);
     if (g_tripped || !FirstPersonActive() || !Cfg().fpCameraFinalWrite) return rv;
     __try { ReassertCameraMatrix(); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
@@ -1774,6 +1945,29 @@ void HookCameraStepImpl(void* a, void* b) {
         __try { bool dummy; CameraStepBody(dummy, true); }
         __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     }
+    // FINALIZE REPLAY: under the SAFE keep set the camera finalizer's native caller (the
+    // GameFlowInGame_MoveMap_PostPhysics family) is gated out of pass 2, so the second-eye
+    // camera written above never reaches the renderer's view state - the "no depth, same
+    // eye twice" failure. Pass 1 captured the finalizer's arguments this very frame; calling
+    // the game's own finalizer here, after the second-eye write, propagates eye 2 without
+    // running ANY of the MoveMap family's world/grid walking - which is the entire reason
+    // that family is gated. Only when the SAFE set is live (native finalize covers FULL).
+    if (FramePumpCurrentPass() == 2 && Cfg().vrPass2FinalizeReplay && FramePumpSafeSetActive() &&
+        g_origCamFinalize && !g_tripped) {
+        const ULONGLONG t = g_finArgs.tick.load(std::memory_order_acquire);
+        if (t && GetTickCount64() - t < 200) {
+            __try {
+                g_origCamFinalize(g_finArgs.a.load(std::memory_order_relaxed),
+                                  g_finArgs.b.load(std::memory_order_relaxed),
+                                  g_finArgs.c.load(std::memory_order_relaxed),
+                                  g_finArgs.d.load(std::memory_order_relaxed));
+                static std::atomic<bool> s_logged{false};
+                if (!s_logged.exchange(true))
+                    LOGI("[stereo] pass-2 finalize replay ACTIVE (SAFE set): second eye reaches "
+                         "the renderer without the MoveMap family");
+            } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
+        }
+    }
 }
 
 // Locomotion=direct: ERVR moves the character. Horizontal position integrated from the processed stick in the view
@@ -1783,6 +1977,8 @@ Vec3 g_locoPos{}; bool g_locoActive = false; double g_locoLast = 0; unsigned g_l
 void DirectLocomotion(uint8_t* player, const FrameInfo& f) {
     const Config& c = Cfg();
     if (c.locomotion != "direct") { g_locoActive = false; return; }
+    // Do not move or re-orient the character while the world is dying (see WorldDyingNow).
+    if (WorldDyingNow()) { g_locoActive = false; return; }
     if (g_locoFrame == g_frame) return; g_locoFrame = g_frame;   // once per rendered frame
     MoveIntent mi = VirtualPadGetMove();
     double now = NowSec(); float dt = Clamp((float)(now - g_locoLast), 0.f, 0.05f); g_locoLast = now;
@@ -1867,6 +2063,23 @@ uint8_t* ResolveCallTarget(const char* pattern, const char* name) {
 // Full stereo, pass 2: write the OTHER eye's camera into every slot the real pass wrote.
 // Called by the frame pump between the two engine passes, on the main-loop thread, while
 // every camera writer is quiescent (the camera step is gated for the pass that follows).
+// Peek: is a second-eye camera stashed for this frame? Non-consuming - the frame pump uses
+// it to tell "gameplay frame" (stash present every frame) from "menu/loading frame" (the
+// game never stashes one there, by design). The stash gap IS the menu detector: the map,
+// where fast travel is confirmed, produces a multi-second gap ending the instant the
+// confirm closes it.
+bool GameERSecondEyePending() {
+    std::lock_guard<std::mutex> g(g_secondEye.mtx);
+    return g_secondEye.valid;
+}
+
+// Tick of the last stash - unlike GameERSecondEyePending (consumed between the passes, so
+// false through most of every frame) this reads the same from any thread at any point in
+// the frame: fresh = gameplay, quiet for ~0.7 s+ = menu/loading/cinema.
+unsigned long long GameERLastStashTick() {
+    return g_lastStashTick.load(std::memory_order_relaxed);
+}
+
 bool GameERApplySecondEyeCamera() {
     bool haveHeadBasis; Quat qHead, rot; Vec3 br, bu, bf, posBase, offset;
     StereoEyeReport rep;
@@ -1912,8 +2125,61 @@ bool GameERApplySecondEyeCamera() {
         g_secondEye.camR = r; g_secondEye.camU = u;
         g_secondEye.camF = fw; g_secondEye.camPos = pos;
     }
-    StereoReportEye(rep);
+    // Held back until pass 2 ends - see PendingReport. The pump finalizes it right after
+    // pass 2's queue_tasks returns, before the present that consumes it.
+    StashPendingReport(rep, Quat::FromBasis(r, u, fw), pos);
     return true;
+}
+
+// Complete the pass's stashed report with the camera the renderer REALLY used and push it.
+// Called by the frame pump on the frame thread right after each pass's queue_tasks returns
+// (all camera writers and the smoother are done, the pass's Flip has presented, and the
+// present that will consume this report has not run yet).
+void GameERFinalizePassReport() {
+    PendingReport pr;
+    {
+        std::lock_guard<std::mutex> g(g_pendingRepMtx);
+        if (!g_pendingRep.valid) return;
+        pr = g_pendingRep;
+        g_pendingRep.valid = false;
+    }
+    static long s_corr = 0, s_skipped = 0; static float s_sumYawDeg = 0.f, s_sumPosCm = 0.f;
+    if (Cfg().vrReportFinalCamera) {
+        float m[16];
+        uint8_t* pc = PersCam1();
+        if (pc && SafeRead(pc + off::Cam_Matrix, m, sizeof(m))) {
+            const Quat qFinal = Quat::FromBasis({m[0], m[1], m[2]}, {m[4], m[5], m[6]},
+                                                {m[8], m[9], m[10]}).Normalized();
+            const Vec3 pFinal{m[12], m[13], m[14]};
+            Quat dq = (qFinal * pr.qWritten.Conj()).Normalized();   // world-frame delta, game space
+            if (dq.w < 0.f) dq = {-dq.x, -dq.y, -dq.z, -dq.w};
+            const Vec3 dp = pFinal - pr.pWritten;
+            const float angDeg = Rad2Deg(2.f * std::acos(std::fmin(1.f, dq.w)));
+            // A cut/rebase/teleport moves the camera wildly WITH the world - folding that
+            // into the head pose would slam the layer. Correct only plausible smoothing.
+            if (angDeg < 25.f && dp.Length() < 2.f) {
+                const float ws = Clamp(Cfg().vrWorldScale, 0.25f, 4.f);
+                const Quat dqXr = ToGame(dq).Normalized();
+                const Vec3 dpXr = ToGame(dp) * (1.f / ws);
+                pr.rep.headRot = (dqXr * pr.rep.headRot).Normalized();
+                pr.rep.headPos = pr.rep.headPos + dpXr;
+                ++s_corr; s_sumYawDeg += angDeg; s_sumPosCm += dp.Length() * 100.f;
+            } else {
+                ++s_skipped;
+            }
+        }
+    }
+    // 5 s digest: how far the game's smoother really moves the render camera off our write.
+    static double s_win = 0; const double nw = NowSec();
+    if (nw - s_win > 5.0) {
+        if (s_corr || s_skipped)
+            LOGD("[cam] report pose corrected to the FINAL render camera in %ld passes "
+                 "(avg delta %.2f deg / %.1f cm), %ld skipped as cuts (5 s)",
+                 s_corr, s_corr ? s_sumYawDeg / s_corr : 0.f, s_corr ? s_sumPosCm / s_corr : 0.f,
+                 s_skipped);
+        s_corr = s_skipped = 0; s_sumYawDeg = s_sumPosCm = 0.f; s_win = nw;
+    }
+    StereoReportEye(pr.rep);
 }
 
 // Content-probe experiment: rewrite every camera slot as the LAST written camera pitched by
@@ -1953,7 +2219,17 @@ bool GameERInit() {
     if (uint8_t* hit = AobScan("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88")) g_worldChrManPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
     if (uint8_t* hit = AobScan("48 8B 3D ?? ?? ?? ?? 49 8B D8 48 8B F2 4C 8B F1 48 85 FF")) g_fieldAreaPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
     if (uint8_t* hit = AobScan("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 05 48 8B 40 58 C3 C3")) g_gameDataManPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
-    LOGI("[game] WorldChrMan* @ %p, FieldArea* @ %p", (void*)g_worldChrManPtr, (void*)g_fieldAreaPtr);
+    // GameMan + CSEventFlagMan: the transition-authority pair (2026-08-23). GameMan holds
+    // warp_requested (+0x10, fromsoftware-rs GameMan - the byte EVERY warp source sets on
+    // its request frame); CSEventFlagMan's virtual-memory-flag block holds the community
+    // "loading screen up" byte ([+0x28]+0x113, the one TGA's loading-screen tools poll).
+    // AOBs are johndisandonato's practice-tool scans (aob_indirect_twice, rip at +3 len 7),
+    // same shape as the WorldChrMan classic above.
+    if (uint8_t* hit = AobScan("48 8B 1D ?? ?? ?? ?? 48 8B F8 48 85 DB 74 18 4C 8B 03")) g_gameManPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
+    if (uint8_t* hit = AobScan("48 8B 3D ?? ?? ?? ?? 48 85 FF 74 ?? 48 8B 49")) g_eventFlagManPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
+    LOGI("[game] WorldChrMan* @ %p, FieldArea* @ %p, GameMan* @ %p, CSEventFlagMan* @ %p",
+         (void*)g_worldChrManPtr, (void*)g_fieldAreaPtr, (void*)g_gameManPtr, (void*)g_eventFlagManPtr);
+    if (!g_gameManPtr) LOGW("[game] GameMan AOB missed - warp-request guard degraded to heuristics (consider Pass2SafeOnA)");
     if (!g_worldChrManPtr || !g_fieldAreaPtr) { LOGW("[game] core globals not found; first person disabled"); return false; }
 
     // Functions: RVA when the version matches, else erfps2's AOBs.
@@ -2040,9 +2316,106 @@ uint32_t GameERIgtMs() {
     return igt;
 }
 
+bool GameERForeignCamActive() {
+    const ULONGLONG t = g_foreignFovTick.load(std::memory_order_relaxed);
+    // 3 s tail: long enough to bridge "map closed by the travel confirm" into the fade and
+    // the player-null teardown that follow, short enough that closing the map without
+    // traveling costs only a moment of mono.
+    return t != 0 && GetTickCount64() - t < 3000;
+}
+
+// The game's OWN warp commitment: GameMan.warp_requested (+0x10). Set on the request frame
+// of every warp - map-screen travel confirm, death respawn, stake of Marika, emevd
+// WarpPlayer, coop return - and never by an ordinary interact/jump A press. This is the
+// authoritative signal the Pass2SafeOnA heuristic approximated: the 2026-08-23 fast-travel
+// crash fired 160 ms after the confirm with no guard holding; this byte is already set on
+// that frame. Offset from fromsoftware-rs's GameMan (erfps2 branch, ER 1.16.2 - our exe).
+bool GameERWarpRequested() {
+    if (!g_gameManPtr) return false;
+    uint8_t* gm = Deref(g_gameManPtr); if (!gm) return false;
+    uint8_t b = 0;
+    return RD(gm + 0x10, b) && b != 0;
+}
+
+// The community "loading screen up" byte: [[CSEventFlagMan]+0x28] + 0x113 (flag_blocks of
+// the CSFD4VirtualMemoryFlag that heads CSEventFlagMan; the exact read TGA's Seamless-Coop
+// loading-screen fix polls at 100 ms until it clears). TRUE for the whole teardown/stream/
+// rebuild window between a warp request and arrival - state, not a timer.
+bool GameERLoadingScreen() {
+    if (!g_eventFlagManPtr) return false;
+    uint8_t* efm = Deref(g_eventFlagManPtr); if (!efm) return false;
+    uint8_t* blocks = Deref(efm + 0x28); if (!blocks) return false;
+    uint8_t b = 0;
+    return RD(blocks + 0x113, b) && b != 0;
+}
+
+// Latched warp guard for the frame pump: TRUE from the first frame warp_requested reads set
+// until Pass2WarpGraceSeconds after it last read set. The tail bridges the gap between the
+// flag being consumed by the transfer machinery and the player-null/loading-screen guards
+// picking the hold up - without it a one-frame flag would let pass 2 back in mid-teardown.
+// Also logs both authoritative signals' edges so any future transition crash can be timed
+// against them from the log alone.
+bool GameERWarpGuardActive() {
+    const ULONGLONG now = GetTickCount64();
+    static bool s_warpWas = false, s_loadWas = false;
+    const bool warp = GameERWarpRequested();
+    const bool load = GameERLoadingScreen();
+    if (warp) g_warpReqTick.store(now, std::memory_order_relaxed);
+    if (load) g_loadingTick.store(now, std::memory_order_relaxed);
+    if (warp != s_warpWas) { LOGI("[guard] GameMan.warp_requested -> %d", (int)warp); s_warpWas = warp; }
+    if (load != s_loadWas) { LOGI("[guard] loading-screen byte -> %d", (int)load); s_loadWas = load; }
+    const ULONGLONG t = g_warpReqTick.load(std::memory_order_relaxed);
+    return t != 0 && now - t < (ULONGLONG)(Cfg().vrPass2WarpGraceSeconds * 1000.f);
+}
+
+// "The world is being torn down or is about to be": player dead (death anim + death warp
+// follow), warp latched, or the loading screen up. This is the write-side hazard window -
+// while it holds, ERVR must not write into game objects or execute game code, because
+// teardown frees and reuses the memory our chains and caches point at. Distinct from
+// GameERTransitionActive below only in that it has NO arrival settle: writes into a built
+// world (player active, load done) are legitimate the moment the world exists.
+// Self-sampling (warp flag read here too) so it works in sessions without the frame pump.
+bool GameERWorldDying() {
+    if (GameERPlayerDead()) return true;
+    if (GameERLoadingScreen()) return true;
+    const ULONGLONG now = GetTickCount64();
+    if (GameERWarpRequested()) g_warpReqTick.store(now, std::memory_order_relaxed);
+    const ULONGLONG w = g_warpReqTick.load(std::memory_order_relaxed);
+    return w != 0 && now - w < (ULONGLONG)(Cfg().vrPass2WarpGraceSeconds * 1000.f);
+}
+
+// The transition authority for every ERVR path that EXECUTES GAME CODE or mutates game
+// state outside our own pass-2 pump - combat TAE injection above all. GameERWorldDying
+// plus player-null and an arrival settle (the world keeps streaming in for seconds after
+// the player appears; injecting behavior events into that is the suspected death-arrival
+// crash class).
+//
+// Why this exists (2026-08-23 evening): both post-warp-guard crashes correlate with the
+// physical-combat swing detector firing DURING a transition window - the arm motion of
+// pressing A on the travel confirm reads as a ~4 m/s swing, so EVERY fast travel injected
+// an attack-behavior event into the player 200-400 ms into world teardown (travel 1
+// survived the race, travel 2 crashed 238 ms after the injection, CS::ChrIns + garbage
+// index in the fault). Executing the game's behavior dispatch mid-teardown is a coin flip;
+// the erfps2/practice-tool rule is that EVERYTHING gates on world validity, not just the
+// renderer.
+bool GameERTransitionActive() {
+    const ULONGLONG now = GetTickCount64();
+    static ULONGLONG s_lastInactive = now;
+    if (!GameERPlayerActive()) { s_lastInactive = now; return true; }
+    // Spawn settle: the world streams in around the player for seconds after arrival.
+    if (now - s_lastInactive < (ULONGLONG)(Cfg().vrPass2SpawnGraceSeconds * 1000.f)) return true;
+    return GameERWorldDying();
+}
+
 bool GameERTeleportGraceActive() {
     const ULONGLONG t = g_bigJumpTick.load(std::memory_order_relaxed);
-    return t != 0 && GetTickCount64() - t < 4000;
+    // Configurable since 2026-08-22 evening (12 s before, 4 s before that). This grace and
+    // the MainPlayer()-null one above are what keep pass 2 out of a warp now that gating
+    // the transfer groups is off the table (it darkened the right eye - see
+    // vrPass2FullFrameKeep). The jump only fires once the camera has already moved, so the
+    // window covers the destination load behind it; the 12 s sizing outlasted arrival
+    // crashes whose root cause is fixed, and it stacked on the spawn grace at every load.
+    return t != 0 && GetTickCount64() - t < (ULONGLONG)(Cfg().vrPass2WarpGraceSeconds * 1000.f);
 }
 
 uint8_t* GameERIgtWatchTarget(uint32_t* outLen) {
@@ -2096,7 +2469,68 @@ GameERStatus GameERGetStatus() {
     return s;
 }
 
-bool GameERPlayerActive() { return g_status.playerFound; }
+// Live check, NOT the g_status latch: playerFound is set once when the player is first
+// resolved and never cleared, so keying the pass-2 grace off it left that guard permanently
+// TRUE - i.e. dead - for the rest of the session. WorldChrMan->MainPlayer goes null while a
+// warp (fast travel, death) tears the world down, and stays null until the destination map's
+// player is built: exactly the window the inactive-grace exists to cover.
+// TEST HARNESS ONLY: drop the player to 0 HP to fire the DEATH WARP. That warp is one of the
+// two crash paths, and it is the only one reachable unattended - a fast travel needs map-screen
+// navigation and would move the character to another site of grace. Dying costs the held runes
+// (recoverable at the death spot) and respawns at the last grace; nothing else in the save moves.
+//
+// CSChrDataModule layout is anchored by the stamina pair combat.cpp already relies on
+// (0x154/0x158); HP/MaxHP sit at 0x138/0x13C in the same block. Both are range-checked before
+// the write, so a wrong offset logs and refuses instead of corrupting whatever it landed on.
+// Same-frame death detector. HP reaches 0 on the REQUEST frame of a death warp - before
+// the fade, before any teardown, before every other signal this file has. The 2026-08-22
+// crash hunt showed the existing guards all fire too late (the real crash landed 200 ms
+// after the warp was requested, with no guard holding); this one cannot be late, because
+// the thing that starts the warp IS the value it reads. Chain and offsets are the ones
+// GameERKillPlayer validated in-game (hp 1878/1878 next to the known stamina pair).
+bool GameERPlayerDead() {
+    uint8_t* player = MainPlayer(); if (!player) return false;
+    uint8_t* mods = Deref(player + off::Chr_Modules); if (!mods) return false;
+    uint8_t* data = Deref(mods + 0x00); if (!data) return false;   // CSChrDataModule
+    int32_t hp = -1, maxHp = -1;
+    if (!RD(data + 0x138, hp) || !RD(data + 0x13C, maxHp)) return false;
+    return maxHp > 0 && maxHp < 100000 && hp <= 0;
+}
+
+bool GameERKillPlayer() {
+    uint8_t* player = MainPlayer();
+    if (!player) { LOGW("[kill] no player"); return false; }
+    uint8_t* mods = Deref(player + off::Chr_Modules);
+    if (!mods) { LOGW("[kill] no module container"); return false; }
+    uint8_t* data = Deref(mods + 0x00);            // CSChrDataModule
+    if (!data) { LOGW("[kill] no data module"); return false; }
+    int32_t hp = -1, maxHp = -1, stam = -1, maxStam = -1;
+    RD(data + 0x138, hp); RD(data + 0x13C, maxHp);
+    RD(data + 0x154, stam); RD(data + 0x158, maxStam);
+    // Sanity: the stamina pair is KNOWN good, so it validates that we are looking at the right
+    // struct at all; the HP pair then has to look like HP.
+    const bool stamOk = maxStam > 0 && maxStam < 100000 && stam >= 0 && stam <= maxStam;
+    const bool hpOk = maxHp > 0 && maxHp < 100000 && hp > 0 && hp <= maxHp;
+    LOGI("[kill] data module %p: hp %d/%d, stamina %d/%d", (void*)data, hp, maxHp, stam, maxStam);
+    if (!stamOk || !hpOk) {
+        LOGE("[kill] REFUSING to write - values do not look like HP/stamina (stamOk %d hpOk %d); "
+             "the CSChrDataModule offsets are wrong for this build",
+             (int)stamOk, (int)hpOk);
+        return false;
+    }
+    const int32_t zero = 0;
+    if (!WR(data + 0x138, zero)) { LOGE("[kill] HP write faulted"); return false; }
+    LOGW("[kill] player HP %d -> 0; death warp incoming (test harness)", hp);
+    return true;
+}
+
+// Exe version check result (2.6.2.0 pinned at startup). The crash-fix VEH gates its
+// RVA-pinned instruction skips on this when Arxan's code-page scrambling makes byte
+// verification unreliable inside the exception dispatch (measured 16:52: raw AND guarded
+// reads of the faulting code page can disagree with the executing bytes).
+bool GameERVersionOk() { return g_status.versionOk; }
+
+bool GameERPlayerActive() { return g_status.playerFound && MainPlayer() != nullptr; }
 
 void GameERShutdown() {
     if (g_hkSlot && g_hkOrig) {

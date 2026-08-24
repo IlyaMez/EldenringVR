@@ -24,6 +24,10 @@
 param(
     [int]$Seconds = 90,
     [int]$AutoPilot = 0,
+    [int]$PrtScnAt = 0,        # seconds in: send PrintScreen (ReShade saves the RAW back buffer)
+    [int]$ResizeAt = 0,        # seconds in: resize the game window (buffer-aspect-true screenshots)
+    [int]$ResizeW = 1300,
+    [int]$ResizeH = 1420,
     [int]$Shots = 0,          # screenshot interval in seconds; 0 = none
     [string]$ShotDir = "$env:TEMP\claude\ervr_shots",
     [string]$GameDir = "${env:ProgramFiles(x86)}\Steam\steamapps\common\ELDEN RING\Game",
@@ -83,6 +87,11 @@ if ($Shots -gt 0) {
     Get-ChildItem $ShotDir -Filter *.png -ErrorAction SilentlyContinue | Remove-Item -Force
     Write-Host "  screenshots every ${Shots}s -> $ShotDir" -ForegroundColor DarkGray
 }
+$prtScnDue = if ($PrtScnAt -gt 0) { (Get-Date).AddSeconds($PrtScnAt) } else { $null }
+$resizeDue = if ($ResizeAt -gt 0) { (Get-Date).AddSeconds($ResizeAt) } else { $null }
+if ($PrtScnAt -gt 0 -or $ResizeAt -gt 0) {
+    Add-Type -Namespace W -Name K -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, uint fl, UIntPtr ex); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h); [DllImport("user32.dll")] public static extern bool MoveWindow(System.IntPtr h, int x, int y, int w, int hh, bool r);'
+}
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 500
     foreach ($proc in @(Get-GameProcs)) {
@@ -90,6 +99,21 @@ while ((Get-Date) -lt $deadline) {
             $seen[$proc.Id] = $true
             Write-Host "  $($proc.ProcessName).exe pid $($proc.Id) running" -ForegroundColor DarkGray
         }
+    }
+    if ($resizeDue -and (Get-Date) -ge $resizeDue) {
+        $resizeDue = $null
+        $gp = Get-Process eldenring -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($gp -and $gp.MainWindowHandle -ne 0) {
+            [W.K]::MoveWindow($gp.MainWindowHandle, 0, 0, $ResizeW, $ResizeH, $true) | Out-Null
+            Write-Host "  window resized to ${ResizeW}x${ResizeH} (outer)" -ForegroundColor DarkGray
+        }
+    }
+    if ($prtScnDue -and (Get-Date) -ge $prtScnDue) {
+        $prtScnDue = $null
+        $gp = Get-Process eldenring -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($gp -and $gp.MainWindowHandle -ne 0) { [W.K]::SetForegroundWindow($gp.MainWindowHandle) | Out-Null; Start-Sleep -Milliseconds 300 }
+        [W.K]::keybd_event(0x2C, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 90; [W.K]::keybd_event(0x2C, 0, 2, [UIntPtr]::Zero)
+        Write-Host "  PrintScreen sent (ReShade back-buffer capture)" -ForegroundColor DarkGray
     }
     if ($Shots -gt 0 -and (Get-Date) -ge $nextShot) {
         $nextShot = (Get-Date).AddSeconds($Shots)

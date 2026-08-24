@@ -34,6 +34,17 @@ struct Config {
     // resolution while too narrow costs field of view. 0 = derive it from the headset.
     float vrFovDeg = 0.f;
     std::string vrFovAxis = "vertical";    // which axis Cam_Fov means: vertical | horizontal
+    // The reference height Cam_Fov spans, for the FOV request and the eye crop. Settled by
+    // the 2026-08-23 pitch probe: WRITING Cam_Fov rebuilds the projection against the
+    // CURRENT viewport height, and stereo writes it every frame - so the reference is the
+    // current frame height, full stop. (The 08-22 "boot-locked frustum" A/B was real but
+    // only describes frames where the fov is never written; treating it as the in-play
+    // model claimed 1.9x too much angle per crop on the oversized frame = magnified world,
+    // 0.53x head-rotation gain (the skew), hyper-magnified stereo (the depth regression).)
+    //   0  = auto: the current frame height (the measured written-fov behavior)
+    //   >0 = explicit reference height in px, for experiments only
+    // Hot-reloads.
+    float vrGameRasterRefHeight = 0.f;
     float vrIpdMm = 0.f;                   // override the eye separation the runtime reports; 0 = trust it
     // Back-buffer colour encoding. auto = convert when the format is an LDR UNORM (which is
     // gamma encoded) and the XR swapchain is read as linear. "none" if the picture looks
@@ -49,16 +60,26 @@ struct Config {
     // override, "off" = leave the player's own resolution alone.
     std::string vrGameRes = "auto";        // off | auto | WxH (e.g. 3072x3264)
     float vrGameResScale = 1.0f;           // scales the auto target (GPU headroom knob)
-    // Try to make the game accept a target LARGER than the desktop by inflating every
-    // desktop-size API it might consult. DEFAULT OFF because it does not work yet and costs
-    // sharpness when it fails: measured 2026-08-21, the game's late "apply settings" pass
-    // still rejected an oversized entry and fell back to the table slot BELOW it (1680x945,
-    // worse than the fitted 1656x1440). Lied to so far, all without effect: GetSystemMetrics
-    // (all screen metrics, and the max-track pair), GetMonitorInfoW/A (including the calls
-    // DXGI makes on the game's behalf), EnumDisplaySettings(ENUM_CURRENT_SETTINGS),
-    // GetDeviceCaps (never called at all). The check must read a cached value - finding it
-    // needs a guard-page census on the resolution table to catch the comparing code.
+    // Make the game accept a target LARGER than the desktop - the native alternative to
+    // NVIDIA DSR, and the difference between 1440 and full headset-height frames on a
+    // 3440x1440 monitor. Two parts: the settings-apply pass's own too-big-for-the-screen
+    // entry check is NOPed (kPatSizeCheck in patches_er.cpp), and the Windows max-track
+    // window clamp is lifted by the monitor-info hooks.
+    // DEFAULT OFF since 2026-08-23: the oversized (non-16:9) frame is where every geometry
+    // regression of 08-22/23 lived - the written-fov reference-height mismatch (fixed) and
+    // the still-open horizontal-aspect question (the camera struct carries a constant 1.778
+    // aspect field even on a 0.94 buffer). OFF = the known-good fitted 16:9 frame, immune
+    // to all of it. Turn ON to re-try full-height sharpness once the flat probes settle the
+    // horizontal semantics.
     bool  vrGameResOversize = false;
+    // Diagnostic for the oversize hunt: PAGE_GUARD the patched resolution-table slots for the
+    // first GameResScanSeconds of the run and log every reader/writer ("[reswatch]" lines):
+    // rip, registers, instruction bytes. This is the census that names the code doing the
+    // desktop-size check above (and would expose an Arxan repair restoring the slot as a
+    // WRITE record). One-shot at startup, off for play - every touch of those pages costs an
+    // exception while armed. Meaningful with GameResOversize=true (the reject path fires).
+    bool  vrGameResScan = false;
+    float vrGameResScanSeconds = 45.f;
     // Remove the game's 16:9 letterbox mask when GameRes is not 16:9. The game renders the
     // whole window and then masks it back to 16:9, which both wastes the pixels and leaves
     // the eye crop computing against an aspect the image does not actually have (black bars
@@ -211,6 +232,14 @@ struct Config {
     bool  dumpSkeleton = true;            // log all bone names once when the player skeleton is first seen
     bool  fpPoseScan = false;             // diagnostic: page-protect the pose buffer for ~1 s and log every reader/writer RVA (one shot per false->true flip)
     bool  fpDebug = false;                // per-second debug lines with frame data
+    // Flat-harness probe: write Cam_Fov to this many degrees every camera step, no VR
+    // session needed. Exists for the fov-semantics A/B (does a WRITTEN fov apply across the
+    // boot height or the current height?). 0 = off. Hot-reloads.
+    float fpForceFovDeg = 0.f;
+    // Flat-harness probe, part 2: pitch the written camera by this many degrees. A known
+    // rotation turns a landmark's on-screen displacement into a direct px/deg measurement.
+    // 0 = off. Hot-reloads.
+    float fpForcePitchDeg = 0.f;
 
     // [Combat]  physical melee: swings invoke the game's AttackBehavior event instead of pressing R1/R2
     bool  combatEnabled = true;
@@ -338,7 +367,95 @@ struct Config {
     // re-apply the VR arm pose, so the narrow gate is the default until the wide one is
     // confirmed in-headset to still solve arms in pass 2.
     // Hot-reloads; Numpad 2 cycles stabilisation variants.
+    // Full keep set. Gating warp-related groups here was tried twice on 2026-08-22 for the
+    // "fast travel or dying crashes the game" bug and BOTH attempts regressed the picture:
+    // 10 GameFlowStep and 20 TaskLineIdx_InGame_MoveMapStep each turn out to do per-frame
+    // work pass 2's render needs, and without either one pass 2's image (the RIGHT eye under
+    // PresentLag=1) comes out dark with per-object flicker. Group 20 was the sole config
+    // delta that produced it - measured against the pre-fix ini, with pass 2 still running
+    // every frame (flat frames 0), so it was the gating and nothing else.
+    // The crash is a DOUBLE-STEP of the transfer state machine, and steps=0 does not stop it
+    // (the dispatch field is swapped and the machine still advances once per invocation), so
+    // the fix is not to gate the group but to skip pass 2 ENTIRELY while a warp is in flight
+    // - which is what the guards at the top of DoSecondPass are for.
+    // The CHARACTER pipeline is gated (2026-08-22): 54-81 (WorldChrMan_Respawn through the
+    // ChrIns behavior/AI chain), 113-114 + 117 (ChrIns/WorldChrMan post-physics) and
+    // 127-129 (backread requests) run only in pass 1. Root cause of every warp crash that
+    // week: pass 2 double-stepping character updates corrupted ChrIns state that pass 1's
+    // own tasks then read - crash-handler register dumps showed CS::WorldChrManImp +
+    // FD4Time + task id 0x90000052 at two different faulting sites (exe+0xc7f88b null
+    // virtual call, exe+0x3f9b2b poisoned pointer). Gating the pipeline removed both in
+    // the headless repro. Visually this is CORRECT for stereo, not a compromise: pass 2
+    // renders the same sim instant, so characters must not advance between the eyes.
+    // Also gated (same day, teardown-window crashes at exe+0x513baa WorldBlockChr and
+    // exe+0x32b04a EnemyIns, both pass 2): 115-116 CSDistViewManager/silhouette-begin,
+    // 118+123-125 GameFlowInGame_MoveMap_PostPhysics (map-transfer per-block work - must
+    // not run twice, and pass 2 walking a half-deleted block grid was the loading-screen
+    // crash), 120-122 DmgMan (damage shape-casts - re-running them doubled hit processing
+    // besides crashing on deleted enemies), 130-132 HavokAi_World/formation. Validated:
+    // the kill repro with only the dead-guard bypassed crashed 2/2 before, 0/2 after,
+    // pass 2 pumping 72 Hz through the whole teardown.
     std::string vrPass2FullFrameKeep = "0-7,10-25,27-81,83-84,86-88,95-96,98,106-109,113-142,144-160,164,168";
+    // SAFE variant, active during the settle window after any pass-2 guard releases (and
+    // whenever a guard holds, trivially). Differs from the full set by gating ONLY the
+    // GameFlowInGame_MoveMap_PostPhysics family (118, 123-125): measured 2026-08-22, that
+    // family is BOTH the pass-2 camera carrier (mms/follow/updFollow/finalize hang under
+    // it - gating it is exactly the "no depth, same eye twice" bug) AND the transition
+    // crasher (it walks the WorldBlockChr grid and task lists, which teardown/arrival
+    // rebuilds under it - the whole exe+0xc7f88b/0x3f9b2b/0x513baa/0x32b04a family).
+    // Steady-state play needs it for stereo depth; the settle window must not run it.
+    std::string vrPass2SafeKeep = "0-7,10-25,27-81,83-84,86-88,95-96,98,106-109,113-117,119-122,126-142,144-160,164,168";
+    // Seconds of SAFE keep set after the last guard releases. The arrival crash landed
+    // 13 s after resume (15:30 session); 20 covers it with margin. Depth returns when it
+    // expires - a brief flat-stereo spell after loads instead of a crash.
+    float vrPass2SafeSeconds = 20.f;
+    // Seconds pass 2 stays fully OFF (cinema quad) after every player-inactive -> active
+    // transition. Was a hardcoded 15 s: 8 s for the spawn-fade crash (exe+0x1e8b0bc, later
+    // re-attributed to the readback experiment) plus margin for the 11 s arrival crash
+    // (exe+0xc7f88b, root-caused 2026-08-22 to the blanket keep-set restore, since fixed).
+    // With both root causes gone, 6 s still covers the actual fade/teardown window while
+    // cutting the wait for depth by 9 s. Raise it if arrival crashes return. Hot-reloads.
+    float vrPass2SpawnGraceSeconds = 6.f;
+    // Seconds pass 2 stays off after a full-screen menu closes (the stash-gap detector).
+    // Bridges a fast-travel confirm into the fade and player-null teardown that follow;
+    // travel fades start well within a second of the confirm, so 3 s is still generous.
+    // Closing the map without traveling costs only this much mono. Hot-reloads.
+    float vrPass2MenuGraceSeconds = 3.f;
+    // Seconds pass 2 stays off after a >100 m one-frame camera jump (fast travel / death
+    // warp ARRIVAL - the jump fires when the destination places the camera). Was a
+    // hardcoded 12 s sized against the 11-13 s arrival crashes, whose root cause (the
+    // blanket keep-set restore) is fixed; it stacks on the spawn grace at every load
+    // (measured 19:04: 6 s spawn + 10 more of teleport = 16 s of cinema), so it gets the
+    // same evidence-based cut. The SAFE keep set still covers the streaming window behind
+    // it. Raise it if arrival crashes return. Hot-reloads.
+    float vrPass2WarpGraceSeconds = 6.f;
+    // Replay the game's camera finalizer in pass 2 whenever the SAFE set is live, so the
+    // second-eye camera reaches the renderer without the MoveMap family. The depth path
+    // for the SAFE set; see HookCameraStepImpl.
+    // ON since 2026-08-22 (evening): it was benched after the 17:05 session's "novel
+    // pass-1 lock-on-camera crash", but that session predates the fd4 arg-block fix (the
+    // corruption that wedged 17:58's whole engine), and the same foreign-yaw/lock-on storm
+    // appears in sessions that never ran the replay - the attribution does not hold. With
+    // it on, the SAFE window has real depth, which is what makes the shorter graces below
+    // FEEL fast: cinema for the spawn grace, then straight to 3D.
+    bool  vrPass2FinalizeReplay = true;
+    // Seconds of SAFE keep set after EVERY A press. RETIRED 2026-08-23 (default 0): this
+    // was a heuristic stand-in for "a fast-travel confirm may just have happened" from the
+    // era when no signal separated a map confirm from an in-world press. The real signal
+    // exists and is now wired: GameMan.warp_requested (+0x10, set by the game itself on the
+    // request frame of every warp) drives the "warp requested" guard in DoSecondPass, with
+    // the loading-screen event byte holding through the teardown window. Set this back >0
+    // only as a fallback if the GameMan AOB ever misses on a new exe (the boot log then
+    // says "GameMan AOB missed"). History that sized it while it lived: 2 s too short
+    // (10:14 DL_PANIC), 8 s read as "stereo turns off on every A", 5 was the compromise.
+    // Hot-reloads.
+    float vrPass2SafeOnA = 0.f;
+    // Complete each pass's eye report with the camera the renderer REALLY used (read at
+    // pass end) instead of the one we wrote. The game's step re-smooths the camera after
+    // our write on ~every frame (yaw ~100%, position >5 cm ~50%, measured 20:13) - an
+    // image/pose mismatch the compositor renders as head-motion skew and noisy depth.
+    // Hot-reloads; turn off to compare.
+    bool  vrReportFinalCamera = true;
     // 1 = each Present carries the PREVIOUS pass's render (pipelined renderer): the XR frame
     // opens at pass 2's present (left eye) and closes at pass 1's (right). MEASURED on
     // 2026-08-20 with the pitch probe: pass-2 content lands at pass-1's present (tilting
@@ -378,6 +495,26 @@ struct Config {
     bool  igtTrace = false;         // hook the IGT-advance fn; log caller/dt/pass
 
     bool  m2TaskProbe = false;
+    // TEST HARNESS ONLY. Runs the second engine pass UNCONDITIONALLY, with no OpenXR session
+    // and no second-eye camera. Full stereo gates pass 2 on the game having stashed an eye,
+    // which needs a live headset - so without this the pass-2 crash class (warp double-step)
+    // cannot be reproduced by tools/run_game.ps1 at all. Loading a save is itself a map
+    // transfer through MoveMapStep, so forcing the pass reproduces it headlessly.
+    // Never enable for play: it costs a full extra engine frame and renders nothing useful.
+    bool  m2ForcePass2 = false;
+    // TEST HARNESS ONLY. Seconds after the player becomes active to set HP to 0, firing the
+    // death warp - the one crash path reachable without a headset or map-screen navigation.
+    // 0 = off. Costs the held runes (recoverable at the death spot); nothing else moves.
+    int   m2KillPlayerAfter = 0;
+    // TEST HARNESS ONLY. With ForcePass2: skip the pass-2 guard chain so transition
+    // crashes can be REPRODUCED for diagnosis (the guards otherwise cover the headless
+    // crash windows). Never enable for play.
+    bool  m2Pass2NoGuards = false;
+    // TEST HARNESS ONLY. Skip ONLY the player-dead guard: with the spawn guards still
+    // live, KillPlayerAfter then drives pass 2 straight into the death teardown - the
+    // exact unguarded window a fast-travel confirm creates (no death, no stash gap, pass 2
+    // running while enemies and world blocks are deleted ahead of the player object).
+    bool  m2Pass2NoDeadGuard = false;
     // M2 experiment: temporarily clear the `active` byte of one named task group and watch
     // what stops happening. Empty = off. Auto-restores.
     bool  taskRegisterTest = false;   // register no-op probe tasks into FrameBegin/GameSceneDraw/DrawEnd
@@ -393,6 +530,9 @@ struct Config {
     // Unattended test runs: press a button repeatedly so the game walks itself into the world
     // without a human. 0 seconds = off, which is the default - this presses buttons for real.
     int   autoPilotSeconds = 0;
+    // One-shot raw back-buffer dump N seconds in (0 = off): writes backbuffer.ppm next to
+    // ERVR.ini. Blocks one present for the readback - flat-harness diagnostics only.
+    float expDumpBackbufferAt = 0.f;
     float autoPilotDelay = 20.f;      // let the game reach the title screen first
     float autoPilotPeriod = 0.6f;     // press/release cycle; menus must see the release
     std::string autoPilotButton = "A";

@@ -13,6 +13,7 @@
 #include "midhook.h"
 #include "game_er.h"
 #include "combat.h"
+#include "crashlog.h"
 #include "reshade_addon.h"
 #include "stereo.h"
 #include "debug_keys.h"
@@ -117,17 +118,37 @@ DWORD WINAPI Worker(LPVOID) {
     std::wstring dir = ModuleDir(g_self);
     std::wstring ini = dir + L"\\ERVR.ini";
     Cfg().Load(ini);
+    // Rotate the previous session's log BEFORE truncating: the 2026-08-23 death-warp
+    // postmortem was blind because the user's quick relaunch overwrote the crashed
+    // session's log. Two deep, so crash -> relaunch -> crash again keeps both readable.
+    DeleteFileW((dir + L"\\ERVR.log.prev2").c_str());
+    MoveFileW((dir + L"\\ERVR.log.prev").c_str(), (dir + L"\\ERVR.log.prev2").c_str());
+    MoveFileW((dir + L"\\ERVR.log").c_str(), (dir + L"\\ERVR.log.prev").c_str());
     LogInit(dir + L"\\ERVR.log", ParseLevel(Cfg().logLevel));
     LOGI("ERVR %s starting (pid %lu) in %S", ERVR_VERSION, GetCurrentProcessId(), dir.c_str());
     if (!Cfg().enabled) { LOGI("Disabled via ERVR.ini; exiting worker"); return 0; }
     // Before the game creates its window and measures the desktop: DPI virtualization is
     // what caps the windowed resolution list (and therefore the VR image) at 1680x945.
     PatchesMakeDpiAware();
-    AddVectoredExceptionHandler(1, PanicVeh);   // turn DL_PANIC crashes into logged stacks
-
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
         LOGE("MinHook init failed"); return 0;
     }
+    // GraphicsConfig.xml is a RACE against the game's own boot-time read of it, and this
+    // write must run before anything slow. Measured 2026-08-22 evening: at +718 ms after
+    // LogInit (its old position, behind the crashlog + backend init) the write LOST - every
+    // clean game exit normalizes the file back to the desktop-fitted size, so the next
+    // session then booted at 2560x1440 and never resized. Here it lands within ~150 ms
+    // (the size-check AOB scan is the bulk), ahead of the game's read. A boot that still
+    // loses self-heals next launch: the losing session runs fitted, exits, and this write
+    // wins the (much emptier) start of the following one.
+    PatchesApplyGameResolution();
+    AddVectoredExceptionHandler(1, PanicVeh);   // turn DL_PANIC crashes into logged stacks
+    // Everything PanicVeh does not cover. Warp crashes have all ended the log mid-frame
+    // with no faulting address, which is why the 2026-08-22 hunt had to proceed by
+    // elimination; this names the site and the pass instead.
+    CrashLogInstall();
+    CrashLogSelfTest();
+
     MidHookSelfTest();
     BackendsInit(Cfg().vrRuntime.c_str());
     VirtualPadInit();
@@ -156,6 +177,17 @@ DWORD WINAPI Worker(LPVOID) {
             FrameProbeTick();   // M2 spike; no-op unless [Experimental] TaskProbe=true
             CamWatchTick();     // camera-capture hunt; no-op unless [Experimental] CamWatch=true
             DebugKeysTick();    // numpad A/B hotkeys for the stereo experiments
+            // Test harness: fire the death warp once, N seconds after the player exists.
+            if (Cfg().m2KillPlayerAfter > 0) {
+                static double s_activeSince = 0.0;
+                static bool s_fired = false;
+                if (!GameERPlayerActive()) s_activeSince = 0.0;
+                else if (s_activeSince == 0.0) s_activeSince = t;
+                else if (!s_fired && t - s_activeSince > (double)Cfg().m2KillPlayerAfter) {
+                    s_fired = true;
+                    GameERKillPlayer();
+                }
+            }
             // Feed the headset's recommended per-eye size to the resolution patch (cached
             // for the next boot; dedup + no-op inside when nothing changed).
             if (IVRBackend* vb = ActiveBackend()) {
@@ -210,9 +242,9 @@ DWORD WINAPI Worker(LPVOID) {
                  rs.registered, rs.d3d12, ss.graphicsBound, rs.presents, ss.frames, ss.stereoFrames, ss.submitFails, ss.blitFails,
                  rs.width, rs.height, (unsigned)rs.format, ss.cropU * 100.f, ss.cropV * 100.f, ss.lastSubmitMs,
                  pumpHz, FramePumpLastMs(), FramePumpGpuSyncLastMs(), igtRate);
-            if (ss.eyeBlitL || ss.eyeBlitR || ss.eyeDesync || ss.monoStalls)
-                LOGD("hb: eyes: L %ld / R %ld blits, desync %ld, flat frames (no second pass) %ld",
-                     ss.eyeBlitL, ss.eyeBlitR, ss.eyeDesync, ss.monoStalls);
+            if (ss.eyeBlitL || ss.eyeBlitR || ss.eyeDesync || ss.lateDrops || ss.monoStalls)
+                LOGD("hb: eyes: L %ld / R %ld blits, desync %ld, late-drop %ld, flat frames (no second pass) %ld",
+                     ss.eyeBlitL, ss.eyeBlitR, ss.eyeDesync, ss.lateDrops, ss.monoStalls);
             if (HudEnabled()) {
                 // "captures 0 / misses high" means the UI draws are not where detection
                 // expects them; [HUD] Probe prints the census that says where they are.
@@ -246,6 +278,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     case DLL_PROCESS_ATTACH:
         g_self = hModule;
         DisableThreadLibraryCalls(hModule);
+        // Before the worker even spawns: the game's main thread reads GraphicsConfig.xml
+        // so early that only attach time reliably precedes it (see PatchesEarlyGraphicsConfigWrite).
+        ervr::PatchesEarlyGraphicsConfigWrite(hModule);
         g_thread = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
         break;
     case DLL_PROCESS_DETACH:

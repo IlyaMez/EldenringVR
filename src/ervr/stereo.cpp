@@ -3,6 +3,7 @@
 #include "dx12_blit.h"
 #include "frame_probe.h"
 #include "hud.h"
+#include "reshade_addon.h"
 #include "vr_backend.h"
 #include "config.h"
 #include "log.h"
@@ -47,6 +48,16 @@ uint64_t          g_lastReportTick = 0;
 constexpr int kRepQ = 4;
 StereoEyeReport g_repQ[kRepQ];
 int  g_repHead = 0, g_repCount = 0;
+// Highest pair already POPPED, per eye. UpdateCamera reports on every call - more than once
+// per pass, and pass 2's re-assert calls report the frame's eye-0 latch again - so a repeat
+// of a pair whose report was already consumed is routine. The in-queue dedupe cannot see
+// those: they re-enter an emptier queue as ghosts, sit in front of every later pop, and the
+// popped-in-order model then serves each image a one-frame-stale pose. Measured 19:44
+// session: the late eye-0 repeat raced pass 2's present ~50/50 (desync == blits/2), the
+// left eye alternated fresh/stale poses, felt as head-motion skew + stereo/flat pulsing.
+uint64_t g_lastPopped[2] = {0, 0};
+bool     g_lastPoppedValid[2] = {false, false};
+std::atomic<long> g_lateDrops{0};   // reports dropped by the watermark (visible in the hb)
 
 // Eye geometry as located for each pair, kept in a small ring so a game frame that lands a
 // frame or two late is still matched with the geometry it was actually told to use.
@@ -106,7 +117,36 @@ struct Crop {
 // headset is the only thing that knows what it needs, and on a Quest 3 it is ~110 deg
 // vertical - two and a half times ELDEN RING's own 43, which is why the un-widened image
 // looked like a small screen floating in the middle of the view.
-float RequiredFovY(const VREyeView rel[2], float aspect) {
+// The height Cam_Fov actually spans, in pixels: the CURRENT frame height. Settled by the
+// 2026-08-23 pitch probe (ForcePitchDeg 10 deg at fov-write 80 on a 3072x3264 frame moved a
+// mid-field landmark ~37 window-scaled px; current-height predicts 40, boot-height 18):
+// WRITING Cam_Fov rebuilds the projection against the CURRENT viewport. The 08-22 "boot-
+// locked frustum" A/B was real but only describes the NO-WRITE case - those flat runs never
+// wrote a fov, and stereo always does. The week the two heights differed (oversize landed,
+// ref believed = boot 1440) the crops claimed 1.9x more angle than the image held: world
+// magnified 1.9x, head-rotation gain 0.53 (the "image skews when I pan/tilt"), hyper-
+// magnified disparities (the "depth was better in the morning").
+// [VR] GameRasterRefHeight: 0 = auto (current height), >0 = explicit override for
+// experiments. (-1 was "legacy = current height" while auto meant boot; both now agree.)
+float RasterRefHeight(const Dx12Frame& f) {
+    const float o = Cfg().vrGameRasterRefHeight;
+    if (o > 0.f) return std::fmin(o, (float)f.height);
+    return (float)f.height;
+}
+
+// Half-tangents of the frame's true raster frustum for a given Cam_Fov value.
+struct FrameTans { float th, tv; };
+FrameTans TrueFrameTans(float fovY, const Dx12Frame& f) {
+    const float perPx = std::tan(fovY * 0.5f) / std::fmax(RasterRefHeight(f), 16.f);
+    return {perPx * (float)f.width, perPx * (float)f.height};
+}
+
+// Smallest Cam_Fov whose frame still contains a whole eye's field of view. With the
+// reference-height model this is where the oversize frame pays off: the window supplies
+// the coverage, so the fov only has to supply DENSITY - on a frame taller than its boot
+// height this comes out far NARROWER than the eye (64 deg for 110), and every extra pixel
+// row becomes sharpness instead of cropped-away periphery.
+float RequiredFovY(const VREyeView rel[2], const Dx12Frame& f) {
     float tv = 0.f, th = 0.f;
     for (int i = 0; i < 2; ++i) {
         tv = std::fmax(tv, std::fmax(std::fabs(std::tan(rel[i].fov.angleUp)),
@@ -114,13 +154,15 @@ float RequiredFovY(const VREyeView rel[2], float aspect) {
         th = std::fmax(th, std::fmax(std::fabs(std::tan(rel[i].fov.angleLeft)),
                                      std::fabs(std::tan(rel[i].fov.angleRight))));
     }
-    const float t = std::fmax(tv, th / std::fmax(aspect, 0.1f)) * 1.02f;   // 2% edge margin
+    const float ref = RasterRefHeight(f);
+    const float t = std::fmax(tv * ref / std::fmax((float)f.height, 16.f),
+                              th * ref / std::fmax((float)f.width, 16.f)) * 1.02f;   // 2% edge margin
     return 2.f * std::atan(std::fmin(t, 8.f));
 }
 
-Crop MakeCrop(float gameFovY, float aspect, const VRFov& want) {
-    const float tanV = std::tan(gameFovY * 0.5f);
-    const float tanH = tanV * aspect;
+Crop MakeCrop(const FrameTans& ft, const VRFov& want) {
+    const float tanV = ft.tv;
+    const float tanH = ft.th;
     // Clamp the request to what the game actually rendered. When the game's frustum is the
     // narrower one we submit the narrower FOV rather than stretching to fill: a correct
     // tunnel-vision image beats a warped full-width one, and the log says so.
@@ -136,6 +178,7 @@ Crop MakeCrop(float gameFovY, float aspect, const VRFov& want) {
     c.fov = {std::atan(l), std::atan(r), std::atan(u), std::atan(d)};
     return c;
 }
+
 
 // Tear down GPU-side state. Caller holds g_mtx.
 void ReleaseLocked() {
@@ -201,15 +244,49 @@ bool StereoTakeEyeRequest(StereoEyeRequest& out) {
     return true;
 }
 
+// One-shot event trace, armed when stereo pairs (re)start flowing - NOT on report gaps:
+// gap-arming spent the whole 48-event budget on mono-phase pushes (19:44 session) and the
+// stereo window it existed for went untraced. The 19:44 trace it did capture named the
+// bug anyway: every pair pushed twice for eye 0, ~10-16 ms apart - see g_lastPopped.
+std::atomic<int> g_repTraceLeft{0};
+void RepTrace(const char* what, int eye, uint64_t pair, const char* note) {
+    int left = g_repTraceLeft.load(std::memory_order_relaxed);
+    while (left > 0 && !g_repTraceLeft.compare_exchange_weak(left, left - 1)) {}
+    if (left > 0)
+        LOGI("[repq] %s e%d p%llu pass%d%s%s", what, eye, (unsigned long long)pair,
+             FramePumpCurrentPass(), note[0] ? " " : "", note);
+}
+
 // Called from every UpdateCamera in the frame; they all carry the frame's latched pair, so
-// repeats coalesce onto one queue entry holding the last (latest) camera state.
+// repeats collapse onto one queue entry holding the last (latest) camera state. The check
+// covers the WHOLE queue, not only the tail: a same-(pair,eye) report arriving after the
+// other eye's was appended escaped the old tail-only coalescing and then sat permanently
+// in front of the pops (one desync + one stale-eye submit per frame, measured 19:15).
 void StereoReportEye(const StereoEyeReport& r) {
     std::lock_guard<std::mutex> g(g_batonMtx);
     g_lastReportTick = GetTickCount64();
-    if (g_repCount > 0) {
-        StereoEyeReport& tail = g_repQ[(g_repHead + g_repCount - 1) % kRepQ];
-        if (tail.pair == r.pair && tail.eye == r.eye) { tail = r; return; }
+    const int e = r.eye & 1;
+    if (g_lastPoppedValid[e] && r.pair <= g_lastPopped[e]) {
+        if (g_lastPopped[e] - r.pair > 1000) {
+            // Pair counter jumped far backwards: the backend restarted its frame counter
+            // (pairs are otherwise monotonic). Forget the watermarks and re-learn.
+            g_lastPoppedValid[0] = g_lastPoppedValid[1] = false;
+        } else {
+            // Late repeat of an already-consumed pair - its image is submitted and gone.
+            g_lateDrops.fetch_add(1, std::memory_order_relaxed);
+            RepTrace("push", r.eye, r.pair, "DROP-LATE");
+            return;
+        }
     }
+    for (int i = 0; i < g_repCount; ++i) {
+        StereoEyeReport& q = g_repQ[(g_repHead + i) % kRepQ];
+        if (q.pair == r.pair && q.eye == r.eye) {
+            q = r;
+            if (i != g_repCount - 1) RepTrace("push", r.eye, r.pair, "REPLACED-DEEP");
+            return;
+        }
+    }
+    RepTrace("push", r.eye, r.pair, "");
     if (g_repCount == kRepQ) { g_repHead = (g_repHead + 1) % kRepQ; --g_repCount; }   // presenting has fallen behind
     g_repQ[(g_repHead + g_repCount) % kRepQ] = r;
     ++g_repCount;
@@ -233,6 +310,7 @@ void ResetReports() {
     std::lock_guard<std::mutex> b(g_batonMtx);
     g_repHead = g_repCount = 0;
     g_submitValid[0] = g_submitValid[1] = false;
+    g_lastPoppedValid[0] = g_lastPoppedValid[1] = false;
 }
 
 bool PopReport(StereoEyeReport& rep) {
@@ -240,12 +318,17 @@ bool PopReport(StereoEyeReport& rep) {
     if (GetTickCount64() - g_lastReportTick > 500) {
         g_repHead = g_repCount = 0;
         g_submitValid[0] = g_submitValid[1] = false;
+        g_lastPoppedValid[0] = g_lastPoppedValid[1] = false;
         return false;
     }
     if (g_repCount == 0) return false;
     rep = g_repQ[g_repHead];
     g_repHead = (g_repHead + 1) % kRepQ;
     --g_repCount;
+    // Watermark under the SAME lock as the pop: any dequeue - take or discard - means this
+    // (pair, eye) is spent, and a repeat push for it must bounce (see g_lastPopped).
+    g_lastPopped[rep.eye & 1] = rep.pair;
+    g_lastPoppedValid[rep.eye & 1] = true;
     return true;
 }
 
@@ -257,9 +340,10 @@ bool PopReport(StereoEyeReport& rep) {
 // (the observed permanent desync storm).
 bool PopReportForEye(int eye, StereoEyeReport& rep) {
     for (int guard = 0; guard <= kRepQ; ++guard) {
-        if (!PopReport(rep)) return false;
-        if ((rep.eye & 1) == eye) return true;
+        if (!PopReport(rep)) { RepTrace("pop ", eye, 0, "EMPTY"); return false; }
+        if ((rep.eye & 1) == eye) { RepTrace("pop ", eye, rep.pair, "take"); return true; }
         g_eyeDesync.fetch_add(1, std::memory_order_relaxed);
+        RepTrace("pop ", eye, rep.pair, "DISCARD-OTHER-EYE");
     }
     return false;
 }
@@ -276,7 +360,8 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
     const float aspect = f.height ? (float)f.width / (float)f.height : 1.777f;
     float fovY = rep.fovY;
     if (Cfg().vrFovAxis == "horizontal") fovY = 2.f * std::atan(std::tan(fovY * 0.5f) / aspect);
-    const Crop cr = MakeCrop(fovY, aspect, want.fov);
+    const FrameTans ft = TrueFrameTans(fovY, f);
+    const Crop cr = MakeCrop(ft, want.fov);
     g_cropU.store(cr.su, std::memory_order_relaxed);
     g_cropV.store(cr.sv, std::memory_order_relaxed);
     // Re-logged whenever the rendered FOV really moves, so the moment the widened Cam_Fov
@@ -286,17 +371,21 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
     if (std::fabs(fovY - s_loggedFov) > 0.02f) {
         s_loggedFov = fovY;
         const float ipd = (want.pose.pos * 2.f).Length();
-        LOGI("[stereo] game fov %.1f deg (%s axis, raw %.3f rad) at aspect %.2f, ipd %.1f mm; "
-             "runtime wants L%.1f R%.1f U%.1f D%.1f deg -> crop %.0f%%x%.0f%% of %ux%u = "
-             "%.0fx%.0f px per eye%s",
-             Rad2Deg(fovY), Cfg().vrFovAxis.c_str(), rep.fovY, aspect, ipd * 1000.f,
+        LOGI("[stereo] game fov %.1f deg (%s axis, raw %.3f rad), frame %ux%u ref height "
+             "%.0f (true extents H%.0f V%.0f deg), ipd %.1f mm; runtime wants L%.1f R%.1f "
+             "U%.1f D%.1f deg -> crop %.0f%%x%.0f%% = %.0fx%.0f px per eye%s",
+             Rad2Deg(fovY), Cfg().vrFovAxis.c_str(), rep.fovY, f.width, f.height,
+             RasterRefHeight(f),
+             Rad2Deg(std::atan(ft.th)) * 2.f,
+             Rad2Deg(std::atan(ft.tv)) * 2.f, ipd * 1000.f,
              Rad2Deg(want.fov.angleLeft), Rad2Deg(want.fov.angleRight),
              Rad2Deg(want.fov.angleUp), Rad2Deg(want.fov.angleDown),
-             cr.su * 100.f, cr.sv * 100.f, f.width, f.height,
+             cr.su * 100.f, cr.sv * 100.f,
              cr.su * f.width, cr.sv * f.height,
              (cr.su > 0.995f && cr.sv > 0.995f)
-                 ? " -- CLAMPED: the game's frustum is still narrower than the headset's; the "
-                   "Cam_Fov write is not reaching the renderer" : "");
+                 ? " -- CLAMPED: the game's frustum is narrower than the headset's; either "
+                   "the Cam_Fov write is not reaching the renderer or the ref height is wrong"
+                 : "");
     }
 
     // Size the eye images to the pixels we can actually deliver. Asking for the runtime's
@@ -335,8 +424,10 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
 void PublishEyeRequest(IVRBackend* vr, const Dx12Frame& f, const VRFrameInfo& fi) {
     VREyeView rel[2];
     if (!vr->LocateEyeOffsets(fi.displayTimeNs, rel)) return;
+    float fovWrite = RequiredFovY(rel, f);
+    // FovAxis=horizontal: same reference-height frustum, the field just names the other
+    // axis - the ratio between the two is width/height whatever the reference is.
     const float aspect = f.height ? (float)f.width / (float)f.height : 1.777f;
-    float fovWrite = RequiredFovY(rel, aspect);
     if (Cfg().vrFovAxis == "horizontal") fovWrite = 2.f * std::atan(std::tan(fovWrite * 0.5f) * aspect);
     if (Cfg().vrFovDeg > 1.f) fovWrite = Deg2Rad(Cfg().vrFovDeg);   // explicit override
     fovWrite = Clamp(fovWrite, 0.1f, 3.1f);                         // the game's own sanity range
@@ -485,6 +576,9 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
     // [VR] FadeGuard, DEFAULT OFF: the luma readback inside the present event is the
     // D3D12Core+0x11f85 crash (2026-08-21: 100% VR startup crash ~3 s in). See config.h.
     if (Cfg().vrFadeGuard) FadeGuardSample(f);
+    // A present with the pass tag at 2 is the proof the engine ran the second pass all the
+    // way to Flip; the pump's wedged-runner watchdog warns when this stops arriving.
+    if (FramePumpCurrentPass() == 2) FramePumpNotePass2Present();
     // ER's renderer may be pipelined one present deep - the image a Present carries can be
     // the PREVIOUS pass's render, in which case eye content is cross-routed and both eyes
     // shimmer (each image is submitted with the other camera's pose). PresentLag selects
@@ -517,6 +611,8 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
         }
         if (g_pumpStalled) {
             g_pumpStalled = false;
+            // Trace the first 48 queue events of the window that matters: live stereo pops.
+            g_repTraceLeft.store(48, std::memory_order_relaxed);
             LOGI("[stereo] second pass is back; stereo pairs resume");
         }
         g_lastOpenTick = GetTickCount64();
@@ -710,6 +806,7 @@ StereoStats StereoGetStats() {
     s.eyeBlitL = g_eyeBlits[0].exchange(0);
     s.eyeBlitR = g_eyeBlits[1].exchange(0);
     s.eyeDesync = g_eyeDesync.exchange(0);
+    s.lateDrops = g_lateDrops.exchange(0);
     s.hudFrames = g_hudFrames.exchange(0);
     s.monoStalls = g_monoStalls.exchange(0);
     s.lastSubmitMs = g_lastSubmitMs.load();

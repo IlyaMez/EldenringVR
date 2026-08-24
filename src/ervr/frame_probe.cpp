@@ -15,6 +15,7 @@
 #include "debug_keys.h"
 #include "dx12_blit.h"
 #include "game_er.h"
+#include "virtual_pad.h"
 #include "patches_er.h"
 #include "game_memory.h"
 #include "stereo.h"
@@ -632,6 +633,10 @@ void* volatile g_qtArgB = nullptr;   // receives every frame (b+0x18 = id->task_
 volatile long g_pumpMode = 0;    // 0 off | 1 experiment: unconditional | 2 stereo: when a 2nd eye is stashed
 volatile long g_pumpPasses = 0;
 std::atomic<int> g_curPass{1};   // 1 = real frame, 2 = draw-only second pass
+// Last present that arrived while g_curPass == 2 (stereo.cpp reports it). "Pass 2 called"
+// and "engine actually ran pass 2 to Flip" are different facts - the 2026-08-22 wedged-
+// runner incident is the proof - and this is the evidence for the second one.
+std::atomic<ULONGLONG> g_p2PresentTick{0};
 std::atomic<float> g_pumpLastMs{0.f};
 DWORD g_qtThread = 0;            // the main-loop thread queue_tasks runs on
 
@@ -1102,28 +1107,128 @@ void RestoreDtSlots(uint8_t* a, uint8_t* b, uint32_t mask, uint32_t expectBits) 
 // Set by FlowTransitionCheck (defined below, run at every pass-1 entry) whenever the
 // ENGINE changes a task-group active byte - a gameflow transition marker.
 ULONGLONG g_flowChangeTick = 0;
+// Last frame a WORLD-DISTURBING pass-2 guard held (menu-only holds do not stamp this - see
+// menuHold in DoSecondPass). For vrPass2SafeSeconds after this, pass 2 runs the SAFE keep
+// set (no MoveMap_PostPhysics family): the world is still settling after whatever the
+// guard was for, and that family walking a settling world is every transition crash of
+// 2026-08-22. Cost: depth returns ~20 s after loads instead of instantly.
+ULONGLONG g_lastHoldTick = 0;
+std::atomic<bool> g_safeSetActive{false};
+
+// Menu-resume grace. Full-screen menus stop the game stashing second-eye cameras (those
+// frames are single-pass by design) - and the map, the only road to fast travel, is such a
+// menu. Both 2026-08-22 headset crashes fired within ~200 ms of the travel CONFIRM: the map
+// closes, stashing resumes that same instant, and pass 2 ran straight into the transfer
+// request (pass-1 null deref at exe+0xc7f88b). FOV-based menu detection failed twice
+// because its probe - our per-frame FOV write - is disabled on exactly those single-pass
+// frames; the stash gap is the signal that cannot lie. A gap longer than ~0.7 s is a real
+// menu (single dropped frames happen; menus last seconds), and when the stash returns,
+// pass 2 stays out for 6 more seconds: long enough to bridge a confirm into the fade and
+// the player-null teardown that follow, short enough that closing the map without
+// traveling costs only a moment of mono.
+bool MenuResumeGraceActive() {
+    static ULONGLONG s_gapStart = 0;
+    static ULONGLONG s_graceUntil = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!GameERSecondEyePending()) {
+        if (!s_gapStart) s_gapStart = now;
+    } else {
+        if (s_gapStart && now - s_gapStart > 700) {
+            s_graceUntil = now + (ULONGLONG)(Cfg().vrPass2MenuGraceSeconds * 1000.f);
+            LOGI("[stereo] second-eye stash resumed after a %llu ms gap (menu closed) - "
+                 "%.0f s grace before pass 2", (unsigned long long)(now - s_gapStart),
+                 Cfg().vrPass2MenuGraceSeconds);
+        }
+        s_gapStart = 0;
+    }
+    return now < s_graceUntil;
+}
 
 void DoSecondPass(void* self, void* a, void* b) {
     // Stereo mode: only pump frames for which the game stashed the second eye's camera -
     // and write that camera FIRST, while every writer is quiescent. Menus, loading and
     // cinema mode simply never stash one, so those frames stay single-pass.
-    if (g_pumpMode == 2) {
+    // The guard block runs for production stereo (mode 2) AND for the ForcePass2 test
+    // harness (mode 1 with the flag set). That is what makes the harness meaningful: the
+    // 2026-08-22 headless repro crashed at the exact production address precisely BECAUSE
+    // mode 1 used to skip these guards - so a guard change validated under ForcePass2 is
+    // validated for the real thing.
+    if (g_pumpMode == 2 || (g_pumpMode == 1 && Cfg().m2ForcePass2 && !Cfg().m2Pass2NoGuards)) {
+        // Which guard (if any) is holding pass 2 out, logged only when the answer CHANGES.
+        // Without this a warp crash is undiagnosable after the fact: the log cannot say
+        // whether a guard fired too late or never fired at all, which is exactly the hole
+        // that made the 2026-08-22 crash hunt take three attempts. One line per transition
+        // is free - normal play never changes state.
+        const char* hold = nullptr;
+        // A hold that is ONLY about a menu being (or having just been) open. The world was
+        // never disturbed, so it does not stamp the SAFE settle timer below: stamping it
+        // bought 20 s of SAFE after every map peek and inventory close, which - together
+        // with the ungated A-window - kept the 19:44 session bouncing SAFE<->full all
+        // session (the visible flat/stereo popping). A menu that DOES lead to travel runs
+        // into the teleport/flow/fade/player-null guards, and those still stamp.
+        bool menuHold = false;
+        // Ticked EVERY frame, not inside the else-if chain: the gap tracker has to see the
+        // stash reappear even while another guard is holding, or it re-arms with stale
+        // state after every load and taxes the respawn with 6 extra mono seconds.
+        const bool menuGrace = g_pumpMode == 2 && MenuResumeGraceActive();
+        // Sampled EVERY frame (not inside the else-if chain) so the warp latch arms and the
+        // signal edges get logged even while another guard already holds - a transition
+        // postmortem needs the full signal timeline, and the latch must not miss a flag
+        // that is set and consumed while e.g. the death guard is the one holding.
+        const bool warpGuard = GameERWarpGuardActive();
+        static ULONGLONG s_lastInactive = GetTickCount64();
         // Spawn/teleport guard: pumping within seconds of the player appearing crashed the
         // game at exe+0x1e8b0bc (a draw fn reading a per-frame input that the spawn-fade
         // machinery - gated in pass 2 - had not produced). Give every player-inactive ->
         // active transition a grace period before the second pass resumes.
-        static ULONGLONG s_lastInactive = GetTickCount64();
-        if (!GameERPlayerActive()) { s_lastInactive = GetTickCount64(); return; }
-        if (GetTickCount64() - s_lastInactive < 8000) return;
+        if (!GameERPlayerActive()) { s_lastInactive = GetTickCount64(); hold = "player-null (world torn down)"; }
+        // Death guard: HP hit 0, so a death warp starts THIS frame. The only guard that can
+        // cover the request frame of a death - everything below reacts to consequences.
+        else if (!Cfg().m2Pass2NoDeadGuard && GameERPlayerDead()) hold = "player dead (death warp incoming)";
+        // Configurable since 2026-08-22 evening (was a hardcoded 15 s): both crashes that
+        // sized it - the spawn-fade draw crash exe+0x1e8b0bc (re-attributed to the readback
+        // experiment) and the 11 s arrival crash exe+0xc7f88b (root cause: the blanket
+        // keep-set restore, fixed) - have root causes that no longer exist, and the user
+        // asked for depth sooner. See config.h at vrPass2SpawnGraceSeconds.
+        else if (GetTickCount64() - s_lastInactive <
+                 (ULONGLONG)(Cfg().vrPass2SpawnGraceSeconds * 1000.f)) hold = "player-respawn grace";
+        // Warp-request guard (2026-08-23, the fundamental transition signal): the game's
+        // own GameMan.warp_requested byte, set on the request frame of every warp - the
+        // exact frame the A-press heuristic (Pass2SafeOnA) was built to approximate, with
+        // zero false positives from ordinary interact/jump presses. Latched for
+        // Pass2WarpGraceSeconds so the hold bridges into player-null/loading below.
+        else if (warpGuard) hold = "warp requested (GameMan flag)";
+        // Loading-screen guard: the community loading byte - TRUE for the whole teardown/
+        // stream/rebuild window. State, not a timer: releases the moment the world is back.
+        else if (GameERLoadingScreen()) hold = "loading screen (event byte)";
+        // Foreign-camera guard: a menu/cutscene camera owns the FOV. The map screen is the
+        // only road to fast travel, so this is what covers the fast-travel REQUEST frame -
+        // the window where the 13:58 crash fired with no guard holding.
+        else if (GameERForeignCamActive()) { hold = "foreign camera (map/cutscene)"; menuHold = true; }
+        // Stash-gap guard: a menu just closed (see MenuResumeGraceActive above). This is
+        // what covers the fast-travel confirm - the frame the map closes on.
+        else if (menuGrace) { hold = "menu-resume grace"; menuHold = true; }
         // Teleport guard: fast travel tears the world down around a still-active player;
         // running a second pass in that window fires (previously fatal) engine asserts.
-        if (GameERTeleportGraceActive()) return;
+        else if (GameERTeleportGraceActive()) hold = "teleport grace";
         // Flow-transition guard: the engine flipped task lines recently (map transfer,
         // cutscene, flow change) - the world is mid-transition, sit the pass out.
-        if (g_flowChangeTick && GetTickCount64() - g_flowChangeTick < 2500) return;
+        else if (g_flowChangeTick && GetTickCount64() - g_flowChangeTick < 2500) hold = "flow transition";
         // Fade guard: the screen just faded to black - fast travel / death warp teardown
         // is underway (both fast-travel crashes fired in exactly this window).
-        if (StereoFadeGuardActive()) return;
+        else if (StereoFadeGuardActive()) hold = "fade guard";
+        {
+            static const char* s_prevHold = nullptr;
+            if (hold != s_prevHold) {
+                if (hold) LOGI("[stereo] pass 2 SUSPENDED: %s", hold);
+                else      LOGI("[stereo] pass 2 resumed (no guard holding; SAFE keep set for "
+                               "%.0f s, then full stereo depth)", Cfg().vrPass2SafeSeconds);
+                s_prevHold = hold;
+            }
+        }
+        if (hold) { if (!menuHold) g_lastHoldTick = GetTickCount64(); return; }
+    }
+    if (g_pumpMode == 2) {
         if (!GameERApplySecondEyeCamera()) return;
     }
     // Content probe (experiment mode): make pass 2's render unmistakable - the harness then
@@ -1144,7 +1249,20 @@ void DoSecondPass(void* self, void* a, void* b) {
     const bool fullFrame = keyFF >= 0 ? keyFF != 0 : Cfg().vrPass2FullFrame;
     float dtSaved = 0.f;
     bool dtSwapped = false;
-    const bool* keepSet = Pass2KeepSet(fullFrame ? Cfg().vrPass2FullFrameKeep : Cfg().vrPass2Keep);
+    const ULONGLONG nowTick = GetTickCount64();
+    const ULONGLONG aTick = VirtualPadLastATick();
+    const bool inSettle =
+        (g_lastHoldTick && nowTick - g_lastHoldTick < (ULONGLONG)(Cfg().vrPass2SafeSeconds * 1000.f)) ||
+        // A-press window: fast-travel (and every other dangerous confirm) is an A press.
+        (Cfg().vrPass2SafeOnA > 0.f && aTick &&
+         nowTick - aTick < (ULONGLONG)(Cfg().vrPass2SafeOnA * 1000.f));
+    // SAFE is also simply "the configured full set IS the safe set" - the intended end
+    // state once the finalize replay proves depth without the MoveMap family.
+    const bool useSafe = inSettle || Cfg().vrPass2FullFrameKeep == Cfg().vrPass2SafeKeep;
+    g_safeSetActive.store(fullFrame && useSafe, std::memory_order_relaxed);
+    const bool* keepSet = Pass2KeepSet(!fullFrame     ? Cfg().vrPass2Keep
+                                       : useSafe      ? Cfg().vrPass2SafeKeep
+                                                      : Cfg().vrPass2FullFrameKeep);
     // Pass2Dt <= 0 = HALF-DT MODE: no freeze attempt at all. The production combination is
     // [Patches] FpsTarget=120 + full-frame pass 2: each engine frame advances 1/120 s, so a
     // stereo PAIR advances exactly 1/60 - realtime by construction, every system at correct
@@ -1193,42 +1311,21 @@ void DoSecondPass(void* self, void* a, void* b) {
     uint32_t stepsSaved = 0; bool stepsSwapped = false;
     uint32_t dstSaved[4] = {}; uint32_t dstMask = 0;
     uint64_t bakedSaved[32] = {}; uint32_t bakedMask = 0;
-    // FD4TaskData dt swap - the ACTUAL consumer path (IgtTrace 2026-08-21: task bodies read
-    // dt from their FD4TaskData at +0x8 via `movss xmm0,[rdi+8]`, and the queue_tasks args
-    // ARE the task-data blocks). The value is MEASURED wall dt - which is why the original
-    // bit-exact scan for the 1/60 pattern missed it. Offsets found once by range-match, then
-    // re-verified by range every pass (a value that stopped looking like a dt is skipped).
-    static struct { int base; uint32_t off; } s_fd4[16];
-    static int s_fd4N = -1;
+    // What is deliberately NOT here any more: the FD4TaskData arg-block offset scan. It
+    // range-matched "looks like a dt" floats in the queue_tasks arg blocks at whatever
+    // instant the first pass 2 ran, then blind-wrote 1e-6 into every match around each
+    // pass. Every healthy session ever logged found 0 matches (the freeze below works
+    // without it); the one session where it found matches (11 of them, 2026-08-22 17:58)
+    // corrupted live task state mid-pass: the engine never completed a second pass again
+    // (permanent cinema mode), PadStep died with it (XInputGetState calls -> 0, controls
+    // dead), and the wedged frame state crashed the game 90 s later in a foot-effect task.
+    // A heuristic whose only observed contributions are nothing or catastrophe earns
+    // deletion, not a tweak.
     static float* s_dtGlobal = nullptr;
     static bool s_dtGlobalTried = false;
-    uint32_t fd4Saved[16] = {}; uint32_t fd4Mask = 0;
     uint32_t dtGSaved = 0; bool dtGSwapped = false;
     if (fullFrame && Cfg().vrPass2Steps >= 0) {
-        uint8_t* fdBases[2] = {(uint8_t*)a, (uint8_t*)b};
-        if (s_fd4N < 0) {
-            s_fd4N = 0;
-            char msg[192]; int mp = 0; msg[0] = 0;
-            for (int bi = 0; bi < 2; ++bi) {
-                if (!fdBases[bi]) continue;
-                for (uint32_t o = 0; o + 4 <= 0x100 && s_fd4N < 16; o += 4) {
-                    uint32_t bits;
-                    if (!TryReadU32(fdBases[bi] + o, &bits)) break;
-                    if (PlausibleDtF(bits)) {
-                        s_fd4[s_fd4N++] = {bi, o};
-                        mp += snprintf(msg + mp, sizeof(msg) - mp, " %c+0x%x", bi ? 'b' : 'a', o);
-                    }
-                }
-            }
-            LOGI("[stereo] FD4TaskData dt scan: %d in-range float(s):%s", s_fd4N, msg);
-        }
         const float tiny = 1e-6f; uint32_t tb; memcpy(&tb, &tiny, 4);
-        for (int i = 0; i < s_fd4N; ++i) {
-            uint8_t* p = fdBases[s_fd4[i].base] + s_fd4[i].off;
-            uint32_t cur;
-            if (!TryReadU32(p, &cur) || !PlausibleDtF(cur)) continue;
-            if (TryWriteU32(p, tb)) { fd4Saved[i] = cur; fd4Mask |= 1u << i; }
-        }
         // THE frame-dt global (fd4-builder disasm, 2026-08-21, exe+0x26d5500): every task
         // invocation builds its FD4TaskData ON THE STACK and copies dt from ONE static
         // float (2.6.2.0: exe+0x3C62508) - `lea rax,[vftable]; mov [rsp+28],rax; movss
@@ -1355,18 +1452,60 @@ void DoSecondPass(void* self, void* a, void* b) {
                  (dstMask & 8) ? "swapped" : "miss", bakedMask, Cfg().vrPass2Steps);
         }
     }
+    // Gate, run, restore. The restore is the delicate half: g_origQueueTasks below runs a
+    // COMPLETE engine frame, and the engine's own flow machine changes task-group active
+    // states inside it - which is exactly what a warp does the instant it is requested.
+    // The original code snapshotted all 169 bytes and wrote ALL of them back afterwards,
+    // so any state change the engine made during pass 2 was silently reverted to its
+    // pre-pass value. That is the fast-travel/death crash (2026-08-22): the transfer
+    // flipped its task lines, we put them back, and the next PASS 1 frame ran the warp
+    // with a task configuration the engine had already moved on from -> null deref at
+    // exe+0xc7f88b, reported in pass 1, which is why it never reproduced with only the
+    // second pass forced on.
+    // It is also why FlowTransitionCheck never once fired: it samples at pass-1 entry,
+    // by which point this restore had already erased the very change it was looking for.
+    //
+    // So: only ever write back groups WE gated, and only where the byte is still the 0 we
+    // wrote. Anything the engine touched during the pass keeps the engine's value.
     uint8_t saved[256];
+    bool    gated[256] = {};
     const int n = g_table.count < 256 ? g_table.count : 256;
-    for (int i = 0; i < n; ++i) saved[i] = ReadActiveRaw(i);
-    for (int i = 0; i < n; ++i)
-        if (!keepSet[i]) WriteActiveRaw(i, 0);
+    for (int i = 0; i < n; ++i) {
+        saved[i] = ReadActiveRaw(i);
+        if (!keepSet[i]) { gated[i] = true; WriteActiveRaw(i, 0); }
+    }
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
     g_curPass.store(2, std::memory_order_release);
     g_origQueueTasks(self, a, b);
+    // Pass 2 is complete: finish and push the second eye's report with the camera its
+    // render really used (stashed by GameERApplySecondEyeCamera before the pass). Done
+    // while the pass tag still reads 2 and before the keep-set restore below.
+    GameERFinalizePassReport();
     g_curPass.store(1, std::memory_order_release);
     QueryPerformanceCounter(&t1);
-    for (int i = 0; i < n; ++i) WriteActiveRaw(i, saved[i]);
+    int engineChanged = 0;
+    for (int i = 0; i < n; ++i) {
+        const uint8_t now = ReadActiveRaw(i);
+        if (gated[i]) {
+            // Still the 0 we wrote -> ours to undo. Anything else means the engine set it
+            // DURING the pass; its value is the current truth and must survive.
+            if (now == 0) WriteActiveRaw(i, saved[i]);
+            else ++engineChanged;
+        } else if (now != saved[i]) {
+            ++engineChanged;   // never touched by us; nothing to do but count it
+        }
+    }
+    // An engine-made change during pass 2 IS the world-transition signal this file has been
+    // missing - the earliest one available, and it fires on the frame the warp is requested.
+    if (engineChanged) {
+        g_flowChangeTick = GetTickCount64();
+        static long s_logged = 0;
+        if (s_logged < 24 && ++s_logged)
+            LOGI("[stereo] engine changed %d task-group state(s) during pass 2 - world "
+                 "transition; their values kept, pass 2 suspended briefly",
+                 engineChanged);
+    }
     if (stepsSwapped) {
         if (uint8_t* s = g_dtStruct.load(std::memory_order_acquire))
             TryWriteU32(s + 0x18, stepsSaved);
@@ -1379,9 +1518,6 @@ void DoSecondPass(void* self, void* a, void* b) {
         if (g_baked[i].dbl) TryWriteU64(g_baked[i].p, bakedSaved[i]);
         else                TryWriteU32(g_baked[i].p, (uint32_t)bakedSaved[i]);
     }
-    { uint8_t* fdBases[2] = {(uint8_t*)a, (uint8_t*)b};
-      for (int i = 0; i < s_fd4N; ++i)
-          if (fd4Mask & (1u << i)) TryWriteU32(fdBases[s_fd4[i].base] + s_fd4[i].off, fd4Saved[i]); }
     if (dtGSwapped) TryWriteU32((uint8_t*)s_dtGlobal, dtGSaved);
     if (dtSlotMask) RestoreDtSlots((uint8_t*)a, (uint8_t*)b, dtSlotMask, dtBits);
     if (dtSwapped) PatchesWriteFrameDt(dtSaved);
@@ -1392,6 +1528,28 @@ void DoSecondPass(void* self, void* a, void* b) {
     g_pumpLastMs.store((float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart),
                        std::memory_order_relaxed);
     InterlockedIncrement(&g_pumpPasses);
+    // Watchdog: pass 2 was CALLED, but did the engine actually run it? In the 2026-08-22
+    // incident the first (corrupted) pass wedged the frame runner mid-frame and every later
+    // queue_tasks call returned as a no-op - pass 2 "ran" 72x a second, cost 0.0 ms, and
+    // never reached Flip, so no pass-2 present ever arrived and the session sat in cinema
+    // mode with nothing in the log saying why. This says why.
+    {
+        static ULONGLONG s_firstAttempt = 0, s_lastAttempt = 0, s_lastWarn = 0;
+        const ULONGLONG now = GetTickCount64();
+        // A >2 s gap in attempts (menu, guard window) starts a fresh episode, so the first
+        // attempt after a long menu is not measured against a present from before it.
+        if (!s_firstAttempt || now - s_lastAttempt > 2000) s_firstAttempt = now;
+        s_lastAttempt = now;
+        const ULONGLONG seen = g_p2PresentTick.load(std::memory_order_relaxed);
+        const ULONGLONG ref = seen > s_firstAttempt ? seen : s_firstAttempt;
+        if (now - ref > 5000 && now - s_lastWarn > 60000) {
+            s_lastWarn = now;
+            LOGW("[stereo] pass 2 is being called but the engine never runs it to Flip (no "
+                 "pass-2 present for %llu s) - frame runner wedged mid-frame? The headset "
+                 "stays on the flat quad; a game restart clears it.",
+                 (unsigned long long)((now - ref) / 1000));
+        }
+    }
     if (g_winTrace.load(std::memory_order_relaxed)) {
         const int i = g_p2N.fetch_add(1, std::memory_order_relaxed);
         if (i < 256) g_p2Win[i] = {t0.QuadPart, t1.QuadPart};
@@ -1456,6 +1614,10 @@ uint64_t __fastcall Hook_QueueTasks(void* self, void* a, void* b) {
     }
     if (!g_qtThread) g_qtThread = GetCurrentThreadId();
     const uint64_t r = g_origQueueTasks(self, a, b);
+    // Pass 1 is complete (every camera writer ran, Flip presented): finish and push its eye
+    // report with the camera the renderer really used. Must precede DoSecondPass, which
+    // stashes pass 2's own pending report.
+    GameERFinalizePassReport();
     if (g_winTrace.load(std::memory_order_relaxed)) {
         LARGE_INTEGER tm; QueryPerformanceCounter(&tm);
         const int k = g_p1N.fetch_add(1, std::memory_order_relaxed);
@@ -1971,7 +2133,7 @@ bool FrameProbeSetActiveApi(int index, bool active) {
 
 void FrameProbeTick() {
     const bool fullStereo = Cfg().vrStereoMode == "full";
-    if (!Cfg().m2TaskProbe && !fullStereo) return;
+    if (!Cfg().m2TaskProbe && !fullStereo && !Cfg().m2ForcePass2) return;
     if (g_started.exchange(true)) return;
     // Its OWN thread, deliberately. This can scan a lot; the worker thread it used to run on
     // also drives BackendsTick(), so blocking there meant xrCreateInstance never ran and the
@@ -1981,7 +2143,18 @@ void FrameProbeTick() {
         for (int attempt = 1; attempt <= 6; ++attempt) {
             if (RunOnce(attempt)) {
                 InstallIgtTrace();
-                if (fullStereo) {
+                // Test harness: unconditional second pass, no headset needed. Checked
+                // BEFORE the stereo arm so it wins if both are set.
+                if (Cfg().m2ForcePass2) {
+                    QueueTasksProbeInstall(true);
+                    if (g_origQueueTasks) {
+                        g_pumpMode = 1;
+                        LOGW("[stereo] ForcePass2: second pass runs UNCONDITIONALLY (test "
+                             "harness; no XR, no second-eye camera)");
+                    } else {
+                        LOGW("[stereo] ForcePass2 requested but the queue_tasks hook failed");
+                    }
+                } else if (fullStereo) {
                     // Production: install the frame-driver hook and arm the stereo pump.
                     // Pass 2 only runs on frames where the game stashed a second eye, so
                     // this is inert until an OpenXR session is live and requesting stereo.
@@ -2043,6 +2216,8 @@ uint8_t* FramePumpDtWatchTarget(uint32_t* outLen) {
 }
 
 bool FramePumpReady() { return g_origQueueTasks != nullptr && g_pumpMode == 2; }
+void FramePumpNotePass2Present() { g_p2PresentTick.store(GetTickCount64(), std::memory_order_relaxed); }
+bool FramePumpSafeSetActive() { return g_safeSetActive.load(std::memory_order_relaxed); }
 int  FramePumpCurrentPass() { return g_curPass.load(std::memory_order_acquire); }
 long FramePumpTakePasses() { return InterlockedExchange(&g_pumpPasses, 0); }
 float FramePumpLastMs() { return g_pumpLastMs.load(std::memory_order_relaxed); }

@@ -1,8 +1,12 @@
 #include "reshade_addon.h"
+#include "config.h"
+#include "dx12_blit.h"
 #include "frame_probe.h"
 #include "hud.h"
+#include "patches_er.h"
 #include "stereo.h"
 #include "log.h"
+#include <string>
 #include <windows.h>
 #include <d3d12.h>
 #include <atomic>
@@ -46,6 +50,12 @@ void OnDestroyDevice(reshade::api::device*) {
     StereoOnDeviceLost();
 }
 
+// The FIRST swapchain's size, before any resize. The game builds its raster projection for
+// this boot frame and never rebuilds it when the late settings-apply resizes the window
+// larger (measured 2026-08-22 by flat A/B: identical px-per-degree at 3072x3264 vs
+// 2560x1440) - so this size is the reference the eye-crop geometry needs.
+std::atomic<uint32_t> g_firstW{0}, g_firstH{0};
+
 void OnInitSwapchain(reshade::api::swapchain* sc, bool resize) {
     reshade::api::device* dev = sc->get_device();
     if (dev->get_api() != reshade::api::device_api::d3d12) return;
@@ -55,9 +65,27 @@ void OnInitSwapchain(reshade::api::swapchain* sc, bool resize) {
     g_width.store(d.texture.width);
     g_height.store(d.texture.height);
     g_format.store((uint32_t)d.texture.format);
+    // A resize is by definition not the boot swapchain - recording one here is exactly the
+    // mistake that neutered the raster-reference model in the 19:04 session.
+    if (!resize) {
+        uint32_t expect = 0;
+        if (g_firstH.compare_exchange_strong(expect, d.texture.height))
+            g_firstW.store(d.texture.width);
+    }
     LOGI("[reshade] swapchain %ux%u fmt %u buffers %u%s", d.texture.width, d.texture.height,
          (unsigned)d.texture.format, sc->get_back_buffer_count(), resize ? " (resize)" : "");
+    // Once the oversized back buffer exists, the desktop-size lies have done their job and
+    // must stop (they cause the vertical head-motion warp when left standing).
+    PatchesNoteBackbufferSize(d.texture.width, d.texture.height);
     if (resize) StereoOnSwapchainResize();
+}
+
+bool FirstSwapchainSizeImpl(uint32_t& w, uint32_t& h) {
+    const uint32_t fh = g_firstH.load(std::memory_order_relaxed);
+    if (!fh) return false;
+    w = g_firstW.load(std::memory_order_relaxed);
+    h = fh;
+    return true;
 }
 
 void OnDestroySwapchain(reshade::api::swapchain*, bool resize) {
@@ -89,6 +117,19 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* sc,
     f.width  = d.texture.width;
     f.height = d.texture.height;
     f.format = (DXGI_FORMAT)d.texture.format;   // reshade::api::format values match DXGI_FORMAT
+    // First-size capture HERE too, not only in the init event: the add-on registers ~1 s
+    // into the session and can miss the boot swapchain's init entirely (measured 19:04
+    // session - the first init it saw was the +10 s RESIZE, so the "boot size" recorded as
+    // 3264 and the raster-reference model neutered itself). Presents run from registration
+    // on, a good ~8 s before the resize, so the first present is a reliable boot witness.
+    if (!g_firstH.load(std::memory_order_relaxed)) {
+        uint32_t expect = 0;
+        if (g_firstH.compare_exchange_strong(expect, d.texture.height)) {
+            g_firstW.store(d.texture.width);
+            LOGI("[reshade] boot frame recorded: %ux%u (raster reference height %u)",
+                 d.texture.width, d.texture.height, d.texture.height);
+        }
+    }
 
     if (g_queue.exchange(f.queue) != f.queue)
         LOGI("[reshade] present queue %p (type %u)", (void*)f.queue, (unsigned)queue->get_type());
@@ -103,6 +144,26 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* sc,
         }
     }
 
+    // One-shot raw back-buffer dump ([Experimental] DumpBackbufferAt): desktop screenshots
+    // are post-DWM window scaling, which normalizes away exactly what a raster probe asks
+    // (which aspect the projection really rasterized with). This is the buffer itself.
+    {
+        static ULONGLONG s_t0 = GetTickCount64();
+        static bool s_dumped = false;
+        const float at = Cfg().expDumpBackbufferAt;
+        if (!s_dumped && at > 0.f && GetTickCount64() - s_t0 > (ULONGLONG)(at * 1000.f)) {
+            s_dumped = true;
+            std::wstring p = Cfg().iniPath;
+            const size_t sl = p.find_last_of(L"\\/");
+            p = (sl == std::wstring::npos ? std::wstring() : p.substr(0, sl + 1)) + L"backbuffer.ppm";
+            if (Dx12DumpBackbuffer(f.queue, f.backBuffer, p.c_str()))
+                LOGI("[reshade] back buffer dumped: %ux%u fmt %u -> backbuffer.ppm",
+                     f.width, f.height, (unsigned)f.format);
+            else
+                LOGW("[reshade] back buffer dump FAILED (%ux%u fmt %u)",
+                     f.width, f.height, (unsigned)f.format);
+        }
+    }
     // Before the stereo path consumes the capture: optionally paint the panel onto the
     // game's own frame, so the monitor shows what the headset gets ([HUD] MirrorPanel).
     HudMirrorPanel(f);
@@ -133,6 +194,8 @@ bool ReShadeAddonInstall(void* selfModule) {
 }
 
 bool ReShadeAddonInstalled() { return g_registered.load(); }
+
+bool ReShadeFirstSwapchainSize(uint32_t& w, uint32_t& h) { return FirstSwapchainSizeImpl(w, h); }
 
 void ReShadeAddonShutdown() {
     if (!g_registered.exchange(false)) return;

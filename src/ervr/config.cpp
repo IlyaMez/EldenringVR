@@ -91,16 +91,27 @@ void Config::Load(const std::wstring& path) {
     vrXrDebug        = GetB(ini, L"VR", L"XrDebug", vrXrDebug);
     vrFovDeg         = GetF(ini, L"VR", L"FovDeg", vrFovDeg);
     vrFovAxis        = GetS(ini, L"VR", L"FovAxis", vrFovAxis);
+    vrGameRasterRefHeight = GetF(ini, L"VR", L"GameRasterRefHeight", vrGameRasterRefHeight);
     vrIpdMm          = GetF(ini, L"VR", L"IpdMm", vrIpdMm);
     vrColorFix       = GetS(ini, L"VR", L"ColorFix", vrColorFix);
     vrGameRes        = GetS(ini, L"VR", L"GameRes", vrGameRes);
     vrGameResScale   = GetF(ini, L"VR", L"GameResScale", vrGameResScale);
     vrGameResOversize = GetB(ini, L"VR", L"GameResOversize", vrGameResOversize);
+    vrGameResScan    = GetB(ini, L"VR", L"GameResScan", vrGameResScan);
+    vrGameResScanSeconds = GetF(ini, L"VR", L"GameResScanSeconds", vrGameResScanSeconds);
     vrGameResAspectFix = GetB(ini, L"VR", L"GameResAspectFix", vrGameResAspectFix);
     vrPass2Keep      = GetS(ini, L"VR", L"Pass2Keep", vrPass2Keep);
     vrPass2FullFrame = GetB(ini, L"VR", L"Pass2FullFrame", vrPass2FullFrame);
     vrPass2Dt        = GetF(ini, L"VR", L"Pass2Dt", vrPass2Dt);
     vrPass2FullFrameKeep = GetS(ini, L"VR", L"Pass2FullFrameKeep", vrPass2FullFrameKeep);
+    vrPass2SafeKeep = GetS(ini, L"VR", L"Pass2SafeKeep", vrPass2SafeKeep);
+    vrPass2SafeSeconds = GetF(ini, L"VR", L"Pass2SafeSeconds", vrPass2SafeSeconds);
+    vrPass2SpawnGraceSeconds = GetF(ini, L"VR", L"Pass2SpawnGraceSeconds", vrPass2SpawnGraceSeconds);
+    vrPass2MenuGraceSeconds = GetF(ini, L"VR", L"Pass2MenuGraceSeconds", vrPass2MenuGraceSeconds);
+    vrPass2WarpGraceSeconds = GetF(ini, L"VR", L"Pass2WarpGraceSeconds", vrPass2WarpGraceSeconds);
+    vrPass2FinalizeReplay = GetB(ini, L"VR", L"Pass2FinalizeReplay", vrPass2FinalizeReplay);
+    vrPass2SafeOnA = GetF(ini, L"VR", L"Pass2SafeOnA", vrPass2SafeOnA);
+    vrReportFinalCamera = GetB(ini, L"VR", L"ReportFinalCamera", vrReportFinalCamera);
     vrPass2Steps     = GetI(ini, L"VR", L"Pass2Steps", vrPass2Steps);
     vrPass2EatAsserts = GetB(ini, L"VR", L"Pass2EatAsserts", vrPass2EatAsserts);
     vrFadeGuard      = GetB(ini, L"VR", L"FadeGuard", vrFadeGuard);
@@ -266,6 +277,8 @@ void Config::Load(const std::wstring& path) {
     dumpSkeleton = GetB(ini, L"FirstPerson", L"DumpSkeleton", dumpSkeleton);
     fpPoseScan = GetB(ini, L"FirstPerson", L"PoseWriterScan", fpPoseScan);
     fpDebug = GetB(ini, L"FirstPerson", L"Debug", fpDebug);
+    fpForceFovDeg = GetF(ini, L"FirstPerson", L"ForceFovDeg", fpForceFovDeg);
+    fpForcePitchDeg = GetF(ini, L"FirstPerson", L"ForcePitchDeg", fpForcePitchDeg);
 
     menuNavEnabled = GetB(ini, L"MenuNav", L"Enabled", menuNavEnabled);
     menuNavThreshold = GetF(ini, L"MenuNav", L"Threshold", menuNavThreshold);
@@ -298,6 +311,10 @@ void Config::Load(const std::wstring& path) {
     camWatchDst     = GetB(ini, L"Experimental", L"CamWatchDst", camWatchDst);
     igtTrace        = GetB(ini, L"Experimental", L"IgtTrace", igtTrace);
     m2TaskProbe    = GetB(ini, L"Experimental", L"TaskProbe", m2TaskProbe);
+    m2ForcePass2   = GetB(ini, L"Experimental", L"ForcePass2", m2ForcePass2);
+    m2KillPlayerAfter = GetI(ini, L"Experimental", L"KillPlayerAfter", m2KillPlayerAfter);
+    m2Pass2NoGuards = GetB(ini, L"Experimental", L"Pass2NoGuards", m2Pass2NoGuards);
+    m2Pass2NoDeadGuard = GetB(ini, L"Experimental", L"Pass2NoDeadGuard", m2Pass2NoDeadGuard);
     taskRegisterTest  = GetB(ini, L"Experimental", L"TaskRegisterTest", taskRegisterTest);
     taskQueueProbe    = GetB(ini, L"Experimental", L"TaskQueueProbe", taskQueueProbe);
     taskDumpLists     = GetB(ini, L"Experimental", L"TaskDumpLists", taskDumpLists);
@@ -309,6 +326,7 @@ void Config::Load(const std::wstring& path) {
     taskToggleCycles  = GetI(ini, L"Experimental", L"TaskToggleCycles", taskToggleCycles);
     taskToggleMode    = GetS(ini, L"Experimental", L"TaskToggleMode", taskToggleMode);
     autoPilotSeconds = GetI(ini, L"Experimental", L"AutoPilotSeconds", autoPilotSeconds);
+    expDumpBackbufferAt = GetF(ini, L"Experimental", L"DumpBackbufferAt", expDumpBackbufferAt);
     autoPilotDelay   = GetF(ini, L"Experimental", L"AutoPilotDelay", autoPilotDelay);
     autoPilotPeriod  = GetF(ini, L"Experimental", L"AutoPilotPeriod", autoPilotPeriod);
     autoPilotButton  = GetS(ini, L"Experimental", L"AutoPilotButton", autoPilotButton);

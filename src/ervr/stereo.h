@@ -73,6 +73,7 @@ struct StereoStats {
     long  stereoFrames = 0;   // of those, projection-layer (i.e. actually stereo) frames
     long  eyeBlitL = 0, eyeBlitR = 0;   // successful per-eye blits (full mode: should match)
     long  eyeDesync = 0;      // report/pass eye mismatches (FIFO fell out of step)
+    long  lateDrops = 0;      // late repeat reports bounced by the consumed-pair watermark
     long  hudFrames = 0;      // frames that carried the UI as its own quad layer
     // Presents that submitted a flat frame because the frame pump stopped producing second
     // passes (menus, cutscenes). Non-zero here while a menu is open is normal and correct;

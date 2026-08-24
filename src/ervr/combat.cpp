@@ -198,6 +198,15 @@ void GameFrameBody(uint8_t* player) {
     g_status.physical = physical;
     int stam = ReadStamina(player); g_status.stamina = stam;
     if (!physical) return;
+    // Injection-side transition gate (belt and braces to the CombatHandlesSwings one): the
+    // swing state machine runs on the worker thread, so a command armed just before a warp
+    // request could still reach this game-thread body one frame later. Executing the
+    // behavior dispatch mid-teardown is the 21:59:35 crash; drop the command instead.
+    if (GameERTransitionActive()) {
+        std::lock_guard<std::mutex> g(g_mtx);
+        g_cmd[0].active = g_cmd[1].active = false;
+        return;
+    }
     CSChrTaeAnimEvent* ev = PlayerTaeEvent(player);
     if (!ev) { static double lastWarn = 0; double n = NowSec(); if (n - lastWarn > 10) { lastWarn = n; LOGW("[combat] player CSChrTaeAnimEvent not found (vtable mismatch?)"); } return; }
 
@@ -284,8 +293,21 @@ void CombatShutdown() {}
 // attack-button block stayed armed on the title screen and in menus - RB (right trigger) and
 // RT (right grip) silently did nothing there, since no swing can fire to replace them
 // (reported 2026-08-21: "right trigger seems disabled").
+// AND only while the world is not mid-transition (2026-08-23): the arm motion of pressing A
+// on the fast-travel confirm reads as a ~4 m/s swing, so every travel injected an
+// attack-behavior event into the player 200-400 ms into world teardown - executing the
+// game's behavior dispatch there is a coin-flip crash (CS::ChrIns + garbage index, second
+// travel of the 21:59 session). GameERTransitionActive covers request, teardown, load and
+// arrival-settle; CombatPollHands resets any in-flight swing the moment this goes false.
 bool CombatHandlesSwings() {
     if (!GameERPlayerActive()) return false;
+    if (GameERTransitionActive()) {
+        // One line per transition window, so a future postmortem can see the suppression.
+        static ULONGLONG s_lastLog = 0;
+        const ULONGLONG now = GetTickCount64();
+        if (now - s_lastLog > 10000) { s_lastLog = now; LOGD("[combat] swings suppressed: world transition"); }
+        return false;
+    }
     std::lock_guard<std::mutex> g(g_mtx);
     return g_status.taeHooked && PhysicalActiveLocked();
 }

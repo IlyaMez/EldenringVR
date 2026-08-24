@@ -1,4 +1,5 @@
 #include "virtual_pad.h"
+#include <atomic>
 #include "vr_backend.h"
 #include "gestures.h"
 #include "combat.h"
@@ -84,6 +85,9 @@ void ApplyDeadzone(float& x, float& y, float dz) {
 }
 
 } // namespace
+
+std::atomic<ULONGLONG> g_lastATick{0};
+ULONGLONG VirtualPadLastATick() { return g_lastATick.load(std::memory_order_relaxed); }
 
 void VirtualPadInit() {
     const Config& c = Cfg();
@@ -394,6 +398,16 @@ bool VirtualPadMerge(XINPUT_STATE& st) {
     XINPUT_GAMEPAD& g = st.Gamepad;
     uint16_t before = g.wButtons;
     g.wButtons |= p.buttons;
+    // Confirm-press telemetry for the stereo pump: every dangerous menu confirm (fast
+    // travel above all) is an A press. The pump drops pass 2 to the SAFE keep set for a
+    // few seconds after each one, which makes the confirm-window state corruption
+    // structurally impossible at the cost of briefly flattened depth. See Pass2SafeOnA.
+    // Deliberately UNGATED. A stash-quiet "menu context" gate stood here for one build and
+    // caused the 2026-08-22 20:13 fast-travel crash: ER's map does NOT stop the world sim -
+    // stereo pairs flowed at full rate through the whole map screen - so the travel confirm
+    // read as gameplay and SAFE never armed for the one window it exists for.
+    if (g.wButtons & XINPUT_GAMEPAD_A)
+        g_lastATick.store(GetTickCount64(), std::memory_order_relaxed);
     if (p.lt > g.bLeftTrigger)  g.bLeftTrigger = p.lt;
     if (p.rt > g.bRightTrigger) g.bRightTrigger = p.rt;
     auto mag = [](int16_t x, int16_t y) { return (long)x * x + (long)y * y; };

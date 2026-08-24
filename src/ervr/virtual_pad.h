@@ -14,6 +14,7 @@ void VirtualPadUpdate(double now);
 bool VirtualPadMerge(XINPUT_STATE& st);
 // Rumble from the game (XInputSetState) -> controllers.
 void VirtualPadRumble(float left, float right);
+unsigned long long VirtualPadLastATick();   // tick of the last A press sent to the game (0 = never)
 // The processed move stick (after forward-mapping) and sprint state, for Locomotion=direct.
 struct MoveIntent { float x = 0, y = 0; bool sprint = false; bool valid = false; };
 MoveIntent VirtualPadGetMove();

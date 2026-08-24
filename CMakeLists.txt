@@ -72,6 +72,7 @@ add_library(ERVR SHARED
   src/ervr/game_er.cpp
   src/ervr/patches_er.cpp
   src/ervr/combat.cpp
+  src/ervr/crashlog.cpp
   ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
 target_include_directories(ERVR PRIVATE src/ervr ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
 target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi)

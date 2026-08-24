@@ -28,6 +28,9 @@ struct Dx12Frame {
 bool ReShadeAddonInstall(void* selfModule);
 bool ReShadeAddonInstalled();
 void ReShadeAddonShutdown();
+// Size of the FIRST swapchain of the session, before any resize - the frame the game built
+// its raster projection for, which it keeps after resizing larger. False until one exists.
+bool ReShadeFirstSwapchainSize(uint32_t& w, uint32_t& h);
 
 struct ReShadeStats {
     bool     registered = false;

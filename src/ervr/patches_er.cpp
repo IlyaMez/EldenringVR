@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -124,9 +125,11 @@ bool PatchAspectClamp() {
     return s_state == 1;
 }
 
+// Every patched slot, at file scope so the GameResScan census below can watch them.
+std::vector<uint8_t*> g_resSlots;
+
 // Put `w`x`h` into the table so the game accepts it from GraphicsConfig.xml.
 bool PatchResTable(uint32_t w, uint32_t h) {
-    static std::vector<uint8_t*> s_slots;
     static bool s_scanned = false;
     if (!s_scanned) {
         s_scanned = true;
@@ -135,30 +138,35 @@ bool PatchResTable(uint32_t w, uint32_t h) {
             // Bit-exact check: if the slot does not read as the stock 1920x1080 the layout is
             // not what we think it is, and writing blind would corrupt a real entry.
             if (SafeRead(slot, &sw, 4) && SafeRead(slot + 4, &sh, 4) && sw == kSlotW && sh == kSlotH)
-                s_slots.push_back(slot);
+                g_resSlots.push_back(slot);
         }
-        if (s_slots.empty())
+        if (g_resSlots.empty())
             LOGW("[patch] resolution table not found; the game will snap GameRes to its nearest "
                  "built-in size");
+        else
+            LOGD("[patch] resolution table: %zu copy(ies) of the 1920x1080 slot", g_resSlots.size());
     }
     const uint32_t wh[2] = {w, h};
     int ok = 0;
-    for (uint8_t* slot : s_slots) if (PatchWrite(slot, wh, sizeof(wh))) ++ok;
+    for (uint8_t* slot : g_resSlots) if (PatchWrite(slot, wh, sizeof(wh))) ++ok;
     return ok > 0;
 }
 
-// ---- desktop-size lie, deliberately narrow -------------------------------------------
+// ---- desktop-size lie, ARMED ONLY UNTIL THE OVERSIZED SWAPCHAIN LANDS ----------------
 //
-// The size clamp does NOT read GetSystemMetrics: inflating that changed nothing, and since
-// the game re-reads SM_CXSCREEN/SM_CYSCREEN every frame, lying there skewed the live
-// projection instead. What it does read is the monitor RECTANGLE, which reaches the game
-// through DXGI - dxgi.dll implements IDXGIOutput::GetDesc on top of GetMonitorInfoW, and
-// dxgi.dll+0x11257 / +0x4ad1c were the only callers in the census. So the lie lives here,
-// affects one rarely-called API, and is dropped the moment the target fits the desktop.
+// The late settings-apply consults the monitor rect / current display mode as well as the
+// (NOPed) table walker - REMOVING these lies outright killed the resize (measured
+// 2026-08-22 19:38: boot stayed 2560x1440 for the whole run), so they are load-bearing
+// for acceptance after all. But the game ALSO polls the same display metrics during play,
+// and a standing HEIGHT lie (1440 reported as 3280) is this project's known "distorts/
+// skews when moving my head" mistake - the user re-reported exactly that, vertically, the
+// day the oversize path re-armed it (the width lie never engages on this monitor, which
+// is why the warp was vertical-only). So the lies live only for the window that needs
+// them: armed when the oversize target is resolved, DISARMED by PatchesNoteBackbufferSize
+// the moment the oversized swapchain actually appears. Only the max-track pair stays
+// adjusted for the session (window management, not display metrics).
 std::atomic<uint32_t> g_fakeDeskW{0}, g_fakeDeskH{0};
-
-BOOL(WINAPI* g_origGetMonitorInfoW)(HMONITOR, LPMONITORINFO) = nullptr;
-BOOL(WINAPI* g_origGetMonitorInfoA)(HMONITOR, LPMONITORINFO) = nullptr;
+std::atomic<bool>     g_displayLiesOff{false};   // set once the oversize swapchain landed
 
 // The game's own code, or DXGI answering on its behalf. Arxan-protected code can run from
 // outside the image, so an unknown caller is treated as the game rather than missed.
@@ -183,7 +191,11 @@ bool CallerIsGameOrDxgi(void* ret) {
     return _wcsicmp(b ? b + 1 : path, L"dxgi.dll") == 0;
 }
 
+BOOL(WINAPI* g_origGetMonitorInfoW)(HMONITOR, LPMONITORINFO) = nullptr;
+BOOL(WINAPI* g_origGetMonitorInfoA)(HMONITOR, LPMONITORINFO) = nullptr;
+
 void InflateMonitorInfo(LPMONITORINFO mi, void* ret) {
+    if (g_displayLiesOff.load(std::memory_order_relaxed)) return;
     const uint32_t fw = g_fakeDeskW.load(std::memory_order_relaxed);
     const uint32_t fh = g_fakeDeskH.load(std::memory_order_relaxed);
     if (!fw || !mi || !CallerIsGameOrDxgi(ret)) return;
@@ -215,15 +227,11 @@ BOOL(WINAPI* g_origEnumDisplaySettingsW)(LPCWSTR, DWORD, DEVMODEW*) = nullptr;
 BOOL(WINAPI* g_origEnumDisplaySettingsExW)(LPCWSTR, DWORD, DEVMODEW*, DWORD) = nullptr;
 
 void HandleEnumDisplaySettings(DWORD mode, DEVMODEW* dm, void* ret) {
+    if (g_displayLiesOff.load(std::memory_order_relaxed)) return;
     const uint32_t fw = g_fakeDeskW.load(std::memory_order_relaxed);
     const uint32_t fh = g_fakeDeskH.load(std::memory_order_relaxed);
     if (!fw || !dm) return;
-    const bool ours = CallerIsGameOrDxgi(ret);
-    static std::atomic<int> s_n{0};
-    if (s_n.fetch_add(1, std::memory_order_relaxed) < 10)
-        LOGI("[patch] EnumDisplaySettings(mode %ld) -> %lux%lu%s", (long)(int)mode,
-             dm->dmPelsWidth, dm->dmPelsHeight, ours ? "" : "   [not game/dxgi]");
-    if (!ours || mode != ENUM_CURRENT_SETTINGS) return;
+    if (!CallerIsGameOrDxgi(ret) || mode != ENUM_CURRENT_SETTINGS) return;
     if (dm->dmPelsWidth < fw) dm->dmPelsWidth = fw;
     if (dm->dmPelsHeight < fh) dm->dmPelsHeight = fh;
 }
@@ -276,6 +284,269 @@ void InstallMonitorHooks() {
     }
 }
 
+// ---- [VR] GameResScan: who reads (or restores) the patched resolution-table slot? ----
+//
+// The open question on the oversize path: every desktop-size API was lied to without effect
+// (see config.h at vrGameResOversize), so the "apply settings" pass that rejects an entry
+// larger than the desktop must compare against something cached. This census answers it the
+// way posescan/camwatch answered theirs: PAGE_GUARD on the patched slots, a vectored handler
+// records every touch (rip, registers, instruction bytes - enough to identify the compare
+// and its other operand offline), single-step re-arms, aggregate dump at the end. Armed once
+// at startup, right after the slots are written, because the reject was measured to happen
+// within the first seconds of boot (the swapchain that comes up IS its outcome). A WRITE
+// record would be its own answer: Arxan's integrity repair restoring the stock entry, in
+// which case there is no size check to beat at all, only a checksum.
+namespace reswatch {
+
+struct Rec {
+    uint64_t rip = 0;
+    uint64_t addr = 0;
+    uint64_t regs[16];     // rax rcx rdx rbx rsp rbp rsi rdi r8..r15
+    uint8_t  bytes[16];    // instruction bytes at rip, decoded offline
+    uint32_t tid = 0;
+    uint8_t  write = 0;    // ExceptionInformation[0]: 0 read, 1 write
+};
+constexpr int kMaxRec = 4096;
+Rec  g_rec[kMaxRec];
+std::atomic<long> g_recN{0};
+std::atomic<long> g_faults{0};    // ALL guard faults on our pages, recorded or not
+std::atomic<bool> g_active{false};
+
+constexpr int kMaxPages = 8;
+uintptr_t g_pages[kMaxPages] = {};
+DWORD     g_pageProt[kMaxPages] = {};
+int       g_pageCount = 0;
+void*     g_veh = nullptr;
+uint32_t  g_tgtW = 0, g_tgtH = 0, g_scrW = 0, g_scrH = 0;   // for the dump annotations
+thread_local bool t_rearm = false;
+
+void ArmGuard() {
+    for (int i = 0; i < g_pageCount; ++i) {
+        DWORD o;
+        VirtualProtect((void*)g_pages[i], 0x1000, g_pageProt[i] | PAGE_GUARD, &o);
+    }
+}
+void DisarmGuard() {
+    for (int i = 0; i < g_pageCount; ++i) {
+        DWORD o;
+        VirtualProtect((void*)g_pages[i], 0x1000, g_pageProt[i], &o);
+    }
+}
+
+LONG CALLBACK Veh(EXCEPTION_POINTERS* xp) {
+    const DWORD code = xp->ExceptionRecord->ExceptionCode;
+    if (code == STATUS_GUARD_PAGE_VIOLATION) {
+        const uintptr_t a = (uintptr_t)xp->ExceptionRecord->ExceptionInformation[1];
+        bool ours = false;
+        for (int i = 0; i < g_pageCount; ++i)
+            if ((a & ~0xFFFull) == g_pages[i]) ours = true;
+        // Guard faults on any OTHER page (thread stack growth!) must go to the OS untouched.
+        if (!ours) return EXCEPTION_CONTINUE_SEARCH;
+        if (g_active.load(std::memory_order_relaxed)) {
+            // These pages hold other data too; a page that turns out to be hot would drag the
+            // whole game through exception dispatch, so a runaway census disarms itself.
+            if (g_faults.fetch_add(1, std::memory_order_relaxed) > 3000000) {
+                g_active.store(false);
+                return EXCEPTION_CONTINUE_EXECUTION;   // guard already cleared; stop re-arming
+            }
+            bool slot = false;
+            for (uint8_t* s : g_resSlots)
+                if (a >= (uintptr_t)s && a < (uintptr_t)s + 8) slot = true;
+            if (slot) {
+                const long n = g_recN.fetch_add(1, std::memory_order_relaxed);
+                if (n < kMaxRec) {
+                    Rec& r = g_rec[n];
+                    CONTEXT* c = xp->ContextRecord;
+                    r.rip = c->Rip; r.addr = a; r.tid = GetCurrentThreadId();
+                    r.write = (uint8_t)xp->ExceptionRecord->ExceptionInformation[0];
+                    uint64_t* q = r.regs;
+                    q[0] = c->Rax; q[1] = c->Rcx; q[2] = c->Rdx; q[3] = c->Rbx;
+                    q[4] = c->Rsp; q[5] = c->Rbp; q[6] = c->Rsi; q[7] = c->Rdi;
+                    q[8] = c->R8;  q[9] = c->R9;  q[10] = c->R10; q[11] = c->R11;
+                    q[12] = c->R12; q[13] = c->R13; q[14] = c->R14; q[15] = c->R15;
+                    // Never read across a page end - the next code page can be a guard too.
+                    const size_t room = 0x1000 - (c->Rip & 0xFFF);
+                    memcpy(r.bytes, (void*)c->Rip, room < 16 ? room : 16);
+                }
+            }
+            // The guard bit auto-cleared; run the instruction, then STATUS_SINGLE_STEP re-arms.
+            xp->ContextRecord->EFlags |= 0x100;
+            t_rearm = true;
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (code == STATUS_SINGLE_STEP && t_rearm) {
+        t_rearm = false;
+        if (g_active.load(std::memory_order_relaxed)) ArmGuard();
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+const char* kRegName[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+                            "r8","r9","r10","r11","r12","r13","r14","r15"};
+
+void ModName(uint64_t rip, char* out, size_t n) {
+    auto* exe = (uint8_t*)GetModuleHandleW(nullptr);
+    HMODULE m = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)rip, &m);
+    if (m == (HMODULE)exe) { snprintf(out, n, "exe+0x%llx", (unsigned long long)(rip - (uint64_t)(uintptr_t)exe)); return; }
+    if (m) {
+        wchar_t path[MAX_PATH]; GetModuleFileNameW(m, path, MAX_PATH);
+        const wchar_t* base = wcsrchr(path, L'\\'); base = base ? base + 1 : path;
+        snprintf(out, n, "%S+0x%llx", base, (unsigned long long)(rip - (uint64_t)(uintptr_t)m));
+        return;
+    }
+    snprintf(out, n, "0x%llx", (unsigned long long)rip);   // outside any module: Arxan region
+}
+
+void Dump() {
+    const long total = g_recN.load();
+    const long n = total < kMaxRec ? total : kMaxRec;
+    LOGI("[reswatch] ---- %ld slot touches recorded (%ld kept, %ld page faults total) on %zu "
+         "slot(s), target %ux%u, screen %ux%u ----",
+         total, n, g_faults.load(), g_resSlots.size(), g_tgtW, g_tgtH, g_scrW, g_scrH);
+
+    // The first few in order: boot-time validation is a one-shot sequence, and the order
+    // (our slot, then the entry after it) is what tells the walker from the menu lister.
+    for (long i = 0; i < n && i < 12; ++i) {
+        const Rec& r = g_rec[i];
+        char mod[64]; ModName(r.rip, mod, sizeof(mod));
+        LOGI("[reswatch] #%02ld %-22s %s slot+%d tid %lu", i, mod, r.write ? "WRITE" : "read ",
+             (int)(r.addr - (uintptr_t)g_resSlots[0]) & 7, (unsigned long)r.tid);
+    }
+
+    // Aggregate by rip, highest count first.
+    struct Agg { uint64_t rip; long count; long writes; int sample; };
+    constexpr int kMaxAgg = 64;
+    Agg agg[kMaxAgg]; int na = 0;
+    for (long i = 0; i < n; ++i) {
+        const Rec& r = g_rec[i];
+        int k = 0;
+        for (; k < na; ++k) if (agg[k].rip == r.rip) break;
+        if (k == na) { if (na == kMaxAgg) continue; agg[na++] = {r.rip, 0, 0, (int)i}; }
+        agg[k].count++;
+        if (r.write) agg[k].writes++;
+    }
+    for (int i = 0; i < na; ++i)
+        for (int j = i + 1; j < na; ++j)
+            if (agg[j].count > agg[i].count) { Agg t = agg[i]; agg[i] = agg[j]; agg[j] = t; }
+
+    for (int i = 0; i < na; ++i) {
+        const Rec& s = g_rec[agg[i].sample];
+        char mod[64]; ModName(agg[i].rip, mod, sizeof(mod));
+        char bytes[3 * 16 + 1] = {};
+        for (int b = 0; b < 16; ++b) snprintf(bytes + b * 3, 4, "%02X ", s.bytes[b]);
+        // Flag registers holding the sizes in play: the compare's other operand gives away
+        // where the cached desktop size lives.
+        char regs[16 * 32] = {}; int p = 0;
+        for (int rg = 0; rg < 16; ++rg) {
+            const uint32_t lo = (uint32_t)s.regs[rg];
+            const char* tag = lo == g_scrW ? "=scrW" : lo == g_scrH ? "=scrH"
+                            : lo == g_tgtW ? "=tgtW" : lo == g_tgtH ? "=tgtH" : "";
+            p += snprintf(regs + p, sizeof(regs) - p, "%s=%llx%s ", kRegName[rg],
+                          (unsigned long long)s.regs[rg], tag);
+        }
+        LOGI("[reswatch] %-22s x%-4ld %s tid %lu | %s", mod, agg[i].count,
+             agg[i].writes ? (agg[i].writes == agg[i].count ? "WRITE" : "MIXED") : "read ",
+             (unsigned long)s.tid, bytes);
+        LOGI("[reswatch]   regs: %s", regs);
+    }
+
+    // Did the patch survive the window? A slot no longer holding the target after an Arxan
+    // repair is the whole story in one line.
+    for (size_t i = 0; i < g_resSlots.size(); ++i) {
+        uint32_t sw = 0, sh = 0;
+        SafeRead(g_resSlots[i], &sw, 4); SafeRead(g_resSlots[i] + 4, &sh, 4);
+        LOGI("[reswatch] slot %zu now holds %ux%u (%s)", i, sw, sh,
+             (sw == g_tgtW && sh == g_tgtH) ? "patch intact" : "PATCH REVERTED");
+    }
+    LOGI("[reswatch] ---- census complete (%d unique rips) ----", na);
+}
+
+DWORD WINAPI WatchThread(LPVOID) {
+    const float secs = Cfg().vrGameResScanSeconds;
+    const ULONGLONG until = GetTickCount64() + (ULONGLONG)(secs * 1000.f);
+    while (GetTickCount64() < until && g_recN.load() < kMaxRec &&
+           g_active.load(std::memory_order_relaxed))
+        Sleep(50);
+    g_active.store(false);
+    Sleep(150);   // drain in-flight faults before tearing down
+    DisarmGuard();
+    if (g_veh) RemoveVectoredExceptionHandler(g_veh);
+    Dump();
+    return 0;
+}
+
+void Arm(uint32_t tgtW, uint32_t tgtH) {
+    static bool s_armed = false;
+    if (s_armed || g_resSlots.empty()) return;
+    s_armed = true;
+    g_tgtW = tgtW; g_tgtH = tgtH;
+    g_scrW = (uint32_t)GetSystemMetrics(SM_CXSCREEN);
+    g_scrH = (uint32_t)GetSystemMetrics(SM_CYSCREEN);
+    for (uint8_t* s : g_resSlots) {
+        for (int half = 0; half < 2; ++half) {
+            const uintptr_t page = ((uintptr_t)s + half * 7) & ~0xFFFull;
+            int i = 0;
+            for (; i < g_pageCount; ++i) if (g_pages[i] == page) break;
+            if (i < g_pageCount || g_pageCount == kMaxPages) continue;
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (!VirtualQuery((void*)page, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) continue;
+            g_pages[g_pageCount] = page;
+            g_pageProt[g_pageCount] = mbi.Protect & ~(DWORD)PAGE_GUARD;
+            ++g_pageCount;
+        }
+    }
+    if (!g_pageCount) { LOGW("[reswatch] no committed page to watch?"); return; }
+    g_recN.store(0);
+    g_veh = AddVectoredExceptionHandler(1, Veh);
+    g_active.store(true);
+    ArmGuard();
+    LOGI("[reswatch] armed on %d page(s) over %zu slot(s) for %.0f s (slot 0 at %p)",
+         g_pageCount, g_resSlots.size(), Cfg().vrGameResScanSeconds, g_resSlots[0]);
+    if (HANDLE h = CreateThread(nullptr, 0, WatchThread, nullptr, 0, nullptr)) CloseHandle(h);
+}
+
+} // namespace reswatch
+
+// SIZE CHECK. The boot-time settings apply walks the resolution table and skips any entry
+// larger than the desktop - THE cap this whole feature lived under. Found by the GameResScan
+// census 2026-08-22 (1.16.2, exe+0xe97577):
+//   44 39 37             cmp [rdi], r14d      ; entry.width  vs desktop.width
+//   0F 8F xx xx xx xx    jg  skip             ; wider than the desktop -> skip entry
+//   44 39 7F 04          cmp [rdi+4], r15d    ; entry.height vs desktop.height
+//   0F 8F xx xx xx xx    jg  skip             ; taller -> skip entry
+// r14d/r15d held the TRUE 3440x1440 while every hooked size API was actively lying (the
+// monitor-rect lie delivered 3088x3280 in the same window), so the walker's desktop size
+// comes from a source the hooks never covered. Rather than keep hunting it, both jg's are
+// NOPed: every entry is then "small enough", the XML request matches ours, and the only
+// remaining obstacle is the Windows max-track window clamp the monitor hooks already lift.
+// Side effect: the in-game windowed resolution list shows every table entry. Harmless.
+constexpr const char* kPatSizeCheck = "44 39 37 0F 8F ?? ?? ?? ?? 44 39 7F 04 0F 8F";
+
+bool PatchSizeCheck() {
+    static int s_state = -1;   // -1 untried, 0 unavailable, 1 patched
+    if (s_state >= 0) return s_state == 1;
+    uint8_t* at = AobScan(kPatSizeCheck);
+    if (!at) {
+        s_state = 0;
+        LOGW("[patch] resolution size check not found (game patch moved it?); GameRes stays "
+             "capped at the desktop size");
+        return false;
+    }
+    const uint8_t nop6[6] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+    s_state = (PatchWrite(at + 3, nop6, 6) && PatchWrite(at + 13, nop6, 6)) ? 1 : 0;
+    if (s_state)
+        LOGI("[patch] resolution size check removed at rva 0x%llx: the game now accepts "
+             "render sizes larger than the desktop",
+             (unsigned long long)(at - (uint8_t*)GetModuleHandleW(nullptr)));
+    else
+        LOGW("[patch] resolution size check write failed");
+    return s_state == 1;
+}
+
 std::wstring CachePath() {
     const std::wstring& ini = Cfg().iniPath;
     size_t p = ini.find_last_of(L"\\/");
@@ -303,47 +574,58 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
              c.vrGameRes.c_str());
         return false;
     }
-    // Fit to the desktop: the game refuses anything larger, from the menu AND from the file.
-    // HEIGHT-first, because per-eye pixels track the frame's height almost alone - the crop
-    // keeps roughly 1.05*height horizontally however wide the frame is, since a wider frame
-    // just widens the rendered FOV proportionally. So height is maximised against the
-    // desktop and the width simply follows at 16:9.
-    //
-    // 16:9 exactly, even though a squarer frame reaches the same sharpness for ~35% fewer
-    // pixels: the game masks anything else back to 16:9 with black bars, which wastes those
-    // pixels AND leaves the frame's true frustum disagreeing with its dimensions - and since
-    // the eye crop is computed from the dimensions, the image then shears as the head turns
-    // (both measured in-headset, 2026-08-21). GameResAspectFix can unmask it, but that is an
-    // experiment you opt into by setting a non-16:9 GameRes explicitly.
+    // The desktop used to be a hard ceiling: the settings-apply pass skips any table entry
+    // larger than the screen. With GameResOversize the check itself is patched out (see
+    // kPatSizeCheck - found by the GameResScan census after every API lie failed), so the
+    // target survives at full size; the desktop-size lies stay armed anyway because Windows
+    // separately clamps the WINDOW to the max-track metrics. When the check pattern does not
+    // resolve (a game patch moved it) everything falls back to the old fit-to-desktop.
     const uint32_t screenW = (uint32_t)std::max(640, GetSystemMetrics(SM_CXSCREEN));
     const uint32_t screenH = (uint32_t)std::max(480, GetSystemMetrics(SM_CYSCREEN));
-    if ((w > screenW || h > screenH) && c.vrGameResOversize) {
-        // Tell the size check the desktop is big enough (see the monitor-rect hook above)
-        // instead of shrinking the target to fit it.
-        g_fakeDeskW.store(w + 16);
-        g_fakeDeskH.store(h + 16);
-        InstallMonitorHooks();
+    const float s = std::min(2.f, std::max(0.25f, c.vrGameResScale));
+    const bool oversize = c.vrGameResOversize && PatchSizeCheck();
+    if (oversize) {
+        if (c.vrGameRes == "auto") {
+            // With no ceiling, GameResScale means what it says: fraction of the headset's
+            // own recommendation, applied to the near-square eye size directly.
+            w = (uint32_t)((float)w * s + 0.5f);
+            h = (uint32_t)((float)h * s + 0.5f);
+        }
+        if (w > screenW || h > screenH) {
+            g_fakeDeskW.store(w + 16);
+            g_fakeDeskH.store(h + 16);
+            g_displayLiesOff.store(false);   // fresh apply cycle: lie until the resize lands
+            InstallMonitorHooks();
+            LOGI("[patch] GameRes %ux%u exceeds the %ux%u desktop: size check patched and "
+                 "window clamp lifted, no DSR needed. The swapchain line below is the proof.",
+                 w, h, screenW, screenH);
+        }
     } else if (c.vrGameRes == "auto") {
+        // Fit to the desktop: HEIGHT-first, because per-eye pixels track the frame's height
+        // almost alone - the crop keeps roughly 1.05*height horizontally however wide the
+        // frame is, since a wider frame just widens the rendered FOV proportionally. So
+        // height is maximised against the desktop and the width follows at 16:9.
+        //
         // ALWAYS, not only when the target overflows: the headset's own eye size is nearly
         // square, so an auto target left alone on a large desktop (one running DSR, say)
-        // would be non-16:9 and bring the mask and its shear straight back.
+        // would be non-16:9 and bring the 16:9 mask and its shear straight back (measured
+        // in-headset 2026-08-21; the letterbox patch covers the oversize path instead).
         // GameResScale lands HERE, on the fitted height, so it reads as "fraction of the
         // sharpest frame this desktop allows". Applied to the headset's raw recommendation
         // instead it would do nothing at all until it dropped below the desktop cap.
         const uint32_t maxH = std::min({screenH, (uint32_t)((uint64_t)screenW * 9 / 16)});
-        const float s = std::min(2.f, std::max(0.25f, c.vrGameResScale));
         const uint32_t fh = std::min({(uint32_t)(std::min(h, maxH) * s), maxH});
         const uint32_t fw = (uint32_t)((uint64_t)fh * 16 / 9);
         if (fw != w || fh != h)
             LOGI("[patch] GameRes target %ux%u -> %ux%u: the tallest 16:9 frame that fits the "
-                 "%ux%u desktop. The game renders no larger than the desktop and masks any "
-                 "other aspect back to 16:9, and per-eye sharpness depends on height alone - "
-                 "so a larger desktop (NVIDIA DSR) is what raises this ceiling.",
-                 w, h, fw, fh, screenW, screenH);
+                 "%ux%u desktop%s.",
+                 w, h, fw, fh, screenW, screenH,
+                 c.vrGameResOversize ? " (size-check patch unavailable on this game version)"
+                                     : " (GameResOversize=false)");
         w = fw; h = fh;
     } else if (w > screenW || h > screenH) {
-        LOGW("[patch] GameRes %ux%u is larger than the %ux%u desktop; the game will clamp it "
-             "to a built-in size. Lower it, or enable DSR for a bigger desktop.",
+        LOGW("[patch] GameRes %ux%u is larger than the %ux%u desktop and the size-check patch "
+             "is unavailable; the game will clamp it to a built-in size. Lower it.",
              w, h, screenW, screenH);
     }
     // Multiple-of-8 keeps every downstream size (swapchain, crops, video encoders) happy.
@@ -426,6 +708,7 @@ std::vector<std::wstring> GraphicsConfigPaths() {
 
 uint32_t g_resAppliedW = 0, g_resAppliedH = 0;
 uint32_t g_hmdEyeW = 0, g_hmdEyeH = 0;      // last size handed to PatchesNoteHmdEyeSize
+uint32_t g_earlyWroteW = 0, g_earlyWroteH = 0;   // what the DllMain-time write put in the XML
 
 } // namespace
 
@@ -472,12 +755,89 @@ void PatchesMakeDpiAware() {
              GetLastError());
 }
 
+// GraphicsConfig.xml must hold the target BEFORE the game's boot-time read of it, and that
+// read happens on the MAIN thread so early that even the first statements of the worker
+// thread lose the race (measured 2026-08-22 evening: a write at +80 ms after LogInit still
+// lost; the session then never resized above the desktop). The only spot guaranteed to run
+// earlier is DllMain(PROCESS_ATTACH) - on the main thread, before the game's entry point.
+// Constraints there: loader lock (kernel32 file APIs only - no user32, no logging) and
+// Arxan sections possibly still packed (no AobScan). So this is the OPTIMISTIC write: the
+// raw target with no size-check patching and no desktop fit. The worker's full pass runs
+// ~100 ms later, applies the real patches, and rewrites the file if its answer differs
+// (it only differs when the size-check AOB stops resolving on a future game version - that
+// one session snaps to a built-in size and the next boot self-heals with the fitted value).
+void PatchesEarlyGraphicsConfigWrite(void* module) {
+    wchar_t mod[MAX_PATH]{};
+    if (!GetModuleFileNameW((HMODULE)module, mod, MAX_PATH)) return;
+    std::wstring dir(mod);
+    const size_t cut = dir.find_last_of(L"\\/");
+    if (cut == std::wstring::npos) return;
+    dir.resize(cut);
+    const std::wstring ini = dir + L"\\ERVR.ini";
+
+    wchar_t buf[64];
+    GetPrivateProfileStringW(L"General", L"Enabled", L"true", buf, 64, ini.c_str());
+    if (_wcsicmp(buf, L"false") == 0 || wcscmp(buf, L"0") == 0) return;
+    GetPrivateProfileStringW(L"VR", L"StereoMode", L"cinema", buf, 64, ini.c_str());
+    if (_wcsicmp(buf, L"off") == 0) return;
+    // Only the OVERSIZE path needs this race-beating write: an oversized request must be in
+    // the file before the game's boot read or the settings-apply rejects it. Fitted sizes
+    // are accepted through the normal patched-table path, and a clean exit leaves the file
+    // at the fitted size anyway - writing a raw eye size here in fitted mode would just ask
+    // the boot clamp to knock it back down.
+    GetPrivateProfileStringW(L"VR", L"GameResOversize", L"false", buf, 64, ini.c_str());
+    if (_wcsicmp(buf, L"true") != 0 && wcscmp(buf, L"1") != 0) return;
+    GetPrivateProfileStringW(L"VR", L"GameRes", L"auto", buf, 64, ini.c_str());
+    uint32_t w = 0, h = 0;
+    if (_wcsicmp(buf, L"off") == 0 || !buf[0]) return;
+    if (_wcsicmp(buf, L"auto") == 0) {
+        const std::wstring cache = dir + L"\\ERVR.cache.ini";
+        w = (uint32_t)GetPrivateProfileIntW(L"Cache", L"HmdEyeW", 0, cache.c_str());
+        h = (uint32_t)GetPrivateProfileIntW(L"Cache", L"HmdEyeH", 0, cache.c_str());
+        if (!w || !h) { w = 2064; h = 2208; }   // first run: Quest 3-sized default
+        GetPrivateProfileStringW(L"VR", L"GameResScale", L"1.0", buf, 64, ini.c_str());
+        const double s = std::min(2.0, std::max(0.25, _wtof(buf) > 0.01 ? _wtof(buf) : 1.0));
+        w = (uint32_t)((double)w * s + 0.5);
+        h = (uint32_t)((double)h * s + 0.5);
+    } else if (swscanf_s(buf, L"%ux%u", &w, &h) != 2 && swscanf_s(buf, L"%uX%u", &w, &h) != 2) {
+        return;
+    }
+    w = ((w + 4u) & ~7u); h = ((h + 4u) & ~7u);
+    if (w < 640u) w = 640u; if (w > 8192u) w = 8192u;
+    if (h < 480u) h = 480u; if (h > 8192u) h = 8192u;
+
+    for (const std::wstring& path : GraphicsConfigPaths()) {
+        std::wstring xml;
+        if (!ReadFileW(path, xml)) continue;
+        const std::wstring backup = path.substr(0, path.size() - 4) + L"_ervr_backup.xml";
+        if (GetFileAttributesW(backup.c_str()) == INVALID_FILE_ATTRIBUTES)
+            CopyFileW(path.c_str(), backup.c_str(), TRUE);
+        std::wstring before = xml;
+        const bool okW = SetTag(xml, L"Resolution-WindowScreenWidth", std::to_wstring(w));
+        const bool okH = SetTag(xml, L"Resolution-WindowScreenHeight", std::to_wstring(h));
+        SetTag(xml, L"ScreenMode", L"WINDOW");
+        if (!okW || !okH || xml == before) continue;
+        if (WriteFileW(path, xml)) { g_earlyWroteW = w; g_earlyWroteH = h; }
+    }
+}
+
 void PatchesApplyGameResolution() {
     uint32_t w = 0, h = 0;
+    // The attach-time write is silent (no log exists yet); say here what it did, once.
+    if (g_earlyWroteW) {
+        LOGI("[patch] GraphicsConfig.xml repaired at DLL attach: %ux%u written before the "
+             "game's boot read (a clean exit normalizes the file back to the fitted size, "
+             "which is why every boot has to re-write it this early)",
+             g_earlyWroteW, g_earlyWroteH);
+        g_earlyWroteW = g_earlyWroteH = 0;
+    }
     if (!ResolveResTarget(w, h)) return;
     // The table entry has to exist every launch (it is a memory patch), even when the file
     // already says the right thing - so this runs before the early-out below.
     const bool listed = PatchResTable(w, h);
+    // The census must be armed HERE, before the game's boot-time settings apply walks the
+    // table - by the first present it has already happened.
+    if (Cfg().vrGameResScan) reswatch::Arm(w, h);
     // Only needed when the target is not 16:9 - at 16:9 there is nothing to mask off, and a
     // patch we do not need is a patch that cannot misfire.
     const float aspect = (float)w / (float)h;
@@ -522,6 +882,17 @@ void PatchesApplyGameResolution() {
                     : " -- WARNING: not in the game's table, it will snap to a built-in size");
         g_resAppliedW = w; g_resAppliedH = h;
     }
+}
+
+void PatchesNoteBackbufferSize(uint32_t w, uint32_t h) {
+    (void)w;
+    if (g_displayLiesOff.load(std::memory_order_relaxed)) return;
+    const uint32_t fh = g_fakeDeskH.load(std::memory_order_relaxed);
+    if (!fh || h + 16 < fh) return;   // lies not armed, or the oversize has not landed yet
+    g_displayLiesOff.store(true);
+    LOGI("[patch] oversized swapchain landed (%ux%u): desktop-size lies DISARMED - the "
+         "game's in-play display-metric polls see the true desktop again (a standing "
+         "height lie is the vertical head-motion warp)", w, h);
 }
 
 void PatchesNoteHmdEyeSize(uint32_t w, uint32_t h) {

@@ -80,6 +80,9 @@ struct BlitParams {
 // `tagIn` is stored with the submitted copy and echoed back as `*tagOut` alongside the luma
 // it produced, so the caller can pair each luma with the pass it was actually captured on
 // despite the submit-now/read-later latency. Returns true only when a luma is produced.
+// One-shot full back-buffer readback to a PPM at `path`. Blocks on a fence (~tens of ms);
+// flat-harness diagnostics only. See dx12_blit.cpp for why it exists.
+bool Dx12DumpBackbuffer(ID3D12CommandQueue* queue, ID3D12Resource* src, const wchar_t* path);
 bool Dx12SampleBackbuffer(ID3D12CommandQueue* queue, ID3D12Resource* src,
                           uint32_t tagIn, uint32_t* tagOut, float* outLuma);
 // Which state the probe assumes the back buffer is in during the present event.

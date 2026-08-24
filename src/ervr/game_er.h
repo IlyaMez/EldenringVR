@@ -27,6 +27,16 @@ GameERStatus GameERGetStatus();
 // Cheap "are we actually in the world?" check. Unlike GameERGetStatus it resets no counters,
 // so it is safe to call from the input hook every frame.
 bool GameERPlayerActive();
+bool GameERVersionOk();   // exe is exactly 2.6.2.0 (RVA patches valid)
+bool GameERPlayerDead();        // HP <= 0: a death warp begins THIS frame
+bool GameERForeignCamActive();
+bool GameERSecondEyePending();  // second-eye stash present (gameplay frame) - menus leave a gap  // menu/cutscene camera owns the FOV (map screen = fast-travel window)
+unsigned long long GameERLastStashTick();  // tick of the last stash: fresh = gameplay, quiet = menu (readable mid-frame, unlike Pending)
+// Complete the pass's stashed eye report with the FINAL render camera and push it. The
+// frame pump calls this right after each pass's queue_tasks returns; without the pump the
+// report simply stays unpushed (mono modes never consume reports).
+void GameERFinalizePassReport();
+bool GameERKillPlayer();   // TEST ONLY: 0 HP -> death warp (see [Experimental] KillPlayerAfter)
 // In-game time in ms (0 if unavailable). Advances by the frame dt each sim frame - the
 // direct probe for whether pass 2 advances the simulation (see hb "igt" ratio).
 uint32_t GameERIgtMs();
@@ -35,6 +45,25 @@ uint8_t* GameERIgtWatchTarget(uint32_t* outLen);
 // True for 4 s after a >100 m camera jump (fast travel / warp): the frame pump suspends
 // the second pass while the world is torn down and rebuilt.
 bool GameERTeleportGraceActive();
+// The game's own transition authority (2026-08-23, replaces the A-press heuristic):
+// GameMan.warp_requested (+0x10) - set on the request frame of EVERY warp (map travel
+// confirm, death respawn, stakes, emevd) and never by ordinary gameplay A presses.
+bool GameERWarpRequested();
+// Community loading-screen byte ([[CSEventFlagMan]+0x28]+0x113): TRUE while the loading
+// screen is up - the whole teardown/stream/rebuild window, as state instead of a timer.
+bool GameERLoadingScreen();
+// Latched warp guard for the frame pump: warp_requested seen within the last
+// Pass2WarpGraceSeconds (bridges the flag being consumed into the player-null/loading
+// holds). Call once per frame - it also edge-logs both signals for postmortems.
+bool GameERWarpGuardActive();
+// Union transition authority for every ERVR path that executes game code or mutates game
+// state (combat TAE injection above all): player null/dead, spawn settle, loading screen,
+// warp latch. Self-sampling - safe to call from any per-frame path in any session mode.
+bool GameERTransitionActive();
+// Write-side hazard window: player dead, warp latched, or loading screen up (no arrival
+// settle). While TRUE, ERVR's per-frame writes into game objects (camera matrices, pose,
+// physics facing) stand down - teardown frees and reuses the memory those writes target.
+bool GameERWorldDying();
 // Full stereo: write the second eye's camera between the two engine passes of one frame.
 // No-op (false) unless UpdateCamera stashed a second-eye request this frame.
 bool GameERApplySecondEyeCamera();

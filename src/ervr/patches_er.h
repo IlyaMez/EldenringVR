@@ -18,6 +18,17 @@ bool  PatchesWriteFrameDt(float dt);
 // square) resolution in the video settings without touching DSR. Idempotent; re-applies
 // when the target changes (ini hot-reload, fresh headset geometry). Worker thread.
 void PatchesApplyGameResolution();
+// Every swapchain (re)creation reports its size here. Once the OVERSIZED back buffer has
+// actually appeared, the desktop-size lies (monitor rect, current display mode) disarm for
+// the rest of the session: they are load-bearing for the settings-apply acceptance but the
+// game also polls the same metrics during play, and a standing height lie is the measured
+// cause of the vertical head-motion warp (2026-08-22, and once before at 1496x1360).
+void PatchesNoteBackbufferSize(uint32_t w, uint32_t h);
+// DllMain(PROCESS_ATTACH)-safe optimistic GraphicsConfig.xml write - kernel32 file APIs
+// only, no logging, no patching. Must beat the game's boot-time read of the file, which
+// even the first worker-thread statements measurably lose to. `module` is ERVR's own
+// HMODULE (void* keeps windows.h out of this header). See patches_er.cpp.
+void PatchesEarlyGraphicsConfigWrite(void* module);
 // Opt the process into per-monitor DPI awareness, as early as possible. ELDEN RING is
 // DPI-virtualized by default: on a 3440x1440 desktop at 150% scaling it measures the screen
 // as ~2293x960, so its WINDOWED resolution list stops at 1680x945 and the back buffer it

@@ -33,11 +33,15 @@ void FrameProbeTick();                      // worker thread; spawns its own thr
 // task lists gated, Draw_Pre..Draw_Post + Flip kept) so both eyes render at one sim time.
 // Armed automatically when [VR] StereoMode=full; the second pass only actually runs on
 // frames where the game stashed a second-eye camera (GameERApplySecondEyeCamera).
-bool FramePumpReady();      // task table found and the frame-driver hook is installed
+bool FramePumpReady();
+bool FramePumpSafeSetActive();   // pass 2 currently runs the SAFE keep set (finalize replay needed)      // task table found and the frame-driver hook is installed
 // Which pass the engine is currently executing: 1 = real frame, 2 = draw-only second pass.
 // Read from the present callback - presents are synchronous with the pass (measured: 58/58
 // presents inside their pass windows, all on the main-loop thread).
 int  FramePumpCurrentPass();
+// stereo.cpp calls this from any present arriving while the pass is 2 - the proof the
+// engine really ran the second pass to Flip. Feeds the wedged-runner watchdog.
+void FramePumpNotePass2Present();
 // Heartbeat: second passes executed since the last read, and the last pass-2 duration.
 long  FramePumpTakePasses();
 float FramePumpLastMs();
