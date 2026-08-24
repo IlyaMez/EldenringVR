@@ -2318,10 +2318,11 @@ uint32_t GameERIgtMs() {
 
 bool GameERForeignCamActive() {
     const ULONGLONG t = g_foreignFovTick.load(std::memory_order_relaxed);
-    // 3 s tail: long enough to bridge "map closed by the travel confirm" into the fade and
-    // the player-null teardown that follow, short enough that closing the map without
-    // traveling costs only a moment of mono.
-    return t != 0 && GetTickCount64() - t < 3000;
+    // 1.2 s tail (2026-08-24, was 3 s): the tail's old job - bridging "map closed by the
+    // travel confirm" into the teardown - belongs to GameMan.warp_requested now, which
+    // fires on the confirm frame itself. The tail only needs to outlive the detector's
+    // own sampling window while a takeover camera is still fading out.
+    return t != 0 && GetTickCount64() - t < 1200;
 }
 
 // The game's OWN warp commitment: GameMan.warp_requested (+0x10). Set on the request frame
@@ -2409,13 +2410,13 @@ bool GameERTransitionActive() {
 
 bool GameERTeleportGraceActive() {
     const ULONGLONG t = g_bigJumpTick.load(std::memory_order_relaxed);
-    // Configurable since 2026-08-22 evening (12 s before, 4 s before that). This grace and
-    // the MainPlayer()-null one above are what keep pass 2 out of a warp now that gating
-    // the transfer groups is off the table (it darkened the right eye - see
-    // vrPass2FullFrameKeep). The jump only fires once the camera has already moved, so the
-    // window covers the destination load behind it; the 12 s sizing outlasted arrival
-    // crashes whose root cause is fixed, and it stacked on the spawn grace at every load.
-    return t != 0 && GetTickCount64() - t < (ULONGLONG)(Cfg().vrPass2WarpGraceSeconds * 1000.f);
+    // Fixed 1 s tail since 2026-08-24: the >100 m jump was the ARRIVAL heuristic of the
+    // pre-signal era, and the last speed pass showed it had become the slowest link in
+    // the resume chain (the jump fires as the destination places the camera, so its tail
+    // ran on after the loading byte cleared). Warp latch + loading byte + spawn grace now
+    // cover arrival authoritatively; this stays only as a last-resort catch for a
+    // world-moving jump that arrives with no warp flag and no load screen.
+    return t != 0 && GetTickCount64() - t < 1000;
 }
 
 uint8_t* GameERIgtWatchTarget(uint32_t* outLen) {

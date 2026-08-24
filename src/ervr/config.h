@@ -405,30 +405,40 @@ struct Config {
     // rebuilds under it - the whole exe+0xc7f88b/0x3f9b2b/0x513baa/0x32b04a family).
     // Steady-state play needs it for stereo depth; the settle window must not run it.
     std::string vrPass2SafeKeep = "0-7,10-25,27-81,83-84,86-88,95-96,98,106-109,113-117,119-122,126-142,144-160,164,168";
-    // Seconds of SAFE keep set after the last guard releases. The arrival crash landed
-    // 13 s after resume (15:30 session); 20 covers it with margin. Depth returns when it
-    // expires - a brief flat-stereo spell after loads instead of a crash.
-    float vrPass2SafeSeconds = 20.f;
+    // Seconds of SAFE keep set after the last guard releases. Was 20 (timer-guess era),
+    // then 8; now 1.5 (2026-08-24 pt2, user asked for 1-2 s transitions): post-load
+    // streaming is not a special state for full-set pass 2 - the open world streams
+    // blocks continuously during normal play and full-set stereo is stable through it.
+    // The states that DID crash are all separately covered now (teardown by the
+    // authoritative signals, the restore bug fixed, combat/writes stood down while
+    // dying). This is the first knob to RAISE if an arrival crash ever returns.
+    float vrPass2SafeSeconds = 1.5f;
     // Seconds pass 2 stays fully OFF (cinema quad) after every player-inactive -> active
     // transition. Was a hardcoded 15 s: 8 s for the spawn-fade crash (exe+0x1e8b0bc, later
     // re-attributed to the readback experiment) plus margin for the 11 s arrival crash
     // (exe+0xc7f88b, root-caused 2026-08-22 to the blanket keep-set restore, since fixed).
-    // With both root causes gone, 6 s still covers the actual fade/teardown window while
-    // cutting the wait for depth by 9 s. Raise it if arrival crashes return. Hot-reloads.
-    float vrPass2SpawnGraceSeconds = 6.f;
+    // With both root causes gone, and arrival now covered by the authoritative signals
+    // (loading byte holds through the load, SAFE covers the streaming tail, writes stand
+    // down while dying), 1 s only needs to bridge the arrival fade-in frames while the
+    // chr list populates (2026-08-24; was 6, then 2). Second knob to raise (after
+    // SafeSeconds) if spawn crashes return. Hot-reloads.
+    float vrPass2SpawnGraceSeconds = 1.f;
     // Seconds pass 2 stays off after a full-screen menu closes (the stash-gap detector).
-    // Bridges a fast-travel confirm into the fade and player-null teardown that follow;
-    // travel fades start well within a second of the confirm, so 3 s is still generous.
-    // Closing the map without traveling costs only this much mono. Hot-reloads.
-    float vrPass2MenuGraceSeconds = 3.f;
+    // RETIRED 2026-08-24 (default 0): this bridge existed to cover the fast-travel confirm
+    // before the game's own warp flag was wired - GameMan.warp_requested now fires ON the
+    // confirm frame, so closing a menu without traveling costs nothing. Set >0 only as a
+    // fallback if the GameMan AOB misses on a new patch. Hot-reloads.
+    float vrPass2MenuGraceSeconds = 0.f;
     // Seconds pass 2 stays off after a >100 m one-frame camera jump (fast travel / death
     // warp ARRIVAL - the jump fires when the destination places the camera). Was a
     // hardcoded 12 s sized against the 11-13 s arrival crashes, whose root cause (the
     // blanket keep-set restore) is fixed; it stacks on the spawn grace at every load
-    // (measured 19:04: 6 s spawn + 10 more of teleport = 16 s of cinema), so it gets the
-    // same evidence-based cut. The SAFE keep set still covers the streaming window behind
-    // it. Raise it if arrival crashes return. Hot-reloads.
-    float vrPass2WarpGraceSeconds = 6.f;
+    // Since 2026-08-24 this is ONLY the warp LATCH tail (GameERWarpGuardActive /
+    // GameERWorldDying): it bridges warp_requested clearing into the player-null/loading
+    // holds, measured 250-700 ms across all 2026-08-23 sessions - 2 s is ~3x margin.
+    // (The >100 m arrival-jump grace it used to size is a fixed 1 s in
+    // GameERTeleportGraceActive - that heuristic is superseded by the signals.)
+    float vrPass2WarpGraceSeconds = 2.f;
     // Replay the game's camera finalizer in pass 2 whenever the SAFE set is live, so the
     // second-eye camera reaches the renderer without the MoveMap family. The depth path
     // for the SAFE set; see HookCameraStepImpl.
