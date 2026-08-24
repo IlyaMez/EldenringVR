@@ -38,7 +38,7 @@ Pulse g_pulses[kMaxPulses];
 
 // Tap/hold trackers.
 struct HoldTracker { bool down = false; double since = 0; bool consumed = false; };
-HoldTracker g_menuHold, g_lthumbHold, g_yHold;
+HoldTracker g_menuHold, g_lthumbHold;
 double g_lastSnap = -1e9;
 int g_lastDpadDir = 0;
 bool g_snapActive = false;
@@ -150,15 +150,9 @@ void VirtualPadUpdate(double now) {
         g_menuHold.down = false;
     }
 
-    // ---- Y: normal Y, plus long-hold = START on runtimes without a Menu button (OpenVR) ---
+    // ---- Y -----------------------------------------------------------------
     bool yDown = (in.buttons & VRB_Y) != 0;
-    bool yFallback = ActiveBackend() && std::strcmp(ActiveBackend()->Name(), "openvr") == 0;
-    if (!yFallback) mapHeld(g_map.y, yDown);
-    else {
-        if (yDown && !g_yHold.down) g_yHold = {true, now, false};
-        if (yDown && !g_yHold.consumed && now - g_yHold.since >= 0.6) { AddPulse(g_map.menu, now, c.gesturePressDuration); g_yHold.consumed = true; pressedStart = (g_map.menu == XINPUT_GAMEPAD_START); }
-        if (!yDown && g_yHold.down) { if (!g_yHold.consumed) AddPulse(g_map.y, now, c.gesturePressDuration); g_yHold.down = false; }
-    }
+    mapHeld(g_map.y, yDown);
 
     // ---- sticks -------------------------------------------------------------
     float lx = in.thumb[HandLeft][0],  ly = in.thumb[HandLeft][1];
@@ -266,7 +260,7 @@ void VirtualPadUpdate(double now) {
         float nx = lx * cs + ly * sn, ny = -lx * sn + ly * cs;
         lx = nx; ly = ny;
     };
-    if (mb.active && !g_menuMode) {   // first person only: in third person the game camera is R.E.A.L.'s to steer
+    if (mb.active && !g_menuMode) {   // first person only: in third person the game steers its own camera
         // VR-frame Yaw() is positive to the LEFT (0 = -Z); the game's yaw is positive to the right.
         float want = mb.viewYaw;                                             // default: leave the stick alone
         if (c.moveForward == "hand" && tr.hand[HandLeft].valid) want = mb.camYaw - tr.hand[HandLeft].rot.Yaw();

@@ -21,7 +21,7 @@ These are out of scope and will be closed:
 
 * Anything involving EAC, online play, or multiplayer. Offline only, permanently. See the
   disclaimer in the README.
-* "Where do I get R.E.A.L.?" — from its author. Not here.
+* Anything about R.E.A.L. VR. ERVR does not use it; remove its files before installing.
 * Requests for game files, save editing, or anything that isn't VR input.
 * Game versions other than the one in the README, unless you include the AOB scan results from
   `tools/verify_signatures.py`.

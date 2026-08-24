@@ -1,8 +1,20 @@
 # Third-party components
 
-ERVR itself is licensed under GPL-3.0-or-later (see [LICENSE](LICENSE)). It links against, or
-derives knowledge from, the projects below. Nothing here is redistributed in this repository —
-the build fetches sources at configure time.
+ERVR itself is licensed under GPL-3.0-or-later (see [LICENSE](LICENSE)). It redistributes one
+third-party binary, links against a few libraries fetched at configure time, and derives knowledge
+from published research. All of the licenses below are permissive and GPL-3.0-compatible.
+
+## Redistributed in the release zip
+
+| Component | Version | License | How it is used |
+|---|---|---|---|
+| [ReShade](https://reshade.me) *with add-on support* | 6.8.0.2155 | BSD-3-Clause | Shipped **unmodified** as `dxgi.dll`. ERVR.dll registers itself as a ReShade add-on and does all of its rendering work (D3D12 frame capture, stereo, HUD quad, OpenXR submission) inside ReShade's `present` event. |
+
+The binary is byte-for-byte the `ReShade64.dll` installed by `ReShade_Setup_6.8.0_Addon.exe`,
+SHA256 `0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7`. It lives in
+[`third_party/reshade/`](third_party/reshade/) together with its license, which the release zip
+carries as `LICENSE-ReShade.txt`. The add-on build is unsigned by design (it is the variant
+anti-cheat vendors do not whitelist); ERVR is offline/EAC-off only, so that costs nothing.
 
 ## Linked at build time
 
@@ -10,10 +22,11 @@ the build fetches sources at configure time.
 |---|---|---|---|
 | [MinHook](https://github.com/TsudaKageyu/minhook) | v1.3.4 | BSD-2-Clause | Inline function hooking. Fetched by CMake `FetchContent`. |
 | [HDE64](https://github.com/TsudaKageyu/minhook) (bundled inside MinHook) | v1.3.4 | BSD-2-Clause | Length-disassembler, reused for ERVR's mid-function hooks (`src/ervr/midhook.cpp`). |
-| [OpenVR](https://github.com/ValveSoftware/openvr) headers | v1.16.8 | BSD-3-Clause | Headers only, to bind to the `openvr_api.dll` already loaded in the process. No Valve binaries are shipped or linked statically. |
+| [ReShade headers](https://github.com/crosire/reshade) (`include/reshade*.hpp`) | v6.8.0 | BSD-3-Clause | Header-only add-on API. `reshade.hpp` finds the loaded ReShade module at runtime; nothing is linked. |
+| [OpenXR SDK loader](https://github.com/KhronosGroup/OpenXR-SDK) | release-1.1.62 | Apache-2.0 | Statically linked into `ERVR.dll` so the distribution stays a single DLL. ERVR creates and owns its own `XrSession` bound to the game's D3D12 device. |
+| [JsonCpp](https://github.com/open-source-parsers/jsoncpp) (vendored by the OpenXR loader) | as shipped with the loader | MIT / Public Domain | Runtime-manifest parsing inside the loader. |
 
-Both licenses are permissive and compatible with GPL-3.0. Their copyright notices travel with
-their own source trees, which CMake places under `build/_deps/`.
+Their copyright notices travel with their own source trees, which CMake places under `build/_deps/`.
 
 ## Knowledge and reference, not code
 
@@ -28,16 +41,18 @@ memory layouts and event templates were derived from their published research:
 * [Halo-MCC-VR](https://github.com/pancreations/Halo-MCC-VR),
   [cyberpunk-vr-port](https://github.com/dariulone/cyberpunk-vr-port) — structural inspiration.
 
-## Not included, and required separately
+## Provided by the user's system
 
-**R.E.A.L. VR** by Luke Ross is a prerequisite for using ERVR. It is a separate, closed-source,
-independently distributed mod. This repository contains **no R.E.A.L. code, headers, binaries, or
-decompiled output**, and none of ERVR's source refers to R.E.A.L. internals. ERVR interoperates
-only through the public Oculus (`LibOVRRT64_1.dll`) and OpenVR (`openvr_api.dll`) runtime APIs,
-which are Meta's and Valve's respectively.
+An **OpenXR runtime** — Meta's (Quest Link / Air Link), Virtual Desktop's VDXR, or SteamVR — is
+required and not shipped. ERVR talks to whichever is the active system OpenXR runtime.
 
-Users must obtain R.E.A.L. themselves from its author. Do not open issues here asking where to get
-it, and do not attach R.E.A.L. files to issues or pull requests.
+## Not used: R.E.A.L. VR
+
+Early ERVR versions were a companion to Luke Ross's R.E.A.L. VR and attached to the session it
+opened. Since the OpenXR rewrite ERVR renders on its own and **R.E.A.L. is neither required nor
+compatible** — both install as `dxgi.dll`. Remove R.E.A.L.'s files (`dxgi.dll`, `RealVR64.dll`,
+`openvr_api.dll`, `cudart64_12.dll`, `RealVR.ini`) before installing ERVR. This repository has never
+contained R.E.A.L. code, headers, binaries, or decompiled output.
 
 ## Game assets
 

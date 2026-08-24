@@ -19,8 +19,8 @@ body:
   - type: dropdown
     id: backend
     attributes:
-      label: VR backend ERVR attached to
-      options: [oculus, openvr, neither]
+      label: OpenXR runtime (the `[xr] runtime` line in ERVR.log)
+      options: [Oculus (Link / Air Link), Virtual Desktop (VDXR), SteamVR, other, none / no runtime line]
     validations:
       required: true
 

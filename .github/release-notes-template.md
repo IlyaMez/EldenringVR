@@ -1,11 +1,14 @@
 ## Install
 
-1. Have **R.E.A.L. VR** installed and working first — ERVR does nothing on its own, and is not
-   distributed with it. Get R.E.A.L. from its author.
-2. Unpack this zip into your `ELDEN RING\Game` folder: `dinput8.dll` next to `eldenring.exe`, with
-   the `ERVR` folder beside it.
-3. Launch exactly as you launch R.E.A.L. Then read `Game\ERVR\ERVR.log` to confirm the VR backend
-   attached and the XInput hook is live.
+1. **Had R.E.A.L. VR installed?** Delete its `dxgi.dll`, `RealVR64.dll`, `openvr_api.dll`,
+   `cudart64_12.dll` and `RealVR.ini` first. ERVR does not use R.E.A.L., and both want to be `dxgi.dll`.
+2. Unpack this zip into your `ELDEN RING\Game` folder, next to `eldenring.exe`. You get `dxgi.dll`
+   (ReShade 6.8.0 with add-on support, bundled), `ReShade.ini`, `dinput8.dll` (loader) and the `ERVR`
+   folder. Already using ReShade or a `dinput8.dll` mod loader? See the README's Download section.
+3. Make sure your headset's OpenXR runtime is active (Meta Link / Air Link, Virtual Desktop VDXR, or
+   SteamVR), launch the game offline with EAC disabled, and put the headset on.
+4. `Game\ERVR\ERVR.log` should show `Active VR backend: openxr` and `[reshade] registered as add-on`.
+   If the second line never appears, `dxgi.dll` is not the bundled one.
 
 > ### ⚠️ Offline / EAC-disabled only
 > Never run this with Easy Anti-Cheat enabled or while connected to online play. Anti-cheat and
@@ -13,9 +16,9 @@
 
 ## Verifying this download
 
-**Your antivirus may flag this.** ERVR is a DLL that injects into a running game process, which is
-behaviourally what a lot of malware does — the detection is generic, not a finding about this code.
-You do not have to take my word for it:
+**Your antivirus may flag this.** `ERVR.dll` injects into a running game process, and `dxgi.dll` is
+ReShade's add-on build, which is unsigned by design. Both detections are generic, not a finding about
+this code. You do not have to take my word for it:
 
 ```
 SHA256  {{SHA256}}
@@ -29,7 +32,9 @@ gh attestation verify {{ZIP}} --repo {{REPO}}
 ```
 
 If that passes, what you downloaded is byte-for-byte what this repository's workflow built from
-public source. Or skip all of it and build from source with `.\build.ps1` — it takes a minute.
+public source. The bundled `dxgi.dll` is the unmodified `ReShade64.dll` from
+`ReShade_Setup_6.8.0_Addon.exe` (hash in `THIRD_PARTY.md` — compare it against a fresh download from
+reshade.me). Or skip all of it and build from source with `.\build.ps1` — it takes a minute.
 
 ## Notes
 

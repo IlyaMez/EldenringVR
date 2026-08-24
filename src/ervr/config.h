@@ -171,7 +171,7 @@ struct Config {
     bool  rumbleToControllers = true;     // forward XInputSetState rumble to Touch controllers
     float rumbleScale = 1.0f;
 
-    // [FirstPerson]  (ERVR takes over the game camera; R.E.A.L. keeps rendering)
+    // [FirstPerson]  (ERVR takes over the game camera and the arm bones)
     bool  fpEnabled = true;
     float fpEyeHeight = 1.60f;            // meters above the character root (CameraAnchor=root, and the height for CameraAnchor=head)
     std::string fpCameraAnchor = "head";  // head = camera rides on the head bone (body connected by construction) | root = character root + EyeHeight

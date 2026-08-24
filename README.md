@@ -1,28 +1,29 @@
-# ERVR — motion controls for ELDEN RING VR
+# ERVR — native VR for ELDEN RING
 
-ERVR is a companion mod for **Luke Ross's R.E.A.L. VR** that adds **motion‑controller support** to ELDEN RING:
-Touch/Index/WMR controllers become the game's gamepad, sword swings trigger attacks, game rumble goes to your hands,
-and (experimentally) the camera can follow your hand for bows and spells.
+ERVR is a free, open‑source **native VR mod for ELDEN RING**: stereo rendering into any OpenXR headset (a head‑locked
+cinema screen, or full per‑eye stereo), 6DoF head tracking, first person with hand‑tracked weapons, motion‑controller
+input, physical melee, and the HUD on its own floating layer.
 
-R.E.A.L. already provides stereo rendering and **6DoF head tracking**. ERVR does not touch rendering — it rides on the
-VR runtime R.E.A.L. has open inside the game process and feeds the game input.
+It runs as a [ReShade](https://reshade.me) add‑on (ReShade is bundled in the download) and owns its own OpenXR
+session — **no R.E.A.L. VR and no other mod is required**. If you have R.E.A.L. installed, remove its files first;
+both want to be `dxgi.dll`.
 
 > ### ⚠️ Offline play only — EAC must be disabled
 >
 > ERVR injects into `eldenring.exe` and writes game memory. **Never run it with Easy Anti-Cheat
 > enabled or while connected to online play.** Doing so risks a permanent ban on your account, and
 > that is entirely on you. Anti-cheat and multiplayer are not supported, not a roadmap item, and
-> never will be. If R.E.A.L. VR already runs for you, EAC is already off.
+> never will be. Launch the game offline with EAC disabled — the bundled ReShade add‑on build would not load under it anyway.
 
 ```
-                ┌──────────────────────── eldenring.exe ─────────────────────────┐
-  Quest 3 ───►  │ LibOVRRT64_1.dll / openvr_api.dll ◄── RealVR64.dll (stereo, 6DoF)│
-  (Link)        │          ▲ session captured by hook                              │
-                │          │                                                       │
-                │   ERVR.dll ── poll poses/buttons ── gestures ── virtual gamepad  │
-                │          │                                                       │
-                │   XInputGetState hook ◄──────────────── game input thread        │
-                └────────────────────────────────────────────────────────────────┘
+                ┌──────────────────────── eldenring.exe ──────────────────────────┐
+  Quest 3 ◄───  │ OpenXR runtime (Link / VDXR / SteamVR) ◄── ERVR.dll (own XrSession)│
+  (Link)        │      ▲ poses, buttons, haptics              ▲ one image per eye  │
+                │      │                                      │                    │
+                │   dxgi.dll = ReShade (bundled) ── present ── ERVR add‑on:        │
+                │      capture D3D12 frame ── stereo pass ── HUD quad ── xrEndFrame │
+                │   dinput8.dll (proxy) ── loads ERVR.dll ── XInput hook ── game    │
+                └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
@@ -41,46 +42,72 @@ VR runtime R.E.A.L. has open inside the game process and feeds the game input.
 
 ## Requirements
 
-* ELDEN RING (Steam) with **R.E.A.L. VR** installed and working (`RealVR64.dll` in `Game\`).
-  EAC must be off — it already is if R.E.A.L. runs for you.
-* Meta Quest via Link/Air Link (**Oculus** path, what R.E.A.L. uses by default) *or* SteamVR (**OpenVR** path).
+* ELDEN RING (Steam), played **offline with EAC disabled**.
+* A PC VR headset with an OpenXR runtime: Meta Quest via Link / Air Link (Oculus runtime), Virtual Desktop (VDXR),
+  or SteamVR (Index, Vive, WMR, Pico, Steam Link…). ERVR uses whichever is the system's active OpenXR runtime.
+* Nothing else. ReShade 6.8.0 (the build with add‑on support) is included in the download. R.E.A.L. VR is not
+  used and must be removed if present.
 * To build: Visual Studio 2022+ with "Desktop development with C++" (CMake is bundled), internet on first configure
-  (fetches MinHook and the OpenVR headers).
+  (fetches MinHook, the ReShade headers and the OpenXR SDK).
 
 ## Download
 
-Grab the latest zip from [**Releases**](../../releases) and unpack it into your `ELDEN RING\Game`
-folder — `dinput8.dll` sits next to `eldenring.exe`, with the `ERVR` folder beside it.
+Grab the latest zip from [**Releases**](../../releases) and unpack it into your `ELDEN RING\Game` folder, next to
+`eldenring.exe`:
 
-**Your antivirus may flag it.** ERVR is a DLL that injects into a running game process, which is
-behaviourally what a lot of malware does; the detection is generic, not a finding about this code.
-You do not have to take my word for it. Release builds are produced by
-[a public GitHub Actions workflow](.github/workflows/release.yml) from the tagged commit and carry a
-signed provenance attestation, so you can check that the download is exactly what this repository
-built:
-
-```powershell
-gh attestation verify ERVR-v0.3.0.zip --repo <owner>/EldenringVR
+```
+Game\
+  dxgi.dll          ReShade 6.8.0 with add-on support (bundled, unmodified)
+  ReShade.ini       ReShade defaults (tutorial off, overlay on Home)
+  dinput8.dll       ERVR's proxy loader
+  ERVR\ERVR.dll     the mod
+  ERVR\ERVR.ini     configuration (hot-reloads)
 ```
 
-Each release also publishes its SHA256. Or skip all of it and build from source — it takes a minute.
+**Had R.E.A.L. VR installed?** Delete its `dxgi.dll`, `RealVR64.dll`, `openvr_api.dll`, `cudart64_12.dll` and
+`RealVR.ini` first — R.E.A.L. and ReShade both live in `dxgi.dll` and cannot coexist.
+**Already using ReShade?** Keep your own `ReShade.ini`, but the `dxgi.dll` must be an add‑on‑support build (6.8+).
+**Already using a `dinput8.dll` mod loader** (ELDEN MOD LOADER etc.)? Keep it and put `ERVR.dll` in its `mods\` folder.
+
+**Your antivirus may flag it.** `ERVR.dll` injects into a running game process, and `dxgi.dll` is ReShade's add‑on
+build, which is unsigned by design (it is the variant anti‑cheat vendors do not whitelist). Both detections are
+generic, not a finding about this code. You do not have to take my word for it. Release builds are produced by
+[a public GitHub Actions workflow](.github/workflows/release.yml) from the tagged commit and carry a signed
+provenance attestation, so you can check that the download is exactly what this repository built:
+
+```powershell
+gh attestation verify ERVR-vX.Y.Z.zip --repo IlyaMez/EldenringVR
+```
+
+The bundled `dxgi.dll` is byte‑for‑byte the `ReShade64.dll` from ReShade's own `ReShade_Setup_6.8.0_Addon.exe`; its
+SHA256 is in [THIRD_PARTY.md](THIRD_PARTY.md) so you can compare it against a fresh download from
+[reshade.me](https://reshade.me). Each release also publishes its own SHA256. Or skip all of it and build from
+source — it takes a minute.
 
 ## Build & install
 
 ```powershell
-.\build.ps1          # -> build\dist\{dinput8.dll, ERVR\ERVR.dll, ERVR\ERVR.ini}
+.\build.ps1          # -> build\dist\{dxgi.dll, ReShade.ini, dinput8.dll, ERVR\ERVR.dll, ERVR\ERVR.ini}
 .\install.ps1        # copies into ...\ELDEN RING\Game   (-GameDir to override, -Uninstall to remove)
 ```
 
-Then launch the game exactly as you do for R.E.A.L. VR. `Game\ERVR\ERVR.log` shows what happened:
+`install.ps1` keeps an existing `ERVR.ini` and `ReShade.ini`, backs up a foreign `dxgi.dll` to `dxgi.dll.ervr-bak`,
+and refuses to overwrite another mod loader's `dinput8.dll` (it tells you where to put `ERVR.dll` instead).
+
+Then launch the game (offline, EAC disabled) and put the headset on. `Game\ERVR\ERVR.log` shows what happened:
 
 ```
-INFO | ERVR 0.1.0 starting ...
+INFO | ERVR 0.x.y starting ...
 INFO | [xinput] hooked xinput9_1_0.dll!XInputGetState
-INFO | [oculus] LibOVRRT64_1.dll found ...
-INFO | [oculus] Captured ovrSession 0000... from R.E.A.L.
-INFO | Active VR backend: oculus
+INFO | VR runtime: openxr
+INFO | [xr] runtime "Oculus" 1.x.x
+INFO | Active VR backend: openxr
+INFO | [reshade] registered as add-on (API version 20)
+INFO | ReShade add-on live (D3D12 capture + XR submission active)
 ```
+
+`Game\ReShade.log` is the other half: its first line must say `Initializing crosire's ReShade version '6.8.0.2155'`.
+If ERVR.log never prints the `[reshade]` lines, `dxgi.dll` is not the bundled one.
 
 Set `LogLevel=debug` to get a 5‑second heartbeat with live trigger/stick values — handy to confirm the controllers
 are being read before you blame the mapping.
@@ -118,12 +145,15 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
 * **Loading** – `dinput8.dll` is a tiny proxy (forwards `DirectInput8Create` to System32) that `LoadLibrary`s
   `ERVR\ERVR.dll`. Standard ELDEN RING mod‑loader route; if you already use a `dinput8.dll` loader, drop `ERVR.dll`
   into its mods folder instead.
-* **VR runtime** – R.E.A.L. owns the headset session. On the Oculus path only one `ovrSession` per process is allowed,
-  so ERVR hooks `ovr_GetTrackingState` / `ovr_GetPredictedDisplayTime` / `ovr_GetSessionStatus` in
-  `LibOVRRT64_1.dll`, captures the session handle R.E.A.L. passes, then calls `ovr_GetTrackingState`,
-  `ovr_GetInputState` and `ovr_SetControllerVibration` on it. On the OpenVR path it grabs `IVRSystem` from the
-  already‑initialised `openvr_api.dll` (or inits as a *background* app) and uses poses + legacy controller state.
-  ERVR never shuts either runtime down.
+* **VR runtime** – ERVR creates and owns its own OpenXR session (`vr_openxr.cpp`), bound to the game's D3D12 device
+  and the queue ReShade presents on. Poses, buttons and haptics are polled on a worker thread at `PollHz`; the
+  frame loop (`xrWaitFrame` / `xrLocateViews` / `xrEndFrame`) runs on the render thread. Whatever is the system's
+  active OpenXR runtime (Oculus, VDXR, SteamVR) is what ERVR talks to.
+* **Rendering** – `ERVR.dll` registers itself as a [ReShade](https://reshade.me) add‑on (the bundled `dxgi.dll`).
+  ReShade's `present` event hands it the game's back buffer, device and queue every frame; ERVR blits that into an
+  OpenXR swapchain image and submits it. `StereoMode=cinema` shows the flat frame on a head‑locked quad;
+  `StereoMode=full` runs a second engine pass per frame from the other eye's camera with the simulation frozen
+  (`Pass2*` in `[VR]`), so both eyes see the same instant. Menus and cutscenes fall back to the cinema quad.
 * **Input** – `XInputGetState/Ex/SetState/GetCapabilities` are detoured (MinHook) in `xinput9_1_0`, `xinput1_3`
   and `xinput1_4`. The virtual pad is merged with any real gamepad (buttons OR'd, largest stick wins). With no real
   pad, user 0 is reported as connected.
@@ -132,7 +162,8 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
 
 ## First person + hand-tracked weapons (v0.2, ELDEN RING 1.16.2 / exe 2.6.2.0)
 
-`[FirstPerson]` in `ERVR.ini`. ERVR takes over the game camera and the arm bones; R.E.A.L. keeps rendering.
+`[FirstPerson]` in `ERVR.ini`. ERVR takes over the game camera and the arm bones and renders the result through its
+own OpenXR session.
 
 * **Camera** – MinHook on the camera step function (RVA `0x3bc5e0`, erfps2's `CAMERA_STEP_UPDATE`). ERVR writes
   `CSPersCam1` (`[[FieldArea]+0x20]+0x20`, matrix at +0x10) and `ChrCam.pers_cam` (`WorldChrMan+0x1ECE0`) with
@@ -140,7 +171,7 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
   = root + `EyeHeight` + `CameraBob` × the bone's own excursion) — so neck, shoulders and arms are under the view
   whatever the run/turn animation does, instead of the skeleton being dragged under a root-anchored camera every
   tick (`CameraAnchor=root` + `BodyFollowsHead`, the old way, which the run animation fights and wins on some
-  frames). Rotation = ERVR's yaw; R.E.A.L. composes the HMD on top.
+  frames). Rotation = ERVR's yaw with the headset rotation composed on top (`CameraRotation=hmd`).
   The HMD look direction is written to `ChrIns+0x120` (`aim_view_mtx`) so spells/bows aim where you look.
   Our writes always happen *after* the game's own chr-cam / camera step has run, so the game never gets a
   first-person matrix as the input to its next update.
@@ -150,12 +181,6 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
   the same amount, and a `BodyFollowsHead` shift pinned against its clamp. ERVR keeps its own origin that follows
   your head with a `RecenterSeconds` time constant and a `RecenterMaxRadius` hard limit: leaning and ducking still
   move the view, walking around the room is absorbed.
-* **Eye ownership** (`OwnHeadPosition`, off by default: it costs 6DoF feel — head tilt/roll pivots wrong and the body appears to slide against it) – ERVR hooks the very `ovr_GetTrackingState` call R.E.A.L. reads its
-  head pose from and hands it a *zero* position (rotation untouched), then writes the eye
-  (anchor + re-centred HMD offset) into the game camera itself. R.E.A.L. therefore has nothing of its own to
-  add, and the rendered eye is exactly the camera we wrote — the body, hands and aim matrix are placed against
-  the same point by construction. Without it (OpenVR, or turned off) we fall back to guessing what R.E.A.L. adds
-  (`RealHmdPositionScale`) and pre-subtracting it, which is only as good as the guess.
 * **Body pose** (`PoseMode=vr`, default) – the rig never plays a game animation. A standing pose is captured from
   the animation system once (at skeleton discovery, re-captured whenever you stand still for a second, so
   idle/crouch/sit stances still come through as discrete poses) and written over the **entire** live Havok pose on
@@ -207,14 +232,14 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
   write we hook (follow-cam function, chr-cam update, camera step), and the debug dump counts any foreign yaw
   still found before a write. The view yaw is integrated from the right stick
   (smooth or snap), the chr-cam matrix is anchor + that yaw, the game moves the character relative to it, and the
-  camera step R.E.A.L. hooks still runs on top. Locked on, the yaw follows the target. `Forward=head|hand|body`
+  game's own camera step still runs on top. Locked on, the yaw follows the target. `Forward=head|hand|body`
   rotate the move stick if you want forward to be something other than the view yaw. `CameraYawSource=game`
   is the old read-it-back mode. The character itself is still driven through the game (stick, strafe flags,
   its own animation/collision/root motion) — nothing of the locomotion is re-implemented.
-* **Locomotion** â€“ `[Locomotion] Mode=game` (default): the game moves the character from the virtual stick.
+* **Locomotion** – `[Locomotion] Mode=game` (default): the game moves the character from the virtual stick.
   `Mode=direct` (experimental, opt-in): ERVR integrates the horizontal position itself from the processed stick in
   the view frame (`RunSpeed`/`SprintSpeed`, sprint = B held), keeps the game's height, and turns the physics
-  body to the view yaw â€” only while the stick is pushed, so rolls/attacks/ladders still displace normally. The
+  body to the view yaw — only while the stick is pushed, so rolls/attacks/ladders still displace normally. The
   game's collision is bypassed for that motion. `FeedStick` keeps handing the stick to the game so the run/strafe
   animations play (its own displacement is overwritten).
 * **Body yaw** (`BodyYaw=camera`) – the character body (fake lock-on facing, whole-skeleton yaw, spine twist,
@@ -389,17 +414,12 @@ Implementation (`src/ervr/combat.cpp`):
 
 ## Troubleshooting notes (learned the hard way)
 
-* **Virtual Desktop**: R.E.A.L. runs on the Oculus path via VD's shim, which is injected as
-  `VirtualDesktop.LibOVRRT64_1.dll` (not the stock name) and returns 0 from `ovr_GetConnectedControllerTypes`
-  even though input works. ERVR finds the runtime by its exports and infers "connected" from live data.
-* **The game imports `XINPUT1_4.dll` by ordinal** (2 = `XInputGetState`, 3 = `XInputSetState`) and R.E.A.L. hooks
-  kernel32 `GetProcAddress`/`LoadLibrary`. Inline hooks alone were not on the game's call path; ERVR patches the
+* **The game imports `XINPUT1_4.dll` by ordinal** (2 = `XInputGetState`, 3 = `XInputSetState`), and overlays and
+  wrappers commonly hook kernel32 `GetProcAddress`/`LoadLibrary`. Inline hooks alone were not on the game's call path; ERVR patches the
   IAT slots of `eldenring.exe` directly (see `[xinput] IAT patched` in the log) and resolves exports by walking
   the PE export table.
 * `LogLevel=debug` heartbeat shows `XInputGetState calls N, modified N, fabricated N` — if `calls` is 0 the game is
   not reaching the hook; if the others are 0 the merge produced nothing.
-* R.E.A.L.'s LoadLibrary hook refuses `vrclient_x64.dll` loads from foreign threads early on, so the SteamVR
-  background fallback is delayed/rate limited.
 
 ## Hand aim (experimental)
 
@@ -421,10 +441,11 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise — 
 
 ## Limitations / roadmap
 
-* **Rendering is R.E.A.L.'s.** Head 6DoF, alternate‑eye rendering, FOV, comfort options — all configured in
-  R.E.A.L.'s menu, not here. ERVR cannot show your hands or weapons in‑world; the character animates as with a pad.
-* Oculus path requires R.E.A.L. to actually have created its session (log shows "Captured ovrSession"). If R.E.A.L.
-  runs in a mode that never loads `LibOVRRT64_1.dll` or `openvr_api.dll` in‑process, ERVR has nothing to attach to.
+* **Full stereo is expensive.** The engine's simulation step is a fixed 1/60 s, so a loop under 60 Hz slows the
+  whole game down, and the second eye pass roughly doubles the GPU cost. Lower the game's resolution/settings
+  before blaming the headset; `StereoMode=cinema` is the cheap fallback and always works.
+* Visual/comfort options live in `[VR]` (`RenderScale`, `WorldScale`, `FovDeg`, `IpdMm`, snap turn). There is no
+  in‑headset settings menu yet — edit `ERVR.ini`, it hot‑reloads.
 * Physical melee has no attack animation at all: enemy AI/hitstop cues that key off the player's *attack state*
   (not the hit) are absent, and the game may still allow rolling mid-swing. Damage numbers are the weapon's real
   R1/R2 values regardless of how hard you swing (speed scaling is a planned hook).
@@ -435,12 +456,12 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise — 
 
 * [Halo‑MCC‑VR](https://github.com/pancreations/Halo-MCC-VR) and
   [cyberpunk‑vr‑port](https://github.com/dariulone/cyberpunk-vr-port) for the "controllers → engine input, gestures →
-  actions" structure. Those projects also *render* natively; here rendering is intentionally left to R.E.A.L.
+  actions" structure.
 * [DSAnimStudio](https://github.com/Meowmaritus/DSAnimStudio) (Meowmaritus) — TAE event templates (`AttackBehavior`
   argument layout); [fromsoftware-rs](https://github.com/vswarte/fromsoftware-rs) / erfps2 (Dasaav) — `CSChrTaeAnimEvent`
   and ChrIns module layouts; Souls Modding wiki (Muffin) — BehaviorParam row scheme.
-* Luke Ross — R.E.A.L. VR.
-* [MinHook](https://github.com/TsudaKageyu/minhook), [OpenVR](https://github.com/ValveSoftware/openvr).
+* [MinHook](https://github.com/TsudaKageyu/minhook), [ReShade](https://github.com/crosire/reshade) (crosire),
+  [OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK).
 
 ## Support, bugs, contributing
 
@@ -471,15 +492,15 @@ derivative builds of this work stay inspectable and free rather than ending up b
 subscription.
 
 Third-party components and the research this builds on are credited in
-[THIRD_PARTY.md](THIRD_PARTY.md). **R.E.A.L. VR is not distributed here** — it is a separate,
-closed-source mod by Luke Ross, no part of which appears in this repository. Get it from its author.
+[THIRD_PARTY.md](THIRD_PARTY.md), including the bundled, unmodified ReShade binary (BSD‑3), whose license
+ships as `LICENSE-ReShade.txt` in every release.
 
 ## Disclaimer
 
 Offline / EAC‑disabled use only. Anti‑cheat and online play are not supported and never will be.
 
 Not affiliated with, endorsed by, or connected to FromSoftware, Bandai Namco, Meta, Valve, or the
-author of R.E.A.L. VR. ELDEN RING is a trademark of its respective owners. This mod ships no game
+ReShade project. ELDEN RING is a trademark of its respective owners. This mod ships no game
 code or assets. Use it at your own risk, on a game you own, offline.
 
 ---

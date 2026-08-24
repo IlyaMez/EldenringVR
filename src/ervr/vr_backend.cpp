@@ -41,6 +41,15 @@ void BackendsTick() {
         g_snapTracking = tr; g_snapInput = in; g_snapValid = true;
     } else {
         if (++g_failStreak == 200) LOGW("VR backend %s stopped returning data; will keep retrying", g_active->Name());
+        // Poll fails whenever the runtime withholds input (session not FOCUSED: a dashboard,
+        // an overlay, the headset off). Keeping the previous snapshot here meant whatever was
+        // held at that instant - a trigger, a stick push - was re-injected into the game for
+        // as long as the overlay stayed up. Tracking is kept (the head is still where it was);
+        // the input side is released so nothing stays pressed and the pad reads idle.
+        {
+            std::lock_guard<std::mutex> g(g_snapMtx);
+            g_snapInput = VRInputState{};
+        }
         if (!g_active->IsReady()) {
             LOGI("VR backend %s lost its runtime; re-scanning", g_active->Name());
             g_active = nullptr;

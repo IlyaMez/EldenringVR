@@ -1,4 +1,4 @@
-// ERVR - motion controls for ELDEN RING on top of R.E.A.L. VR.
+// ERVR - native VR for ELDEN RING: own OpenXR session, rendering as a ReShade add-on, motion controls.
 //
 // Lifecycle:
 //   DllMain(ATTACH) -> spawn worker thread (never block the loader lock)
@@ -287,7 +287,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     case DLL_PROCESS_DETACH:
         g_quit.store(true);
         // Do not wait on the worker or unhook here: process is exiting and other
-        // modules (LibOVR, XInput) may already be gone. MinHook is process-scoped.
+        // modules (the OpenXR runtime, XInput) may already be gone. MinHook is process-scoped.
         ervr::LogShutdown();
         break;
     }

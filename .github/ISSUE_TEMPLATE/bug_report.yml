@@ -14,7 +14,7 @@ body:
     attributes:
       label: Preflight
       options:
-        - label: R.E.A.L. VR works on its own, without ERVR installed.
+        - label: "`Game\\ReShade.log` starts with `Initializing crosire's ReShade version '6.8.0.2155'` (the bundled dxgi.dll is loading)."
           required: true
         - label: I am playing offline with EAC disabled.
           required: true
@@ -40,22 +40,24 @@ body:
       required: true
 
   - type: input
-    id: real-version
+    id: xr-runtime
     attributes:
-      label: R.E.A.L. VR version
-      placeholder: "e.g. R.E.A.L. ER build 2024-xx"
+      label: OpenXR runtime
+      description: 'The `[xr] runtime` line in ERVR.log, e.g. Oculus 1.xx, VDXR, SteamVR/OpenXR.'
+      placeholder: 'Oculus 1.xx.x'
     validations:
       required: true
 
   - type: dropdown
     id: backend
     attributes:
-      label: VR backend
-      description: The log line "Active VR backend:" tells you which one attached.
+      label: Did ERVR attach?
+      description: 'ERVR.log should contain both "Active VR backend: openxr" and "[reshade] registered as add-on".'
       options:
-        - oculus
-        - openvr
-        - neither / no backend line in the log
+        - both lines present
+        - 'only "Active VR backend" (ReShade add-on never registered)'
+        - 'only "[reshade] registered" (no OpenXR session)'
+        - neither
     validations:
       required: true
 
