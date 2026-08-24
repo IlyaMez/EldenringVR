@@ -248,24 +248,32 @@ void VirtualPadUpdate(double now) {
     }
 
     // ---- movement basis --------------------------------------------------------
-    // The game moves you relative to its camera, and in first person that camera is ERVR's stick yaw - which is
-    // where the *tracking origin* points, not where you look. So "forward" has to be rotated by the yaw of
-    // whatever the player means by forward, measured in the tracking frame (game convention: positive = right):
+    // The game resolves the move stick in the frame of the camera matrix it sees. With CameraRotation=hmd that
+    // matrix is ERVR's stick yaw composed with the full HMD orientation (mb.viewYaw = camYaw + headYaw), so
+    // "forward" already follows your head; with CameraRotation=yaw/game it is the stick yaw alone. Either way the
+    // rule is the same: rotate the stick by (yaw the player means by forward) - (yaw of the game's frame),
+    // measured in the game convention (positive = right):
     //   head   = where you look (default; what every VR game does)
     //   hand   = where the left controller points
     //   body   = where the character body is turned (BodyYaw)
-    //   camera = the stick yaw itself (old behaviour: forward is wherever you last turned with the stick)
+    //   camera = the stick yaw itself (forward is wherever you last turned with the stick, whatever the head does)
+    // (Rotating by headYaw unconditionally - the old code - double-counted the head yaw under CameraRotation=hmd:
+    // physically turning 90 degrees sent stick-forward 180 degrees off.)
     MoveBasis mb = GameERGetMoveBasis();
     auto rotateStick = [&](float r) {   // rotate the stick vector by r about Y (stick y = forward, positive r = right)
+        if (r == 0.f) return;
         float cs = std::cos(r), sn = std::sin(r);
         float nx = lx * cs + ly * sn, ny = -lx * sn + ly * cs;
         lx = nx; ly = ny;
     };
     if (mb.active && !g_menuMode) {   // first person only: in third person the game camera is R.E.A.L.'s to steer
         // VR-frame Yaw() is positive to the LEFT (0 = -Z); the game's yaw is positive to the right.
-        if (c.moveForward == "hand" && tr.hand[HandLeft].valid) rotateStick(-tr.hand[HandLeft].rot.Yaw());
-        else if (c.moveForward == "body") rotateStick(WrapPi(mb.bodyYaw - mb.camYaw));
-        else if ((c.moveForward == "head" || c.moveForward == "hand") && mb.headValid) rotateStick(mb.headYaw);
+        float want = mb.viewYaw;                                             // default: leave the stick alone
+        if (c.moveForward == "hand" && tr.hand[HandLeft].valid) want = mb.camYaw - tr.hand[HandLeft].rot.Yaw();
+        else if (c.moveForward == "body") want = mb.bodyYaw;
+        else if (c.moveForward == "camera") want = mb.camYaw;
+        else if (mb.headValid) want = mb.camYaw + mb.headYaw;               // head (and hand without a controller)
+        rotateStick(WrapPi(want - mb.viewYaw));
     } else if (c.moveForward == "hand" && tr.hand[HandLeft].valid && tr.head.valid && !g_menuMode) {
         // Game-owned view yaw (default): forward is where you look; hand-relative = rotate by (controller - head) yaw.
         rotateStick(WrapPi(tr.hand[HandLeft].rot.Yaw() - tr.head.rot.Yaw()));
@@ -316,6 +324,8 @@ void VirtualPadUpdate(double now) {
             if (hr & (4u << h)) Haptic((Hand)h, 1.0f, now, 0.25);          // rejected (no stamina): long buzz
             else if (hr & (1u << h)) Haptic((Hand)h, 0.35f, now, 0.05);    // swing armed: short tick
         }
+        if (hr & 32u) Haptic(HandLeft, 1.0f, now, 0.18);                    // deflect: hard, long
+        else if (hr & 16u) Haptic(HandLeft, 0.6f, now, 0.08);               // blocked hit: thud
     }
     Swing sr = g_gest.Update(HandRight, tr.hand[HandRight], rGrip, now);
     Swing sl = g_gest.Update(HandLeft,  tr.hand[HandLeft],  lGrip, now);
@@ -340,6 +350,7 @@ void VirtualPadUpdate(double now) {
     if (!g_menuMode) {   // physical combat: trigger/grip must not start attack animations (menus still need RB/RT tabs)
         uint16_t blocked = CombatBlockedButtons();
         if (blocked) { held &= ~blocked; pulses &= ~blocked; if (blocked & VP_RT) rt = 0; if (blocked & VP_LT) lt = 0; }
+        held |= CombatHeldButtons();   // raised shield = guard held
     }
     pulses &= ~(VP_LT | VP_RT);
     held &= ~(VP_LT | VP_RT);

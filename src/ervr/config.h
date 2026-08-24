@@ -156,7 +156,7 @@ struct Config {
     bool  gestureHaptics = true;
 
     // [Movement]
-    std::string moveForward = "head";     // head (where you look - stick forward walks toward your gaze) | camera (stick passed through: forward = the stick yaw) | hand | body
+    std::string moveForward = "head";     // head (where you look - stick forward walks toward your gaze) | camera (forward = the stick yaw, whatever the head does) | hand | body
     std::string rightStick = "camera";    // camera | body: what the right stick turns when ERVR owns the yaw
     bool  handRelativeMovement = false;   // legacy alias for MoveForward=hand
     bool  cameraTurnErvr = true;          // the turn stick drives ERVR's own view yaw (needs CameraYawSource=ervr)
@@ -263,6 +263,39 @@ struct Config {
     int   combatExtraStamina[3] = {0, 0, 0};   // stamina taken by ERVR per light/heavy/left swing (0 = only the game's own cost)
     bool  combatSuppressAnimAttacks = false;   // swallow AttackBehavior events from animations while physical
     bool  combatDebug = false;
+    // Kinetic: strike quality (tip speed vs a reference speed, squared, x arc) scales the attack row's
+    // motion values live in the loaded params; stamina is fatigue.
+    bool  kineticEnabled = true;
+    float kineticRefSpeed = 8.0f;         // m/s VIRTUAL tip speed at contact = quality 1 (vanilla damage)
+    float kineticArcRef = 0.5f;           // m of tip travel for a full-arc strike at weight 0 (x (1 + weight/10))
+    float kineticMinMult = 0.25f;         // damage multiplier at quality 0 (chip)
+    float kineticMaxMult = 1.2f;          // multiplier at quality 1.5 (cap)
+    float kineticHeavyQuality = 0.85f;    // quality (with >=80% of a full arc) that selects the heavy attack row
+    float kineticAccel = 60.f;            // m/s^2 the (virtual or inertial) weapon can gain at weight 0
+    float kineticAccelWeight = 4.f;       // weight at which that acceleration halves (UGS ~23 -> 1/7)
+    // Inertial arm: the rendered hand/weapon chases the controller through a force-limited spring
+    // (linear cap = KineticAccel/(1+weight/KineticAccelWeight), angular cap likewise from InertiaAngAccel),
+    // so a heavy weapon visibly cannot be flicked and the hit sweep follows the weapon you see.
+    bool  kineticInertia = true;
+    float inertiaAngAccel = 300.f;        // rad/s^2 at weight 0
+    float inertiaSpringHz = 8.f;          // stiffness of the chase near the target (higher = tighter tracking)
+    float kineticArmPerWeight = 0.012f;   // s of extra commit delay per weight unit (startup grows with weight)
+    float kineticStaminaScale = 1.0f;     // x the game's own BehaviorParam stamina cost per strike (x 0.5..1 by quality)
+    float kineticStaminaPerStrike = 8.f;  // fallback flat drain when the behavior row is unknown, x(1 + weight/12)
+    float kineticFatigueStart = 0.35f;    // stamina fraction below which strikes weaken
+    float kineticFatigueFloor = 0.5f;     // multiplier at 0 stamina
+    bool  kineticPoiseScales = true;      // scale poise damage too
+    bool  kineticStaminaDamageScales = true;   // scale stamina damage dealt to guarding enemies too
+    // Shields: left-hand shield pose vs the head -> block quality -> guard held + shield params scaled.
+    bool  blockEnabled = true;
+    std::string guardButton = "LB";
+    std::string shieldWepTypes = "65,67,69";   // EquipParamWeapon wepType values that count as shields
+    float blockReleaseSeconds = 0.35f;    // guard stays held this long after the shield leaves the "up" zone
+    float blockMinCut = 0.4f;             // guard cut rate multiplier at block quality 0
+    float blockMinStability = 0.5f;       // stability (stamina_guard_def) multiplier at quality 0
+    float shieldNormalPitchDeg = -90.f;   // shield face normal = controller forward pitched by this (-90 = the controller's -Y, measured 2026-08-24)
+    float deflectSpeed = 1.2f;            // m/s shield speed INTO the attack at impact = deflect (stamina refunded)
+    int   blockImpactStamina = 4;         // one-frame stamina drop while guarding that counts as a blocked hit
     std::wstring iniPath;                 // where Load() read from (for SaveLearned)
 
     // [Cheats]  offline convenience for testing (writes the save's PlayerGameData)

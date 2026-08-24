@@ -27,8 +27,14 @@ bool CombatHandlesSwings();
 void CombatNotifyButton(uint16_t xinputMask, double now);
 // XInput button mask virtual_pad must not emit while physical combat is active (attack buttons -> animations).
 uint16_t CombatBlockedButtons();
+// XInput buttons virtual_pad must HOLD: the guard button while the left-hand shield is raised.
+uint16_t CombatHeldButtons();
+// Weight the hand is carrying (EquipParamWeapon weight; both hands share it when two-handing;
+// 0 = empty/unknown). Drives the inertial arm in game_er.
+float CombatHandWeight(int hand);
 // Haptic requests raised by the game-thread side (stamina empty, swing armed); worker drains them.
-// Returns a bitmask: bit0 = left hand, bit1 = right hand, bit2/3 = "fail" flavour for left/right.
+// Returns a bitmask: bit0 = left hand, bit1 = right hand, bit2/3 = "fail" flavour for left/right,
+// bit4 = blocked hit (left), bit5 = deflect (left).
 uint32_t CombatTakeHapticRequests();
 
 // Game thread, once per rendered frame with the main player ChrIns.
@@ -41,6 +47,10 @@ struct CombatStatus {
     long injected = 0;              // synthetic AttackBehavior calls since last query
     long swings = 0;                // swings started since last query
     int  stamina = -1;
+    bool paramsReady = false;       // SoloParamRepository located (kinetic scaling possible)
+    float lastQuality = 0.f, lastMult = 0.f;   // last strike's quality and damage multiplier
+    bool shield = false, guarding = false;     // shield in the left hand / guard currently raised
+    float blockQuality = 0.f;
 };
 CombatStatus CombatGetStatus();
 }

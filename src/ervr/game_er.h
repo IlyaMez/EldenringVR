@@ -73,6 +73,12 @@ bool GameERDebugPitchCamera(float pitchDeg);
 // CamWatch guard-page probe. Null until in-game.
 uint8_t* GameERCamWatchTarget(uint32_t* outLen);
 
+// ---- inertial arm -------------------------------------------------------------------
+// Motion of the weapon the game actually renders/sweeps (the hand chases the controller through
+// a weight-driven, force-limited spring). tipSpeed/handSpeed in m/s, arc = tip path since the tip
+// last came to rest. False when the arm is not being driven or the sample is stale.
+bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc);
+
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and
 // everything (camera matrix, body facing, movement basis) is derived from it, so nothing the game's own
@@ -88,6 +94,8 @@ struct MoveBasis {
     float bodyYaw = 0;       // where ERVR is turning the body toward (head yaw by default)
     float headYaw = 0;       // HMD yaw relative to the tracking origin, game convention (positive = right)
     bool  headValid = false;
+    float viewYaw = 0;       // yaw of the camera matrix the GAME sees - the frame it resolves the move stick in
+                             // (camYaw + headYaw with CameraRotation=hmd, camYaw otherwise)
 };
 MoveBasis GameERGetMoveBasis();
 }

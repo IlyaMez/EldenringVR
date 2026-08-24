@@ -717,6 +717,68 @@ namespace posescan {
 }
 
 // ---------------------------------------------------------------- VR -> game frame
+// ---------------------------------------------------------------- inertial arm
+// The rendered hand chases the controller through a critically damped spring (with velocity
+// feed-forward, so a steadily moving light hand tracks with no lag) whose acceleration is capped
+// by the carried weight (CombatHandWeight): linear cap KineticAccel/(1+w/W), angular cap
+// InertiaAngAccel/(1+w/W). Empty hands track 1:1. Runs on the game thread, once per frame
+// cycle, in the play-space frame the arm solver is fed, so the weapon the game sweeps IS the
+// lagged one and combat reads its motion back through GameERWeaponMotion.
+struct InertiaState {
+    bool init = false;
+    Vec3 pos, vel, lastTarget; Quat q, lastTargetQ; Vec3 angVel;
+    double t = 0;
+    float arc = 0.f, tipSpeed = 0.f, handSpeed = 0.f; double stamp = 0;   // report (under g_inertiaMtx)
+};
+InertiaState g_inertia[2];
+std::mutex g_inertiaMtx;
+
+Vec3 QuatToRotVec(const Quat& qIn) {   // axis * angle of a unit quaternion, shortest way round
+    Quat n = qIn; if (n.w < 0) { n.x = -n.x; n.y = -n.y; n.z = -n.z; n.w = -n.w; }
+    float s = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+    if (s < 1e-6f) return {};
+    float ang = 2.f * std::atan2(s, n.w);
+    return Vec3{n.x, n.y, n.z} * (ang / s);
+}
+
+void InertiaStep(int h, Vec3& p, Quat& q, double now) {
+    const Config& c = Cfg();
+    InertiaState& s = g_inertia[h];
+    const float weight = CombatHandWeight(h);
+    float dt = s.init ? (float)(now - s.t) : 0.f; s.t = now;
+    const bool goodDt = dt > 0.f && dt <= 0.1f;
+    Vec3 vT = goodDt ? (p - s.lastTarget) * (1.f / dt) : Vec3{};
+    Vec3 wT = goodDt ? QuatToRotVec((q * s.lastTargetQ.Conj()).Normalized()) * (1.f / dt) : Vec3{};
+    s.lastTarget = p; s.lastTargetQ = q;
+    if (!c.kineticInertia || weight <= 0.f || !s.init || !goodDt || (p - s.pos).Length() > 1.5f) {
+        // 1:1 (empty hand / disabled / first sample / snap): velocities are the controller's own.
+        s.vel = vT; s.angVel = wT; s.pos = p; s.q = q; s.init = true;
+    } else {
+        const float wf = 1.f + weight / (c.kineticAccelWeight > 0.1f ? c.kineticAccelWeight : 4.f);
+        const float aMax = (c.kineticAccel > 1.f ? c.kineticAccel : 60.f) / wf;
+        const float alMax = (c.inertiaAngAccel > 1.f ? c.inertiaAngAccel : 300.f) / wf;
+        const float w0 = 6.2831853f * (c.inertiaSpringHz > 0.5f ? c.inertiaSpringHz : 8.f);
+        const float k = w0 * w0, d = 2.f * w0;
+        // Braking is allowed at twice the cap: stopping a swing is easier than making one.
+        Vec3 a = (p - s.pos) * k + (vT - s.vel) * d;
+        { float m = a.Length(), lim = a.Dot(s.vel) < 0 ? 2.f * aMax : aMax; if (m > lim) a = a * (lim / m); }
+        s.vel = s.vel + a * dt; s.pos = s.pos + s.vel * dt;
+        Vec3 al = QuatToRotVec((q * s.q.Conj()).Normalized()) * k + (wT - s.angVel) * d;
+        { float m = al.Length(), lim = al.Dot(s.angVel) < 0 ? 2.f * alMax : alMax; if (m > lim) al = al * (lim / m); }
+        s.angVel = s.angVel + al * dt;
+        float wm = s.angVel.Length();
+        if (wm > 1e-6f) s.q = (Quat::AxisAngle(s.angVel * (1.f / wm), wm * dt) * s.q).Normalized();
+        p = s.pos; q = s.q;
+    }
+    // Motion report: the weapon tip = hand + forward (game +Z) * reach.
+    const float reach = h == HandRight ? c.weaponReachRight : c.weaponReachLeft;
+    Vec3 tipV = s.vel + s.angVel.Cross(s.q.Rotate({0, 0, 1}) * reach);
+    const float tip = tipV.Length();
+    std::lock_guard<std::mutex> g(g_inertiaMtx);
+    if (goodDt) { if (tip >= c.swingOffSpeed) s.arc += tip * dt; else s.arc = 0.f; }
+    s.tipSpeed = tip; s.handSpeed = s.vel.Length(); s.stamp = now;
+}
+
 struct FrameInfo {
     bool valid = false;
     bool lockedOn = false; // a real enemy is locked on
@@ -940,6 +1002,8 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
             f.handValid[h] = hand.valid && in.controllerConnected[h];
             if (!f.handValid[h]) continue;
             Vec3 p = ToGame(hand.pos); Quat q = ToGame(hand.rot);
+            // Weight: the hand the arm solver gets is the inertial one, filtered in drift-free play space.
+            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, NowSec()); p = pPlay + psOrigin; }
             // All three origins end up drift-free: "head" is head-relative by construction (the head offset is
             // added back at the target), the other two are measured from our own play-space origin.
             if (c.handOrigin == "head") p = p - hp;
@@ -1989,7 +2053,10 @@ void DirectLocomotion(uint8_t* player, const FrameInfo& f) {
     if (!g_locoActive) { g_locoPos = {p[0], p[1], p[2]}; g_locoActive = true; return; }
     if (mag > 1.f) { mi.x /= mag; mi.y /= mag; mag = 1.f; }
     float speed = (mi.sprint ? c.locoSprintSpeed : c.locoRunSpeed) * mag;
-    Vec3 dir = Quat::YawQ(f.baseYaw).Rotate(Vec3{mi.x, 0.f, mi.y}); dir.y = 0.f;
+    // The stick arrives in the frame of the camera matrix the game sees (VirtualPadUpdate rotates it into that
+    // frame), which includes the HMD yaw when CameraRotation=hmd - same rule as MoveBasis::viewYaw.
+    float frameYaw = (f.headValid && c.fpCameraRotation == "hmd") ? WrapPi(f.baseYaw + f.headYaw) : f.baseYaw;
+    Vec3 dir = Quat::YawQ(frameYaw).Rotate(Vec3{mi.x, 0.f, mi.y}); dir.y = 0.f;
     if (dir.Length() > 1e-4f) dir = dir.Normalized();
     g_locoPos = g_locoPos + dir * (speed * dt);
     // resync if the game moved us a long way (fall, teleport, ladder) so we never drag the character back
@@ -2059,6 +2126,17 @@ uint8_t* ResolveCallTarget(const char* pattern, const char* name) {
 }
 
 } // namespace
+
+bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc) {
+    if (hand != HandLeft && hand != HandRight) return false;
+    std::lock_guard<std::mutex> g(g_inertiaMtx);
+    const InertiaState& s = g_inertia[hand];
+    if (!s.init || NowSec() - s.stamp > 0.1) return false;
+    if (tipSpeed) *tipSpeed = s.tipSpeed;
+    if (handSpeed) *handSpeed = s.handSpeed;
+    if (arc) *arc = s.arc;
+    return true;
+}
 
 // Full stereo, pass 2: write the OTHER eye's camera into every slot the real pass wrote.
 // Called by the frame pump between the two engine passes, on the main-loop thread, while
@@ -2458,6 +2536,9 @@ MoveBasis GameERGetMoveBasis() {
     m.bodyYaw = g_bodyYaw.load();
     m.headYaw = g_headYaw.load();
     m.headValid = g_headYawValid.load();
+    // With CameraRotation=hmd the matrix we write into ChrCam is YawQ(camYaw) * headQ (UpdateCamera), and the game
+    // derives its stick frame from that matrix - so physically turning your head already turns "stick forward".
+    m.viewYaw = (m.headValid && Cfg().fpCameraRotation == "hmd") ? WrapPi(m.camYaw + m.headYaw) : m.camYaw;
     return m;
 }
 
