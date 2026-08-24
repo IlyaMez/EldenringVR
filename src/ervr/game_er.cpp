@@ -2138,6 +2138,14 @@ bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc)
     return true;
 }
 
+int GameERPlayerLevel() {
+    if (!g_gameDataManPtr) return -1;
+    uint8_t* gdm = Deref(g_gameDataManPtr); if (!gdm) return -1;
+    uint8_t* pgd = Deref(gdm + 0x8); if (!pgd) return -1;
+    int level = -1; SafeRead(pgd + 0x68, &level, 4);
+    return level;
+}
+
 // Full stereo, pass 2: write the OTHER eye's camera into every slot the real pass wrote.
 // Called by the frame pump between the two engine passes, on the main-loop thread, while
 // every camera writer is quiescent (the camera step is gated for the pass that follows).

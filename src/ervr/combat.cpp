@@ -32,9 +32,11 @@
 #include <MinHook.h>
 #include <atomic>
 #include <mutex>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace ervr {
 namespace {
@@ -312,7 +314,7 @@ void ReadEquipment(uint8_t* player) {
         CheckRowSize("EQUIP_PARAM_WEAPON_ST", sz, Wep_RowSize);
         SafeRead(row + Wep_VariationId, &w.variation, 4); SafeRead(row + Wep_Weight, &w.weight, 4); SafeRead(row + Wep_Type, &w.wepType, 2);
         w.row = row; w.isShield = IsShieldType(w.wepType); w.valid = true;
-        LOGI("[combat] %s hand: weapon %d variation %d weight %.1f wepType %u%s", HandName(h), id, w.variation, w.weight, w.wepType, w.isShield ? " (shield)" : "");
+        LOGI("[combat] %s hand: weapon %d variation %d weight %.1f wepType %u%s (player level %d)", HandName(h), id, w.variation, w.weight, w.wepType, w.isShield ? " (shield)" : "", GameERPlayerLevel());
     }
     // Carried weight per hand. Two-handing puts the one weapon in both hands (each arm carries
     // it, so each lags with it); the free hand of a two-hander carries nothing extra.
@@ -321,18 +323,49 @@ void ReadEquipment(uint8_t* player) {
     g_wepWeight[HandLeft].store(wl); g_wepWeight[HandRight].store(wr);
 }
 
+// Distinct behaviorVariationIds that actually have BehaviorParam_PC rows (built once, ~14k rows).
+// Unique-moveset weapons carry a variation of their own in EquipParamWeapon (Sword of Night and
+// Flame = 214) that has NO rows of its own for the basic attacks - the game falls back to the
+// class base. We do the same: exact, then the tens, then the hundreds, then the nearest lower.
+const std::vector<int>& BehaviorVariations() {
+    static std::vector<int> v; static bool built = false;
+    if (built) return v;
+    const uint32_t n = ParamsRowCount(PI_BehaviorParam_PC);
+    if (n == 0) return v;
+    v.reserve(256);
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t id = 0; uint8_t* row = ParamsRowAt(PI_BehaviorParam_PC, i, &id); int var = -1;
+        if (row && SafeRead(row + Bhv_VariationId, &var, 4) && var >= 0) v.push_back(var);
+    }
+    std::sort(v.begin(), v.end()); v.erase(std::unique(v.begin(), v.end()), v.end());
+    built = true;
+    LOGI("[combat] BehaviorParam_PC: %u rows, %zu distinct variations", n, v.size());
+    return v;
+}
+int EffectiveVariation(int var) {
+    const std::vector<int>& v = BehaviorVariations();
+    if (v.empty()) return var;
+    auto has = [&](int x) { return std::binary_search(v.begin(), v.end(), x); };
+    if (has(var)) return var;
+    const int c10 = var - (var % 10), c100 = var - (var % 100);
+    if (has(c10)) return c10;
+    if (has(c100)) return c100;
+    auto it = std::lower_bound(v.begin(), v.end(), var);
+    return it != v.begin() ? *(it - 1) : var;
+}
+
 // The AtkParam_Pc row a (weapon variation, judge id) pair resolves to. The BehaviorParam_PC row
-// id formula is verified by reading the row's own variation/judge fields back.
+// id formula (1_0000_0000 + variation*1000 + judge, verified in ER 1.16 for 700/800/2400) is
+// checked by reading the row's own variation/judge fields back, with a field scan as fallback.
 struct AtkResolve { bool valid = false; int variation = -1, judge = -1; uint8_t* atkRow = nullptr; uint32_t bhvId = 0, atkId = 0; int bhvStamina = 0; };
 AtkResolve g_resolve[2];
-AtkResolve* ResolveAttack(int h, int variation, int judge) {
+AtkResolve* ResolveAttack(int h, int wepVariation, int judge) {
     AtkResolve& r = g_resolve[h];
-    if (r.variation == variation && r.judge == judge) return r.valid ? &r : nullptr;
-    r = AtkResolve{}; r.variation = variation; r.judge = judge;
+    if (r.variation == wepVariation && r.judge == judge) return r.valid ? &r : nullptr;
+    r = AtkResolve{}; r.variation = wepVariation; r.judge = judge;
     if (!ParamsReady() || judge < 0) return nullptr;
-    // The DS3 id formula (1_0000_0000 + variation*1000 + judge) does NOT hold for ER 1.16 (no row
-    // 100214100 for a straight sword's R2), so the row is found by its own fields: the first
-    // BehaviorParam_PC row whose variationId/behaviorJudgeId match. ~14k rows, cached per pair.
+    const int variation = EffectiveVariation(wepVariation);
+    if (variation != wepVariation) LOGI("[combat] %s hand: variation %d has no BehaviorParam_PC rows of its own; using %d", HandName(h), wepVariation, variation);
     uint32_t bhvId = BehaviorPcBase + (uint32_t)variation * 1000u + (uint32_t)judge;
     uint32_t sz = 0;
     uint8_t* b = ParamsRow(PI_BehaviorParam_PC, bhvId, &sz);
@@ -488,13 +521,13 @@ void GameFrameBody(uint8_t* player) {
         AttackBehaviorArgs& ab = s_ab[h]; CSTaeAnimEventArgs& args = s_args[h];
         // Kinetic: scale the strike's attack row by quality x fatigue, refreshed every frame so the
         // value the sweep reads at contact reflects the tip speed at contact.
-        float mult = 1.f;
+        float mult = 1.f; bool scaled = false;
         if (kinetic) {
             const HandWeapon& w = g_wep[h];
             AtkResolve* r = w.valid && w.row ? ResolveAttack(h, w.variation, t.a.judgeId) : nullptr;
-            mult = QualityToMult(k.quality, c) * Fatigue(stam, maxStam, c);
-            if (r) ApplyAtk(h, r->atkRow, mult);
-            g_status.lastQuality = k.quality; g_status.lastMult = mult;
+            mult = QualityToMult(k.quality, c) * Fatigue(stam, maxStam, c) * c.kineticDamageScale;
+            if (r) { ApplyAtk(h, r->atkRow, mult); scaled = true; }
+            g_status.lastQuality = k.quality; g_status.lastMult = scaled ? mult : 1.f;
         }
         if (k.first) {
             ab = t.a;
@@ -517,7 +550,10 @@ void GameFrameBody(uint8_t* player) {
             }
             if (drain > 0 && stam > 0) { stam -= drain; if (stam < 0) stam = 0; WriteStamina(player, stam); }
             s_stamAfterDrain[h] = stam;
-            if (c.combatDebug) LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) mult %.2f drain %d stamina %d/%d", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, mult, drain, stam, maxStam);
+            if (c.combatDebug) {
+                if (scaled) LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) mult %.2f drain %d stamina %d/%d", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, mult, drain, stam, maxStam);
+                else LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) VANILLA DAMAGE (no attack row to scale) drain %d stamina %d/%d", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, drain, stam, maxStam);
+            }
         } else s_time[h] = (float)(NowSec() - k.start);
         args.isFirstExecution = k.first ? 1 : 0;
         g_origExec(ev, &args);

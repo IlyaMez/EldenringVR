@@ -268,6 +268,7 @@ struct Config {
     bool  kineticEnabled = true;
     float kineticRefSpeed = 8.0f;         // m/s VIRTUAL tip speed at contact = quality 1 (vanilla damage)
     float kineticArcRef = 0.5f;           // m of tip travel for a full-arc strike at weight 0 (x (1 + weight/10))
+    float kineticDamageScale = 1.0f;      // global multiplier on every scaled strike (difficulty knob)
     float kineticMinMult = 0.25f;         // damage multiplier at quality 0 (chip)
     float kineticMaxMult = 1.2f;          // multiplier at quality 1.5 (cap)
     float kineticHeavyQuality = 0.85f;    // quality (with >=80% of a full arc) that selects the heavy attack row

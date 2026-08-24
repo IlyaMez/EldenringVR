@@ -78,6 +78,9 @@ uint8_t* GameERCamWatchTarget(uint32_t* outLen);
 // a weight-driven, force-limited spring). tipSpeed/handSpeed in m/s, arc = tip path since the tip
 // last came to rest. False when the arm is not being driven or the sample is stale.
 bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc);
+// The save's character level (PlayerGameData +0x68), -1 if unavailable. Logged with combat so an
+// over-levelled test character is not mistaken for a broken damage model.
+int GameERPlayerLevel();
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

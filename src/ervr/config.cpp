@@ -211,6 +211,7 @@ void Config::Load(const std::wstring& path) {
     kineticEnabled = GetB(ini, L"Combat", L"Kinetic", kineticEnabled);
     kineticRefSpeed = GetF(ini, L"Combat", L"KineticRefSpeed", kineticRefSpeed);
     kineticArcRef = GetF(ini, L"Combat", L"KineticArc", kineticArcRef);
+    kineticDamageScale = GetF(ini, L"Combat", L"KineticDamageScale", kineticDamageScale);
     kineticMinMult = GetF(ini, L"Combat", L"KineticMinMult", kineticMinMult);
     kineticMaxMult = GetF(ini, L"Combat", L"KineticMaxMult", kineticMaxMult);
     kineticHeavyQuality = GetF(ini, L"Combat", L"KineticHeavyQuality", kineticHeavyQuality);
