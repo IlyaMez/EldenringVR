@@ -271,6 +271,7 @@ void Config::Load(const std::wstring& path) {
     fpArmSolveEveryCall = GetB(ini, L"FirstPerson", L"ArmSolveEveryCall", fpArmSolveEveryCall);
     fpHideHead = GetB(ini, L"FirstPerson", L"HideHead", fpHideHead);
     fpHideSheathed = GetB(ini, L"FirstPerson", L"HideSheathedWeapons", fpHideSheathed);
+    fpNearDither = GetF(ini, L"FirstPerson", L"NearDither", fpNearDither);
     fpWriteAim = GetB(ini, L"FirstPerson", L"WriteAim", fpWriteAim);
     handTracking = GetB(ini, L"FirstPerson", L"HandTracking", handTracking);
     handOrigin = GetS(ini, L"FirstPerson", L"HandOrigin", handOrigin);

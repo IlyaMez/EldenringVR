@@ -204,6 +204,10 @@ struct Config {
     bool  fpArmSolveEveryCall = true;     // solve the arms on every Havok update, not once per rendered frame
     bool  fpHideHead = true;
     bool  fpHideSheathed = false;
+    // Near-camera dither fade (the game's own "objects close to the camera go see-through"): 0 = off while
+    // first person runs (erfps2 behaviour - nothing fades as you lean toward it), 1 = the game's third-person
+    // band untouched, in between = the fade band's distances scaled down (0.3 = fades start at 30% of the distance).
+    float fpNearDither = 0.f;
     bool  fpWriteAim = true;              // write the HMD look direction into the player's aim matrix (spells/bows)
     bool  handTracking = true;            // drive arm bones from the controllers
     std::string handOrigin = "head";      // head | tracking | floor

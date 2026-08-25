@@ -90,6 +90,10 @@ constexpr uint32_t RVA_PoseEval = 0x146b5e0;    // 0x146b5e0..0x146b845, contain
 // up rendered: the view lags the body while moving sideways and converges once you stop.
 constexpr uint32_t RVA_CamFinalize = 0x680d70;  // 0x680d70..0x68180c
 constexpr uint32_t RVA_CamWallRecovery  = 0x3b15c80;  // global bool: camera wall-recovery pushes (erfps2 clears it per frame in first person)
+// Near-camera dither lookup (erfps2 USES_DITHERING): bool fn(mgr, out, id) walks mgr's entry table [+0x1060,+0x1068)
+// (24-byte entries {int id; float a0, a1; float nearStart, nearEnd; int x}) and copies the id's entry to *out. Leaf,
+// register-only - erfps2 detours it with exactly this signature. The AOB below is the function's own first 36 bytes.
+constexpr uint32_t RVA_UsesDithering    = 0x1a679c0;
 constexpr size_t   OFF_FollowCam_ResetCamera = 0x315;
 constexpr size_t   OFF_FollowCam_AutoRotation = 0x240; // ChrExFollowCam.camera_auto_rotation (fromsoftware-rs; erfps2 clears in first person)
 constexpr size_t   OFF_FollowCam_LockedOffset = 0x2E4; // ChrExFollowCam.locked_on_cam_offset (lateral lock-on camera offset; erfps2 zeroes it)
@@ -148,6 +152,10 @@ FnMmsUpdate g_origMms = nullptr; FnFollow g_origFollow = nullptr; FnUpdFollow g_
 FnUpdModelPos g_origUpdModelPos = nullptr; FnPoseEval g_origPoseEval = nullptr;
 using FnCamFinalize = uint64_t (__fastcall*)(void*, void*, void*, void*);
 FnCamFinalize g_origCamFinalize = nullptr;
+using FnUsesDithering = bool (__fastcall*)(void* mgr, void* out, uint32_t id);
+FnUsesDithering g_origUsesDithering = nullptr;
+std::atomic<bool>  g_ditherFp{false};     // first person is running: apply NearDither (refreshed once per camera step)
+std::atomic<float> g_ditherScale{0.f};    // Cfg().fpNearDither, cached for the render thread
 // The ChrExFollowCam instance, captured from its hooks. Its *own* embedded camera (matrix at +0x10) is the
 // source the game's camera step copies/interpolates the render camera from - writing only chr-cam/pers-cam
 // left this one holding the game's follow position, and whoever sampled mid-step (R.E.A.L.) rendered a view
@@ -1989,6 +1997,29 @@ void __fastcall Hook_UpdateChrModelPos(void* ctrl) {
     if (act) { __try { UpdateChrModelPosBody(ctrl, true); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; } }
 }
 void HookCameraStepImpl(void* a, void* b);
+// Near-camera dither fade. The renderer asks, per drawn part, for the part's dither entry and dithers it
+// when entry.nearEnd exceeds the part's distance from the camera; the pixel shader then gets
+// 1/(nearEnd-nearStart) and fades the part across that band. Tuned for a third-person camera metres
+// behind the character, the band reaches well past a head-mounted one: walls, doorways and anything you
+// lean toward go see-through long before you touch them. NearDither=0 answers "no entry" (erfps2's
+// first-person behaviour, no fade at all); 0<s<1 scales the band on the copy the game just made - *out
+// is the caller's stack local, so the game's own table is never modified. Render-thread hot path: only
+// atomics are read here.
+bool __fastcall Hook_UsesDithering(void* mgr, void* out, uint32_t id) {
+    if (!g_ditherFp.load(std::memory_order_relaxed)) return g_origUsesDithering(mgr, out, id);
+    const float scale = g_ditherScale.load(std::memory_order_relaxed);
+    if (scale <= 0.f) return false;
+    const bool hit = g_origUsesDithering(mgr, out, id);
+    if (hit && out) {
+        float* f = (float*)out;
+        static std::atomic<int> s_logged{0};   // confirm the entry layout from live data, a few times
+        if (s_logged.load(std::memory_order_relaxed) < 4 && s_logged.fetch_add(1) < 4)
+            LOGI("[dither] entry id %u: a0 %.3f a1 %.3f near %.3f..%.3f x 0x%08X (NearDither %.2f)",
+                 id, f[1], f[2], f[3], f[4], ((uint32_t*)out)[5], scale);
+        if (scale < 1.f) { f[3] *= scale; f[4] *= scale; }
+    }
+    return hit;
+}
 void __fastcall Hook_CameraStep(void* a, void* b) {
     InterlockedIncrement(&g_camCalls);
     ScopedTicks st(&g_camTicks);
@@ -1999,7 +2030,10 @@ void HookCameraStepImpl(void* a, void* b) {
     // eye latch) on pass 1's values by not advancing the frame counter.
     if (FramePumpCurrentPass() != 2) ++g_frame;
     bool skip = false;
-    if (!g_tripped && FirstPersonActive()) {
+    const bool fpOn = !g_tripped && FirstPersonActive();
+    g_ditherFp.store(fpOn, std::memory_order_relaxed);
+    g_ditherScale.store(Cfg().fpNearDither, std::memory_order_relaxed);
+    if (fpOn) {
         __try { CameraStepBody(skip, false); }
         __except (SehFilter(GetExceptionCode())) { g_tripped = true; skip = false; }
     }
@@ -2350,6 +2384,13 @@ bool GameERInit() {
     if (cfin && MH_CreateHook(cfin, (void*)&Hook_CamFinalize, (void**)&g_origCamFinalize) == MH_OK && MH_EnableHook(cfin) == MH_OK) LOGI("[game] camera finalizer hooked @ %p (our matrix goes back after it)", (void*)cfin); else if (Cfg().fpCameraFinalWrite) LOGW("[game] camera finalizer hook unavailable");
     uint8_t* peval = (g_status.versionOk && Cfg().fpPoseAfterHavok) ? g_base + RVA_PoseEval : nullptr;
     if (peval && MH_CreateHook(peval, (void*)&Hook_PoseEval, (void**)&g_origPoseEval) == MH_OK && MH_EnableHook(peval) == MH_OK) LOGI("[game] havok pose eval hooked @ %p (post-animation pose reassert)", (void*)peval); else if (Cfg().fpPoseAfterHavok) LOGW("[game] havok pose eval hook unavailable");
+
+    // Near-camera dither lookup: RVA on 2.6.2.0, else the function's own bytes (the hit IS the function).
+    uint8_t* udit = g_status.versionOk ? g_base + RVA_UsesDithering
+                  : AobScan("48 8B 81 60 10 00 00 48 8B 89 68 10 00 00 48 3B C1 74 0E 44 39 00 74 0C 48 83 C0 18 48 3B C1 75 F2 32 C0 C3");
+    if (udit && MH_CreateHook(udit, (void*)&Hook_UsesDithering, (void**)&g_origUsesDithering) == MH_OK && MH_EnableHook(udit) == MH_OK)
+        LOGI("[game] near-camera dither lookup hooked @ %p (NearDither=%.2f)", (void*)udit, Cfg().fpNearDither);
+    else LOGW("[game] near-camera dither hook unavailable - NearDither has no effect");
 
     // Per-frame pose hook: CS::NoUpdateInterface vft[10] (ERSkeletonMan's timing point).
     if (void** vt = FindVTable("CS::NoUpdateInterface")) {
