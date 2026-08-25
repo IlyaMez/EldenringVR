@@ -18,6 +18,9 @@ uint8_t* ResolveRipRelative(uint8_t* at, int relOffset, int instrLen);
 uint8_t* FollowChain(uint8_t* base, const std::vector<int>& offsets);
 bool SafeRead(const void* addr, void* out, size_t size);
 bool SafeWrite(void* addr, const void* in, size_t size);
+// Like SafeRead, but VirtualQuery-checked first so it never faults (the crash VEH logs every
+// fault, even ones SEH then swallows). For pointers of unknown provenance, not hot paths.
+bool ProbeRead(const void* addr, void* out, size_t size);
 std::vector<int> ParseChain(const std::string& s);
 
 // --- experimental: hand aim -----------------------------------------------------
@@ -27,11 +30,17 @@ std::vector<int> ParseChain(const std::string& s);
 void GameHandAimInit();
 void GameHandAimTick(const VRTracking& tr, const VRInputState& in, double now);
 
-// --- menu-open flag ---------------------------------------------------------------
-// Resolves [MenuNav] MenuAOB -> CSMenuMan* global and, if MenuChain is set, reads a byte
-// that is nonzero while a menu is open. Returns -1 when unknown/unconfigured, else 0/1.
-// With [MenuNav] Scan=true it logs which bytes of the CSMenuMan object change over time,
-// which is how you find MenuChain for a new game version.
+// --- singletons -------------------------------------------------------------------
+// Address of the static slot holding a Dantelion2 singleton ("CSFeMan", "FD4PadManager",
+// "WorldChrMan"...), found through the game's own null-check getter that panics with the
+// class name. Version-proof: no per-class AOB. nullptr if the name or getter is not found.
+uint8_t* FindSingletonSlot(const char* name);
+
+// --- menu-open state ---------------------------------------------------------------
+// Is a game menu owning the controller right now? Read from the game's own state (see
+// game_memory.cpp: CSFeMan HUD state, FD4PadManager pad routing, or the legacy MenuChain
+// byte), selected by [MenuNav] Source. Returns -1 while no reader is trusted yet, else 0/1.
+// With [MenuNav] Scan=true it logs which bytes of the CSMenuMan object change over time.
 void GameMenuInit();
 int  GameMenuOpen(double now);
 }

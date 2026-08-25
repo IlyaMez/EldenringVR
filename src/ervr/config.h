@@ -308,7 +308,8 @@ struct Config {
     bool  menuNavFollowStart = true;      // no memory flag: enter on our START press, leave on the next START/BACK
     float menuNavToggleHold = 0.5f;       // hold left stick click (no tilt) this long -> toggle menu mode; 0 = off
     bool  menuNavHaptics = true;
-    std::string menuAob = "48 8B 0D ?? ?? ?? ?? 48 8B 53 08 48 8B 92 D8 00 00 00 48 83 C4 20 5B";  // CSMenuMan* global
+    std::string menuSource = "auto";     // auto | menuman | hud | chain | start  (see game_memory.cpp GameMenuOpen)
+    std::string menuAob ="48 8B 0D ?? ?? ?? ?? 48 8B 53 08 48 8B 92 D8 00 00 00 48 83 C4 20 5B";  // CSMenuMan* global
     int   menuAobOffset = 3, menuAobInstrLen = 7;
     std::string menuChain;                // pointer chain from the CSMenuMan* global to a byte that is nonzero while a menu is open; empty = disabled
     bool  menuScan = false;               // debug: log which bytes of the CSMenuMan object change (find MenuChain)

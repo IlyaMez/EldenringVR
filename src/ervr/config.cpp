@@ -313,7 +313,8 @@ void Config::Load(const std::wstring& path) {
     menuNavFollowStart = GetB(ini, L"MenuNav", L"FollowStartButton", menuNavFollowStart);
     menuNavToggleHold = GetF(ini, L"MenuNav", L"ToggleHold", menuNavToggleHold);
     menuNavHaptics = GetB(ini, L"MenuNav", L"Haptics", menuNavHaptics);
-    menuAob = GetS(ini, L"MenuNav", L"MenuAOB", menuAob);
+    menuSource = GetS(ini, L"MenuNav", L"Source", menuSource);
+    menuAob =GetS(ini, L"MenuNav", L"MenuAOB", menuAob);
     menuAobOffset = GetI(ini, L"MenuNav", L"MenuAOBOffset", menuAobOffset);
     menuAobInstrLen = GetI(ini, L"MenuNav", L"MenuAOBInstrLen", menuAobInstrLen);
     menuChain = GetS(ini, L"MenuNav", L"MenuChain", menuChain);

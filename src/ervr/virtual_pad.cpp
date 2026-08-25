@@ -113,6 +113,10 @@ void VirtualPadUpdate(double now) {
     VRTracking tr; VRInputState in;
     VPad pad;
     if (!GetLatestVRState(tr, in) || (!in.controllerConnected[0] && !in.controllerConnected[1])) {
+        // Keep watching the game's menu state without controllers too (same thread, a few
+        // reads): the readers earn trust as menus open and close, and unattended runs -
+        // no headset, autopilot tapping START - can verify them from the [menu] log lines.
+        if (c.menuNavEnabled && GameERPlayerActive()) GameMenuOpen(now);
         std::lock_guard<std::mutex> g(g_mtx); g_pad = pad; return;
     }
     pad.active = true;
@@ -162,30 +166,36 @@ void VirtualPadUpdate(double now) {
     ApplyDeadzone(rx, ry, c.stickDeadzone);
 
     // ---- menu navigation mode ------------------------------------------------
-    // Source of truth, in order: memory flag (CSMenuMan) if configured; else our own START/BACK presses
-    // and the manual toggle (hold left stick click without tilting).
+    // Source of truth: the game's own menu state (GameMenuOpen - CSFeMan HUD state, pad routing
+    // or MenuChain, see game_memory.cpp). Only until one of those has proven itself does the mod
+    // guess from its own START/BACK presses - the guess cannot see a menu closed with B, which
+    // left the stick in D-pad mode until the next START cycle. A manual toggle (hold left stick
+    // click without tilting) overrides the game state until the game agrees with it or the next
+    // START press; BACK (map) forces the stick back to a stick the same way.
     bool lThumbDown = (in.buttons & VRB_LThumb) != 0;
     bool stickIdle = std::fabs(lx) < 0.3f && std::fabs(ly) < 0.3f;
     if (lThumbDown && !g_lthumbHold.down) { g_lthumbHold = {true, now, false}; g_lastDpadDir = 0; g_menuToggleFired = false; }
     bool wasMenu = g_menuMode;
-    if (c.menuNavEnabled) {
-        int flag = GameMenuOpen(now);   // -1 = no memory flag configured/resolved
+    if (!c.menuNavEnabled) {
+        g_menuMode = g_menuManual = g_menuOverride = false;
+    } else if (!GameERPlayerActive()) {
+        // Title screen, loading, character creation: these screens navigate from the ANALOG
+        // stick, and a held D-pad there stopped the selection moving (reported 2026-08-21).
+        g_menuMode = g_menuManual = g_menuOverride = false;
+    } else {
+        int flag = GameMenuOpen(now);   // -1 = no trusted game-state reader yet
         bool toggle = c.menuNavToggleHold > 0.f && lThumbDown && !g_menuToggleFired && stickIdle && !g_lthumbHold.consumed &&
                       now - g_lthumbHold.since >= c.menuNavToggleHold;
         if (toggle) { g_menuToggleFired = true; g_lthumbHold.consumed = true; }
         if (flag >= 0) {
-            // Memory flag drives the mode; a manual toggle overrides it until the flag next changes.
-            if (flag != g_menuLastFlag) { g_menuOverride = false; g_menuLastFlag = flag; }
-            if (toggle) { g_menuOverride = true; g_menuManual = !g_menuMode; }
+            bool changed = flag != g_menuLastFlag; g_menuLastFlag = flag;
+            if (g_menuOverride && changed && (flag == 1) == g_menuManual) g_menuOverride = false;   // the game caught up
+            if (pressedStart) g_menuOverride = false;                            // a new menu: the game state decides again
+            if (pressedBack)  { g_menuOverride = true; g_menuManual = false; }   // map: the stick pans there
+            if (toggle)       { g_menuOverride = true; g_menuManual = !g_menuMode; }
             g_menuMode = g_menuOverride ? g_menuManual : (flag == 1);
-        } else if (!GameERPlayerActive()) {
-            // Title screen, loading, character creation: there is no in-game menu for
-            // START-follow to track, and these screens navigate from the ANALOG stick. Left
-            // to itself, the first Menu press on the title screen flipped the mod into
-            // D-pad mode and the selection stopped moving (reported 2026-08-21).
-            g_menuManual = false;
-            g_menuMode = false;
         } else {
+            g_menuLastFlag = -1; g_menuOverride = false;
             if (c.menuNavFollowStart) {
                 if (pressedStart) g_menuManual = !g_menuManual;   // START opens the menu, and closes it again
                 if (pressedBack)  g_menuManual = false;           // map: the stick pans there, keep it a stick
@@ -193,8 +203,6 @@ void VirtualPadUpdate(double now) {
             if (toggle) g_menuManual = !g_menuManual;
             g_menuMode = g_menuManual;
         }
-    } else {
-        g_menuMode = g_menuManual = false;
     }
     if (g_menuMode != wasMenu) {
         LOGI("[menu] navigation mode %s", g_menuMode ? "ON (left stick = D-pad, gestures muted)" : "off");
