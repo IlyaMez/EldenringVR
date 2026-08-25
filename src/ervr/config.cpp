@@ -154,6 +154,8 @@ void Config::Load(const std::wstring& path) {
     stickDeadzone = GetF(ini, L"Sticks", L"Deadzone", stickDeadzone);
     swapSticks    = GetB(ini, L"Sticks", L"Swap", swapSticks);
     rightStickSensitivity = GetF(ini, L"Sticks", L"RightSensitivity", rightStickSensitivity);
+    stickGlitchFilter = GetB(ini, L"Sticks", L"GlitchFilter", stickGlitchFilter);
+    stickGlitchHoldSeconds = GetF(ini, L"Sticks", L"GlitchHoldSeconds", stickGlitchHoldSeconds);
 
     gesturesEnabled  = GetB(ini, L"Gestures", L"Enabled", gesturesEnabled);
     lightAttackSpeed = GetF(ini, L"Gestures", L"LightAttackSpeed", lightAttackSpeed);
@@ -212,6 +214,11 @@ void Config::Load(const std::wstring& path) {
     kineticRefSpeed = GetF(ini, L"Combat", L"KineticRefSpeed", kineticRefSpeed);
     kineticArcRef = GetF(ini, L"Combat", L"KineticArc", kineticArcRef);
     kineticDamageScale = GetF(ini, L"Combat", L"KineticDamageScale", kineticDamageScale);
+    kineticContinuous = GetB(ini, L"Combat", L"KineticContinuous", kineticContinuous);
+    kineticContinuousMult = GetF(ini, L"Combat", L"KineticContinuousMult", kineticContinuousMult);
+    kineticStaminaMode = GetS(ini, L"Combat", L"KineticStamina", kineticStaminaMode);
+    kineticHitPause = GetF(ini, L"Combat", L"KineticHitPause", kineticHitPause);
+    kineticHitStamina = GetI(ini, L"Combat", L"KineticHitStamina", kineticHitStamina);
     kineticMinMult = GetF(ini, L"Combat", L"KineticMinMult", kineticMinMult);
     kineticMaxMult = GetF(ini, L"Combat", L"KineticMaxMult", kineticMaxMult);
     kineticHeavyQuality = GetF(ini, L"Combat", L"KineticHeavyQuality", kineticHeavyQuality);

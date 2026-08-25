@@ -116,6 +116,7 @@ struct SwingCmd {                 // worker -> game thread
     float quality = 1.f;          // kinetic: live strike quality (1 = vanilla)
     float qualityCommit = 1.f;    // quality when the strike committed (fatigue drain)
     float arc = 0.f, tipSpeed = 0.f;
+    float tipLive = 0.f;          // the weapon tip's speed right now (continuous model), no peak floor
 };
 SwingCmd g_cmd[2];                // per hand
 
@@ -342,16 +343,40 @@ const std::vector<int>& BehaviorVariations() {
     LOGI("[combat] BehaviorParam_PC: %u rows, %zu distinct variations", n, v.size());
     return v;
 }
-int EffectiveVariation(int var) {
+// Candidate variations for a weapon, best first. A unique-moveset weapon's own variation (804)
+// often has rows for its weapon art ONLY, so the fallback has to be tried per judge id, not
+// just when the variation is absent altogether.
+int VariationCandidates(int var, int out[4]) {
     const std::vector<int>& v = BehaviorVariations();
-    if (v.empty()) return var;
     auto has = [&](int x) { return std::binary_search(v.begin(), v.end(), x); };
-    if (has(var)) return var;
+    int n = 0;
+    auto add = [&](int x) { if (x < 0) return; for (int i = 0; i < n; ++i) if (out[i] == x) return; if (n < 4) out[n++] = x; };
+    add(var);
+    if (v.empty()) return n;
     const int c10 = var - (var % 10), c100 = var - (var % 100);
-    if (has(c10)) return c10;
-    if (has(c100)) return c100;
+    if (has(c10)) add(c10);
+    if (has(c100)) add(c100);
     auto it = std::lower_bound(v.begin(), v.end(), var);
-    return it != v.begin() ? *(it - 1) : var;
+    if (it != v.begin()) add(*(it - 1));
+    return n;
+}
+// The BehaviorParam_PC row for (variation, judge): id formula verified by reading the fields back,
+// then a field scan.
+uint8_t* FindBehaviorRow(int variation, int judge, uint32_t* idOut) {
+    uint32_t bhvId = BehaviorPcBase + (uint32_t)variation * 1000u + (uint32_t)judge;
+    uint8_t* b = ParamsRow(PI_BehaviorParam_PC, bhvId);
+    int var = -1, jd = -1;
+    if (b) { SafeRead(b + Bhv_VariationId, &var, 4); SafeRead(b + Bhv_JudgeId, &jd, 4); if (var != variation || jd != judge) b = nullptr; }
+    if (!b) {
+        const uint32_t n = ParamsRowCount(PI_BehaviorParam_PC);
+        for (uint32_t i = 0; i < n && !b; ++i) {
+            uint32_t id = 0; uint8_t* row = ParamsRowAt(PI_BehaviorParam_PC, i, &id);
+            if (!row) continue;
+            if (SafeRead(row + Bhv_VariationId, &var, 4) && var == variation && SafeRead(row + Bhv_JudgeId, &jd, 4) && jd == judge) { b = row; bhvId = id; }
+        }
+    }
+    if (b && idOut) *idOut = bhvId;
+    return b;
 }
 
 // The AtkParam_Pc row a (weapon variation, judge id) pair resolves to. The BehaviorParam_PC row
@@ -364,23 +389,12 @@ AtkResolve* ResolveAttack(int h, int wepVariation, int judge) {
     if (r.variation == wepVariation && r.judge == judge) return r.valid ? &r : nullptr;
     r = AtkResolve{}; r.variation = wepVariation; r.judge = judge;
     if (!ParamsReady() || judge < 0) return nullptr;
-    const int variation = EffectiveVariation(wepVariation);
-    if (variation != wepVariation) LOGI("[combat] %s hand: variation %d has no BehaviorParam_PC rows of its own; using %d", HandName(h), wepVariation, variation);
-    uint32_t bhvId = BehaviorPcBase + (uint32_t)variation * 1000u + (uint32_t)judge;
-    uint32_t sz = 0;
-    uint8_t* b = ParamsRow(PI_BehaviorParam_PC, bhvId, &sz);
-    int var = -1, jd = -1;
-    if (b) { SafeRead(b + Bhv_VariationId, &var, 4); SafeRead(b + Bhv_JudgeId, &jd, 4); if (var != variation || jd != judge) b = nullptr; }
-    if (!b) {
-        const uint32_t n = ParamsRowCount(PI_BehaviorParam_PC);
-        for (uint32_t i = 0; i < n && !b; ++i) {
-            uint32_t id = 0; uint8_t* row = ParamsRowAt(PI_BehaviorParam_PC, i, &id);
-            if (!row) continue;
-            if (SafeRead(row + Bhv_VariationId, &var, 4) && var == variation && SafeRead(row + Bhv_JudgeId, &jd, 4) && jd == judge) { b = row; bhvId = id; }
-        }
-        if (!b) { LOGW("[combat] no BehaviorParam_PC row with variation %d judge %d: strikes keep vanilla damage", variation, judge); return nullptr; }
-    }
-    CheckRowSize("BEHAVIOR_PARAM_ST", sz, Bhv_RowSize);
+    int cands[4]; const int nc = VariationCandidates(wepVariation, cands);
+    uint8_t* b = nullptr; uint32_t bhvId = 0; int variation = wepVariation;
+    for (int i = 0; i < nc && !b; ++i) { b = FindBehaviorRow(cands[i], judge, &bhvId); if (b) variation = cands[i]; }
+    if (!b) { LOGW("[combat] no BehaviorParam_PC row for judge %d under variation %d or its class bases: strikes keep vanilla damage", judge, wepVariation); return nullptr; }
+    if (variation != wepVariation) LOGI("[combat] %s hand: judge %d not under variation %d; using class variation %d", HandName(h), judge, wepVariation, variation);
+    { uint32_t sz = 0; ParamsRow(PI_BehaviorParam_PC, bhvId, &sz); CheckRowSize("BEHAVIOR_PARAM_ST", sz, Bhv_RowSize); }
     int refId = -1; uint8_t refType = 0xFF;
     SafeRead(b + Bhv_RefType, &refType, 1); SafeRead(b + Bhv_RefId, &refId, 4); SafeRead(b + Bhv_Stamina, &r.bhvStamina, 4);
     if (refType != 0 || refId < 0) { LOGW("[combat] BehaviorParam_PC %u refType %u refId %d is not an attack: no scaling", bhvId, refType, refId); return nullptr; }
@@ -418,7 +432,7 @@ void ApplyAtk(int h, uint8_t* row, float mult) {
         else { for (int i = 0; i < 6; ++i) SafeRead(row + kAtkCorr[i], &e.orig[i], 2); SafeRead(row + Atk_SuperArmorCorr, &e.origSA, 4); }
         e.active = true; e.row = row; e.mult = -1.f;
     }
-    if (std::fabs(mult - e.mult) < 0.005f) return;
+    if (std::fabs(mult - e.mult) < 0.002f) return;
     e.mult = mult;
     const Config& c = Cfg();
     for (int i = 0; i < 6; ++i) {
@@ -496,18 +510,47 @@ void GameFrameBody(uint8_t* player) {
     // Per-strike stamina accounting: what the GAME took over the whole strike beyond our own
     // drain (one hit = one behavior cost; several = the same swing is hitting more than once).
     static int s_strikeStam[2] = {-1, -1}; static uint32_t s_strikeId[2] = {0, 0}; static int s_strikeFrames[2] = {0, 0};
+    static int s_strikeHits[2] = {0, 0}; static double s_hitPauseUntil[2] = {0, 0};
+    // HIT GATE. The game's own per-attack hit list does NOT deduplicate our injected attack: a
+    // blade resting in an enemy hit it every frame (measured 2026-08-25: 8-10 hits, ~170 stamina
+    // charged, in one 11-frame swing). The game charges the behavior's stamina cost exactly when a
+    // hit lands, so a one-frame stamina drop during a strike IS the hit. After a hit the attack
+    // instance pauses for KineticHitPause (the blade passes through this enemy; a second enemy
+    // later in the arc can still be hit) or, at 0, the strike ends.
+    const double nowS = NowSec();
+    const bool hitNow = g_prevStam >= 0 && stamAtEntry >= 0 && (g_prevStam - stamAtEntry) >= c.kineticHitStamina;
+    // Stamina modes: "off" takes the bar out of the loop entirely (no gate, no drain, no fatigue,
+    // and the game's own on-hit charge is given back), "game" leaves the game's charges alone,
+    // "full" adds ERVR's drain + fatigue on top.
+    const bool stamOff = c.kineticStaminaMode == "off", stamFull = c.kineticStaminaMode == "full";
+    static double s_lastHitHaptic[2] = {0, 0};
     for (int h = HandRight; h >= HandLeft; --h) {   // right first (main hand)
         SwingCmd& k = cmd[h];
         if (!k.active) {
             if (s_strikeStam[h] >= 0 && c.combatDebug) {
                 const int now = ReadStamina(player);
-                LOGD("[combat] strike %s #%u ended after %d frames: game charged %d total (stamina %d -> %d)", HandName(h), s_strikeId[h], s_strikeFrames[h], s_strikeStam[h] - now, s_strikeStam[h], now);
+                LOGD("[combat] strike %s #%u ended after %d frames, %d hits: game charged %d total (stamina %d -> %d)", HandName(h), s_strikeId[h], s_strikeFrames[h], s_strikeHits[h], s_strikeStam[h] - now, s_strikeStam[h], now);
             }
             s_strikeStam[h] = -1;
             RestoreAtk(h); continue;
         }
-        if (k.first) { s_strikeId[h] = k.id; s_strikeFrames[h] = 0; }
+        if (k.first) { s_strikeId[h] = k.id; s_strikeFrames[h] = 0; s_strikeHits[h] = 0; s_hitPauseUntil[h] = 0; }
         ++s_strikeFrames[h];
+        if (!k.first && hitNow && nowS >= s_hitPauseUntil[h]) {
+            ++s_strikeHits[h];
+            if (nowS - s_lastHitHaptic[h] > 0.1) { s_lastHitHaptic[h] = nowS; g_haptic.fetch_or(64u << h); }
+            if (stamOff) { WriteStamina(player, g_prevStam); stam = g_prevStam; }   // the game charged its behavior cost: give it back
+            if (c.combatDebug && (!c.kineticContinuous || s_strikeHits[h] == 1)) LOGD("[combat] %s strike HIT #%d (stamina %d -> %d)%s", HandName(h), s_strikeHits[h], g_prevStam, stamAtEntry, stamOff ? " refunded" : "");
+            if (!c.kineticContinuous) {
+                if (c.kineticHitPause <= 0.f) {
+                    std::lock_guard<std::mutex> g(g_mtx);
+                    if (g_cmd[h].id == k.id) g_cmd[h].active = false;
+                    continue;   // instance retired; next frame restores the row and logs the strike
+                }
+                s_hitPauseUntil[h] = nowS + c.kineticHitPause;
+            }
+        }
+        if (!c.kineticContinuous && !k.first && nowS < s_hitPauseUntil[h]) { anyStrike = true; continue; }   // paused: instance kept, no sweep
         if (h == HandLeft && leftShield) { RestoreAtk(h); continue; }   // the shield blocks, it does not strike
         Template t;
         { std::lock_guard<std::mutex> g(g_mtx); t = g_tpl[k.slot]; if (!t.valid && k.slot == SlotHeavy) t = g_tpl[SlotLight]; if (!t.valid && k.slot == SlotLeft) { t = g_tpl[SlotLight]; t.a.source = 2; } }
@@ -516,7 +559,7 @@ void GameFrameBody(uint8_t* player) {
             // maxStam > 0 means the read is real: ER lets stamina go NEGATIVE after a hit is charged
             // at low stamina, and the old `stam >= 0` (meant for the -1 "unknown" value) waved every
             // strike through while exhausted - free attacks at -50 stamina.
-            if (c.combatRequireStamina && (maxStam > 0 || stam >= 0) && stam < c.combatMinStamina) {
+            if (c.combatRequireStamina && !stamOff && (maxStam > 0 || stam >= 0) && stam < c.combatMinStamina) {
                 std::lock_guard<std::mutex> g(g_mtx);
                 if (g_cmd[h].id == k.id) { g_cmd[h].active = false; g_cmd[h].staminaFail = true; }
                 g_haptic.fetch_or(4u << h);
@@ -537,7 +580,14 @@ void GameFrameBody(uint8_t* player) {
         if (kinetic) {
             const HandWeapon& w = g_wep[h];
             AtkResolve* r = w.valid && w.row ? ResolveAttack(h, w.variation, t.a.judgeId) : nullptr;
-            mult = QualityToMult(k.quality, c) * Fatigue(stam, maxStam, c) * c.kineticDamageScale;
+            const float fat = stamOff ? 1.f : Fatigue(stam, maxStam, c);
+            if (c.kineticContinuous) {
+                // Every frame of contact is a hit, so each one is a slice of a vanilla hit sized by the
+                // tip's speed right now: nothing at rest, KineticContinuousMult at KineticRefSpeed.
+                const float ref = c.kineticRefSpeed > 0.5f ? c.kineticRefSpeed : 8.f;
+                float qv = (k.tipLive / ref) * (k.tipLive / ref); if (qv > 1.f) qv = 1.f; if (qv < 0.f) qv = 0.f;
+                mult = c.kineticContinuousMult * qv * fat * c.kineticDamageScale;
+            } else mult = QualityToMult(k.quality, c) * fat * c.kineticDamageScale;
             if (r) { ApplyAtk(h, r->atkRow, mult); scaled = true; }
             g_status.lastQuality = k.quality; g_status.lastMult = scaled ? mult : 1.f;
         }
@@ -550,7 +600,7 @@ void GameFrameBody(uint8_t* player) {
             args.taeVersion = 0x1a; s_time[h] = 0.f; args.animTime = &s_time[h]; s_logNext[h] = c.combatDebug;
             int drain = 0;
             if (c.combatExtraStamina[k.slot] > 0) drain += c.combatExtraStamina[k.slot];
-            if (kinetic) {
+            if (kinetic && stamFull) {
                 // The game's own cost for this very attack (BehaviorParam stamina) when the row
                 // resolved, else the flat fallback scaled by weight. Quality scales it: a lazy
                 // strike costs half, a full one all of it.
@@ -629,13 +679,13 @@ void StartSwing(int h, int slot, double now, float quality, float arc, float tip
     std::lock_guard<std::mutex> g(g_mtx);
     SwingCmd& k = g_cmd[h];
     k.active = true; k.first = true; k.slot = slot; k.start = now; k.id = g_sm[h].nextId++; k.staminaFail = false;
-    k.quality = k.qualityCommit = quality; k.arc = arc; k.tipSpeed = tip;
+    k.quality = k.qualityCommit = quality; k.arc = arc; k.tipSpeed = tip; k.tipLive = tip;
 }
-void UpdateSwing(int h, float quality, float arc, float tip) {
+void UpdateSwing(int h, float quality, float arc, float tip, float tipLive) {
     std::lock_guard<std::mutex> g(g_mtx);
     SwingCmd& k = g_cmd[h];
     if (!k.active) return;
-    k.quality = quality; k.arc = arc; k.tipSpeed = tip;
+    k.quality = quality; k.arc = arc; k.tipSpeed = tip; k.tipLive = tipLive;
 }
 void EndSwing(int h) { std::lock_guard<std::mutex> g(g_mtx); g_cmd[h].active = false; g_cmd[h].first = false; }
 
@@ -830,7 +880,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             // landing late in the arc is not punished for the natural deceleration.
             float vEff = c.kineticEnabled ? (s.vVirt > 0.7f * s.vVirtPeak ? s.vVirt : 0.7f * s.vVirtPeak)
                                           : (s.vSmooth > 0.7f * s.peak ? s.vSmooth : 0.7f * s.peak);
-            UpdateSwing(h, StrikeQuality(vEff, s.arc, weight, c), s.arc, vEff);
+            UpdateSwing(h, StrikeQuality(vEff, s.arc, weight, c), s.arc, vEff, inertial ? tip : s.vSmooth);
             if (!allowed || tip < c.swingOffSpeed || now - s.t >= c.swingMaxSeconds) {
                 if (c.combatDebug) LOGD("[combat] %s swing end after %.0f ms (peak %.2f m/s, virtual peak %.2f m/s, arc %.2f m)", HandName(h), (now - s.t) * 1000.0, s.peak, s.vVirtPeak, s.arc);
                 EndSwing(h); s.st = HandSM::Cooldown; s.t = now;

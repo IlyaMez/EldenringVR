@@ -141,6 +141,8 @@ struct Config {
     float stickDeadzone = 0.15f;
     bool  swapSticks = false;
     float rightStickSensitivity = 1.0f;
+    bool  stickGlitchFilter = true;       // drop runtime samples that are a same-magnitude ~90 deg rotation of the last accepted one (2026-08-25 Quest Pro / VDXR flips)
+    float stickGlitchHoldSeconds = 1.0f;  // longest a rotated sample is held out before it is accepted as a real stick position
 
     // [Gestures]
     bool  gesturesEnabled = true;
@@ -273,6 +275,13 @@ struct Config {
     float kineticRefSpeed = 8.0f;         // m/s VIRTUAL tip speed at contact = quality 1 (vanilla damage)
     float kineticArcRef = 0.5f;           // m of tip travel for a full-arc strike at weight 0 (x (1 + weight/10))
     float kineticDamageScale = 1.0f;      // global multiplier on every scaled strike (difficulty knob)
+    // Continuous model (2026-08-25, user's call): every frame of contact is a hit, each sized by the tip's
+    // speed right now - 0 at rest, KineticContinuousMult of a vanilla hit at KineticRefSpeed.
+    bool  kineticContinuous = true;
+    float kineticContinuousMult = 0.2f;
+    std::string kineticStaminaMode = "off";   // off (bar out of the loop, game's on-hit charge refunded) | game | full
+    float kineticHitPause = 0.25f;        // gated model only: s the attack pauses after a landed hit (0 = the strike ends on its first hit)
+    int   kineticHitStamina = 3;          // one-frame stamina drop during a strike that counts as a landed hit
     float kineticMinMult = 0.25f;         // damage multiplier at quality 0 (chip)
     float kineticMaxMult = 1.2f;          // multiplier at quality 1.5 (cap)
     float kineticHeavyQuality = 0.85f;    // quality (with >=80% of a full arc) that selects the heavy attack row

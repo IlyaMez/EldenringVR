@@ -328,6 +328,7 @@ void VirtualPadUpdate(double now) {
         }
         if (hr & 32u) Haptic(HandLeft, 1.0f, now, 0.18);                    // deflect: hard, long
         else if (hr & 16u) Haptic(HandLeft, 0.6f, now, 0.08);               // blocked hit: thud
+        for (int h = 0; h < 2; ++h) if (hr & (64u << h)) Haptic((Hand)h, 0.9f, now, 0.07);   // strike landed: thud in the weapon hand
     }
     Swing sr = g_gest.Update(HandRight, tr.hand[HandRight], rGrip, now);
     Swing sl = g_gest.Update(HandLeft,  tr.hand[HandLeft],  lGrip, now);
