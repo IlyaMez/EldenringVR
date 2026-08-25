@@ -24,24 +24,28 @@ double SteadySec() {
 }
 
 // ---- stick glitch filter --------------------------------------------------------------
-// 2026-08-25, Quest Pro on VirtualDesktopXR 1.0.10: the runtime handed the LEFT thumbstick
-// rotated by exactly 90 degrees - (x,y) -> (-y,x), same magnitude - on ~10% of polls,
-// alternating frame to frame for anything from one poll to ~0.5 s (161 flips in one 8-minute
-// session, 0 in the Quest 3 session the same morning). A forward push rotated 90 degrees IS a
-// back-left vector: the character zig-zagged and caught on every step edge, and lurched
-// back-left on stopping. The "[xr] raw" log lines flip the same way, so it is upstream of
-// every ERVR transform (with Forward=head the stick rotation is identically zero anyway).
+// 2026-08-25, Quest Pro on VirtualDesktopXR 1.0.10: the runtime hands the LEFT thumbstick a
+// corrupted stream - full-deflection samples jumping 30..180 degrees between 4 ms polls
+// (both directions, broad angle spread, only ~1/3 matching an earlier sample - so neither a
+// fixed axis transform nor pure packet reordering), plus full-deflection spikes while the
+// stick is RELEASED. The Quest 3 sessions the same day are clean, and the right stick never
+// glitches, so it is the left controller's input path, upstream of every ERVR transform.
+// Symptoms: zig-zag "stuck on debris" movement, and a lurch ("pulled back-left") when
+// standing still. The "[xr] raw" log lines (written before this filter) show the raw stream.
 //
-// This runs at the poll rate (250 Hz). A thumb cannot turn a fully deflected stick a quarter
-// turn between two 4 ms polls, so a sample that is a same-magnitude ~90 degree rotation of
-// the last ACCEPTED sample is held out and the accepted sample repeated. Comparing against
-// the accepted sample (not the previous raw one) means a rotated run of any length is bridged,
-// and the flip back lands next to the accepted value and is simply accepted. A real stick
-// move sweeps through small angles (accepted as it goes) or through the centre (below half
-// deflection = always accepted, state reset), so it never trips this. Safety valve: after
-// GlitchHoldSeconds of continuous rejection the new position is believed - the cost of a
-// wrong guess is bounded, the cost of a stuck stick would not be.
-struct StickFilter { float ax = 0, ay = 0; bool held = false; double holdSince = 0; long rejected = 0; };
+// Physicality filter, run at the poll rate (250 Hz): the output is what a real thumb could
+// have done, as close to the raw sample as that allows.
+//   - Deflection magnitude may FALL instantly (a release) but may only RISE at
+//     GlitchRisePerSec (25/s = idle to full in 40 ms, as fast as a real slam). A garbage
+//     full-deflection spike from idle comes out at ~0.1 - under the deadzone - instead of
+//     as a one-frame lurch, and the instant the raw stream returns to idle so does the output.
+//   - Above half deflection the direction SLEWS toward the raw direction at
+//     GlitchSweepDegPerSec (720 deg/s - faster than rolling the stick around the rim). The
+//     per-poll garbage jumps (90 deg in 4 ms = 22000 deg/s) collapse to a +-3 degree wobble
+//     around the real direction; a genuine fast rim-roll is followed with ~50-100 ms of lag.
+//     No hold, no timeout: the output always converges on the raw stream, so a wrong guess
+//     costs lag, never a dead stick.
+struct StickFilter { float ax = 0, ay = 0; double last = 0; long adjusted = 0; };
 StickFilter g_stick[2];
 double g_stickReportAt = 0;
 
@@ -50,33 +54,39 @@ void FilterStickGlitches(VRInputState& in, double now) {
     if (!c.stickGlitchFilter) return;
     for (int h = 0; h < 2; ++h) {
         StickFilter& f = g_stick[h];
-        const float x = in.thumb[h][0], y = in.thumb[h][1];
-        const float m = std::sqrt(x * x + y * y), am = std::sqrt(f.ax * f.ax + f.ay * f.ay);
-        bool rotated = false;
+        const float rx = in.thumb[h][0], ry = in.thumb[h][1];
+        const float m = std::sqrt(rx * rx + ry * ry), am = std::sqrt(f.ax * f.ax + f.ay * f.ay);
+        float dt = (float)(now - f.last); f.last = now;
+        if (dt <= 0.f || dt > 0.05f) dt = 0.004f;   // first call / hitch: assume one 250 Hz poll
+        float outMag = m;
+        if (m > am) outMag = std::min(m, am + c.stickGlitchRisePerSec * dt);
+        float x, y;
         if (m > 0.5f && am > 0.5f) {
-            const float ratio = m / am;
-            const float cosA = (x * f.ax + y * f.ay) / (m * am);   // |cos| < cos(75 deg): 75..105 degrees apart
-            rotated = ratio > 0.8f && ratio < 1.25f && std::fabs(cosA) < 0.2588f;
+            const float cur = std::atan2(f.ay, f.ax), tgt = std::atan2(ry, rx);
+            float d = tgt - cur;
+            while (d > 3.14159265f) d -= 6.2831853f;
+            while (d < -3.14159265f) d += 6.2831853f;
+            const float maxStep = c.stickGlitchSweepDegPerSec * 0.017453292f * dt;
+            if (d > maxStep) d = maxStep; else if (d < -maxStep) d = -maxStep;
+            const float na = cur + d;
+            x = std::cos(na) * outMag; y = std::sin(na) * outMag;
+        } else if (m > 1e-6f) {
+            x = rx / m * outMag; y = ry / m * outMag;
+        } else {
+            x = y = 0.f;
         }
-        if (rotated) {
-            if (!f.held) {
-                f.held = true; f.holdSince = now;
-                if (f.rejected == 0) LOGD("[stick] %s stick sample (%.2f,%.2f) is a ~90 deg rotation of the accepted (%.2f,%.2f): holding", h ? "right" : "left", x, y, f.ax, f.ay);
-            }
-            if (now - f.holdSince <= c.stickGlitchHoldSeconds) {
-                in.thumb[h][0] = f.ax; in.thumb[h][1] = f.ay;
-                ++f.rejected;
-                continue;
-            }
-            // Held out for the whole window: this is where the stick really is now.
+        if (std::fabs(x - rx) > 0.10f || std::fabs(y - ry) > 0.10f) {
+            ++f.adjusted;
+            if (f.adjusted == 1) LOGD("[stick] %s stick (%.2f,%.2f) faster than a thumb; reshaped to (%.2f,%.2f)", h ? "right" : "left", rx, ry, x, y);
         }
-        f.held = false; f.ax = x; f.ay = y;
+        in.thumb[h][0] = f.ax = x;
+        in.thumb[h][1] = f.ay = y;
     }
     if (now - g_stickReportAt >= 5.0) {
         g_stickReportAt = now;
-        if (g_stick[0].rejected || g_stick[1].rejected) {
-            LOGI("[stick] glitch filter held %ld left / %ld right rotated samples (5 s)", g_stick[0].rejected, g_stick[1].rejected);
-            g_stick[0].rejected = g_stick[1].rejected = 0;
+        if (g_stick[0].adjusted || g_stick[1].adjusted) {
+            LOGI("[stick] glitch filter reshaped %ld left / %ld right implausible samples (5 s)", g_stick[0].adjusted, g_stick[1].adjusted);
+            g_stick[0].adjusted = g_stick[1].adjusted = 0;
         }
     }
 }

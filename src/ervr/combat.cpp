@@ -33,6 +33,7 @@
 #include <atomic>
 #include <mutex>
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -382,7 +383,7 @@ uint8_t* FindBehaviorRow(int variation, int judge, uint32_t* idOut) {
 // The AtkParam_Pc row a (weapon variation, judge id) pair resolves to. The BehaviorParam_PC row
 // id formula (1_0000_0000 + variation*1000 + judge, verified in ER 1.16 for 700/800/2400) is
 // checked by reading the row's own variation/judge fields back, with a field scan as fallback.
-struct AtkResolve { bool valid = false; int variation = -1, judge = -1; uint8_t* atkRow = nullptr; uint32_t bhvId = 0, atkId = 0; int bhvStamina = 0; };
+struct AtkResolve { bool valid = false; int variation = -1, judge = -1; uint8_t* atkRow = nullptr; uint8_t* bhvRow = nullptr; uint32_t bhvId = 0, atkId = 0; int bhvStamina = 0; };
 AtkResolve g_resolve[2];
 AtkResolve* ResolveAttack(int h, int wepVariation, int judge) {
     AtkResolve& r = g_resolve[h];
@@ -402,7 +403,7 @@ AtkResolve* ResolveAttack(int h, int wepVariation, int judge) {
     uint8_t* a = ParamsRow(PI_AtkParam_Pc, (uint32_t)refId, &asz);
     if (!a) { LOGW("[combat] no AtkParam_Pc row %d for BehaviorParam_PC %u", refId, bhvId); return nullptr; }
     CheckRowSize("ATK_PARAM_ST", asz, Atk_RowSize);
-    r.atkRow = a; r.bhvId = bhvId; r.atkId = (uint32_t)refId; r.valid = true;
+    r.atkRow = a; r.bhvRow = b; r.bhvId = bhvId; r.atkId = (uint32_t)refId; r.valid = true;
     uint16_t mv = 0; SafeRead(a + Atk_PhysCorr, &mv, 2);
     LOGI("[combat] %s hand judge %d -> BehaviorParam_PC %u (stamina %d) -> AtkParam_Pc %d (phys MV %u%%)", HandName(h), judge, bhvId, r.bhvStamina, refId, mv);
     return &r;
@@ -413,7 +414,33 @@ struct AtkEdit { bool active = false; uint8_t* row = nullptr; uint16_t orig[6]{}
 AtkEdit g_atk[2];
 const size_t kAtkCorr[6] = {Atk_PhysCorr, Atk_MagCorr, Atk_FireCorr, Atk_ThunCorr, Atk_DarkCorr, Atk_StamCorr};
 
+// Stamina-off mode: the game charges a behavior's stamina cost on every hit (and with continuous
+// hits, every frame of contact), so the only real disconnect is to make that cost 1 at the source
+// - the BehaviorParam_PC row's stamina field - for the strike's duration. The 1 that is still
+// charged is the hit signal (haptics) and is refunded.
+struct BhvEdit { bool active = false; uint8_t* row = nullptr; int orig = 0; };
+BhvEdit g_bhv[2];
+void RestoreBhv(int h) {
+    BhvEdit& e = g_bhv[h];
+    if (!e.active) return;
+    if (!(g_bhv[1 - h].active && g_bhv[1 - h].row == e.row)) SafeWrite(e.row + Bhv_Stamina, &e.orig, 4);
+    e.active = false; e.row = nullptr;
+}
+void ApplyBhvStamina(int h, uint8_t* row, int value) {
+    if (g_layoutBad || !row) return;
+    BhvEdit& e = g_bhv[h];
+    if (e.active && e.row != row) RestoreBhv(h);
+    if (!e.active) {
+        const BhvEdit& o = g_bhv[1 - h];
+        if (o.active && o.row == row) e.orig = o.orig; else SafeRead(row + Bhv_Stamina, &e.orig, 4);
+        e.active = true; e.row = row;
+    }
+    int cur = -1; SafeRead(row + Bhv_Stamina, &cur, 4);
+    if (cur != value) SafeWrite(row + Bhv_Stamina, &value, 4);
+}
+
 void RestoreAtk(int h) {
+    RestoreBhv(h);
     AtkEdit& e = g_atk[h];
     if (!e.active) return;
     // Both hands on the same row: the other edit still owns it, leave its values in place.
@@ -470,7 +497,7 @@ void ApplyGuard(uint8_t* row, float q) {
     float d = e.origDark * cutMul; SafeWrite(row + Wep_DarkGuardCut, &d, 4);
     int16_t def = (int16_t)((float)e.origDef * defMul + 0.5f); SafeWrite(row + Wep_StaminaGuardDef, &def, 2);
 }
-void RestoreAll() { RestoreAtk(HandLeft); RestoreAtk(HandRight); RestoreGuard(); }
+void RestoreAll() { RestoreAtk(HandLeft); RestoreAtk(HandRight); RestoreBhv(HandLeft); RestoreBhv(HandRight); RestoreGuard(); }
 
 float QualityToMult(float q, const Config& c) {
     if (q <= 1.f) return Lerp(c.kineticMinMult, 1.f, q < 0 ? 0 : q);
@@ -484,7 +511,19 @@ float Fatigue(int stam, int maxStam, const Config& c) {
     return Lerp(c.kineticFatigueFloor, 1.f, f / c.kineticFatigueStart);
 }
 
-int g_prevStam = -1;   // stamina at the end of the previous frame body (block impact detection)
+int g_prevStam = INT_MIN;   // stamina at the end of the previous frame body (hit / block impact detection); INT_MIN = unknown
+
+// End of the per-frame body. [Cheats] InfiniteStamina refills the bar to max here - AFTER the
+// hit / blocked-hit detection above has seen this frame's one-frame drop - so the game charges its
+// attack, block and sprint costs against a bar that is full again before its next update: no
+// guard break, no exhaustion, no gate, while the drop-based haptics keep working.
+void EndFrameStamina(uint8_t* player, int maxStam) {
+    if (Cfg().cheatInfiniteStamina && maxStam > 0) {
+        int cur = ReadStamina(player);
+        if (cur != maxStam) WriteStamina(player, maxStam);
+    }
+    g_prevStam = ReadStamina(player);
+}
 
 void GameFrameBody(uint8_t* player) {
     g_player = player;
@@ -495,7 +534,7 @@ void GameFrameBody(uint8_t* player) {
     int maxStam = -1;
     int stam = ReadStamina(player, &maxStam); g_status.stamina = stam;
     const int stamAtEntry = stam;
-    if (!physical) { RestoreAll(); g_leftShield.store(0); g_wepWeight[0].store(0.f); g_wepWeight[1].store(0.f); g_prevStam = stam; return; }
+    if (!physical) { RestoreAll(); g_leftShield.store(0); g_wepWeight[0].store(0.f); g_wepWeight[1].store(0.f); EndFrameStamina(player, maxStam); return; }
     g_status.paramsReady = ParamsReady();
     const bool kinetic = c.kineticEnabled && g_status.paramsReady && !g_layoutBad;
     ReadEquipment(player);
@@ -504,7 +543,7 @@ void GameFrameBody(uint8_t* player) {
     g_status.shield = leftShield;
 
     CSChrTaeAnimEvent* ev = PlayerTaeEvent(player);
-    if (!ev) { static double lastWarn = 0; double n = NowSec(); if (n - lastWarn > 10) { lastWarn = n; LOGW("[combat] player CSChrTaeAnimEvent not found (vtable mismatch?)"); } RestoreAll(); g_prevStam = stam; return; }
+    if (!ev) { static double lastWarn = 0; double n = NowSec(); if (n - lastWarn > 10) { lastWarn = n; LOGW("[combat] player CSChrTaeAnimEvent not found (vtable mismatch?)"); } RestoreAll(); EndFrameStamina(player, maxStam); return; }
 
     bool anyStrike = false;
     // Per-strike stamina accounting: what the GAME took over the whole strike beyond our own
@@ -518,11 +557,13 @@ void GameFrameBody(uint8_t* player) {
     // instance pauses for KineticHitPause (the blade passes through this enemy; a second enemy
     // later in the arc can still be hit) or, at 0, the strike ends.
     const double nowS = NowSec();
-    const bool hitNow = g_prevStam >= 0 && stamAtEntry >= 0 && (g_prevStam - stamAtEntry) >= c.kineticHitStamina;
     // Stamina modes: "off" takes the bar out of the loop entirely (no gate, no drain, no fatigue,
-    // and the game's own on-hit charge is given back), "game" leaves the game's charges alone,
-    // "full" adds ERVR's drain + fatigue on top.
+    // the attack's behavior cost forced to 1 and that 1 given back), "game" leaves the game's
+    // charges alone, "full" adds ERVR's drain + fatigue on top.
     const bool stamOff = c.kineticStaminaMode == "off", stamFull = c.kineticStaminaMode == "full";
+    // Stamina goes NEGATIVE in ER, so validity is "the max is known", never the sign of the value.
+    const bool stamKnown = maxStam > 0 && g_prevStam != INT_MIN;
+    const bool hitNow = stamKnown && (g_prevStam - stamAtEntry) >= (stamOff ? 1 : c.kineticHitStamina);
     static double s_lastHitHaptic[2] = {0, 0};
     for (int h = HandRight; h >= HandLeft; --h) {   // right first (main hand)
         SwingCmd& k = cmd[h];
@@ -588,7 +629,7 @@ void GameFrameBody(uint8_t* player) {
                 float qv = (k.tipLive / ref) * (k.tipLive / ref); if (qv > 1.f) qv = 1.f; if (qv < 0.f) qv = 0.f;
                 mult = c.kineticContinuousMult * qv * fat * c.kineticDamageScale;
             } else mult = QualityToMult(k.quality, c) * fat * c.kineticDamageScale;
-            if (r) { ApplyAtk(h, r->atkRow, mult); scaled = true; }
+            if (r) { ApplyAtk(h, r->atkRow, mult); if (stamOff) ApplyBhvStamina(h, r->bhvRow, 1); scaled = true; }
             g_status.lastQuality = k.quality; g_status.lastMult = scaled ? mult : 1.f;
         }
         if (k.first) {
@@ -633,7 +674,7 @@ void GameFrameBody(uint8_t* player) {
         if (kinetic) ApplyGuard(g_wep[HandLeft].row, blk.quality);
         // A stamina drop in one frame while guarding and not striking is a blocked hit (sprinting
         // drains far less per frame). If the shield was moving into the attack, it is a deflect.
-        if (!anyStrike && g_prevStam >= 0 && stamAtEntry >= 0 && g_prevStam - stamAtEntry >= c.blockImpactStamina) {
+        if (!anyStrike && maxStam > 0 && g_prevStam != INT_MIN && g_prevStam - stamAtEntry >= c.blockImpactStamina) {
             const int drop = g_prevStam - stamAtEntry;
             const bool deflect = blk.into >= c.deflectSpeed && (NowSec() - blk.intoT) < 0.25;
             if (deflect) { WriteStamina(player, g_prevStam); stam = g_prevStam; g_haptic.fetch_or(32u); }
@@ -641,7 +682,7 @@ void GameFrameBody(uint8_t* player) {
             if (c.combatDebug) LOGD("[combat] blocked hit: stamina -%d quality %.2f into %.2f m/s%s", drop, blk.quality, blk.into, deflect ? " -> DEFLECT (refunded)" : "");
         }
     } else RestoreGuard();
-    g_prevStam = ReadStamina(player);
+    EndFrameStamina(player, maxStam);
 }
 
 // ---------------------------------------------------------------- swing detection (worker thread)

@@ -1416,6 +1416,29 @@ void DoSecondPass(void* self, void* a, void* b) {
                         beg && end > beg && (size_t)(end - beg) <= 0x170u * 64u)
                         g_bakedN += ScanBaked(beg, (size_t)(end - beg), ref, g_baked + g_bakedN,
                                               32 - g_bakedN);
+                    // Density guard (2026-08-25 crash): the frame's dt is baked ONE per task
+                    // entry (stride 0x170), so real candidates are far apart. When the obj+8
+                    // pointer chain lands inside a live object instead of the entry array, the
+                    // scan matches a tight run of dt-looking floats packed 4-16 bytes apart -
+                    // and zeroing those corrupts whatever they belong to. One session read 12
+                    // candidates inside GXBS::GXRenderThread and the zero write access-violated
+                    // the render thread. Drop any candidate with another within 0x40 bytes: a
+                    // lone legit dt survives, a per-entry list (>=0x170 apart) survives, a dense
+                    // cluster is discarded whole.
+                    { int keep = 0, dropped = 0;
+                      for (int i = 0; i < g_bakedN; ++i) {
+                          bool dense = false;
+                          for (int j = 0; j < g_bakedN; ++j) {
+                              if (j == i) continue;
+                              intptr_t d = g_baked[i].p - g_baked[j].p; if (d < 0) d = -d;
+                              if (d < 0x40) { dense = true; break; }
+                          }
+                          if (dense) { ++dropped; continue; }
+                          g_baked[keep++] = g_baked[i];
+                      }
+                      if (dropped) LOGW("[stereo] pass-2 baked-dt scan: dropped %d densely-clustered candidate(s) (a live object, not the baked dt list) - not zeroing them", dropped);
+                      g_bakedN = keep;
+                    }
                     char offs[192]; int op = 0; offs[0] = 0;
                     for (int i = 0; i < g_bakedN && op < 170; ++i)
                         op += snprintf(offs + op, sizeof(offs) - op, " %p%s",

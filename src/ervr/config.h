@@ -141,8 +141,9 @@ struct Config {
     float stickDeadzone = 0.15f;
     bool  swapSticks = false;
     float rightStickSensitivity = 1.0f;
-    bool  stickGlitchFilter = true;       // drop runtime samples that are a same-magnitude ~90 deg rotation of the last accepted one (2026-08-25 Quest Pro / VDXR flips)
-    float stickGlitchHoldSeconds = 1.0f;  // longest a rotated sample is held out before it is accepted as a real stick position
+    bool  stickGlitchFilter = true;         // physicality filter on the runtime's stick samples (2026-08-25 Quest Pro / VDXR left-stick corruption)
+    float stickGlitchSweepDegPerSec = 720.f;// fastest a real thumb sweeps the stick around the rim; above half deflection the direction slews at this rate
+    float stickGlitchRisePerSec = 25.f;     // fastest a real thumb pushes from idle to full deflection (25/s = 40 ms); releases are instant
 
     // [Gestures]
     bool  gesturesEnabled = true;
@@ -314,6 +315,7 @@ struct Config {
 
     // [Cheats]  offline convenience for testing (writes the save's PlayerGameData)
     int   cheatSetAllStats = 0;           // >0: set every stat to exactly this value (level adjusted); 0 = off
+    bool  cheatInfiniteStamina = false;   // refill stamina to max every combat frame (attacks, blocks, sprint never drain). Hot-reloads.
 
     // [MenuNav]  left stick acts as a held D-pad while a menu is open (game auto-repeats), gestures muted
     bool  menuNavEnabled = true;

@@ -155,7 +155,8 @@ void Config::Load(const std::wstring& path) {
     swapSticks    = GetB(ini, L"Sticks", L"Swap", swapSticks);
     rightStickSensitivity = GetF(ini, L"Sticks", L"RightSensitivity", rightStickSensitivity);
     stickGlitchFilter = GetB(ini, L"Sticks", L"GlitchFilter", stickGlitchFilter);
-    stickGlitchHoldSeconds = GetF(ini, L"Sticks", L"GlitchHoldSeconds", stickGlitchHoldSeconds);
+    stickGlitchSweepDegPerSec = GetF(ini, L"Sticks", L"GlitchSweepDegPerSec", stickGlitchSweepDegPerSec);
+    stickGlitchRisePerSec = GetF(ini, L"Sticks", L"GlitchRisePerSec", stickGlitchRisePerSec);
 
     gesturesEnabled  = GetB(ini, L"Gestures", L"Enabled", gesturesEnabled);
     lightAttackSpeed = GetF(ini, L"Gestures", L"LightAttackSpeed", lightAttackSpeed);
@@ -209,6 +210,7 @@ void Config::Load(const std::wstring& path) {
     combatExtraStamina[2] = GetI(ini, L"Combat", L"ExtraStaminaLeft", combatExtraStamina[2]);
     combatSuppressAnimAttacks = GetB(ini, L"Combat", L"SuppressAnimAttacks", combatSuppressAnimAttacks);
     cheatSetAllStats = GetI(ini, L"Cheats", L"SetAllStats", cheatSetAllStats);
+    cheatInfiniteStamina = GetB(ini, L"Cheats", L"InfiniteStamina", cheatInfiniteStamina);
     combatDebug = GetB(ini, L"Combat", L"Debug", combatDebug);
     kineticEnabled = GetB(ini, L"Combat", L"Kinetic", kineticEnabled);
     kineticRefSpeed = GetF(ini, L"Combat", L"KineticRefSpeed", kineticRefSpeed);
