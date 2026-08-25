@@ -273,7 +273,7 @@ struct Config {
     float kineticMaxMult = 1.2f;          // multiplier at quality 1.5 (cap)
     float kineticHeavyQuality = 0.85f;    // quality (with >=80% of a full arc) that selects the heavy attack row
     float kineticAccel = 60.f;            // m/s^2 the (virtual or inertial) weapon can gain at weight 0
-    float kineticAccelWeight = 4.f;       // weight at which that acceleration halves (UGS ~23 -> 1/7)
+    float kineticAccelWeight = 2.f;       // weight at which that acceleration halves (UGS ~23 -> 1/12; was 4, doubled 2026-08-24 on request)
     // Inertial arm: the rendered hand/weapon chases the controller through a force-limited spring
     // (linear cap = KineticAccel/(1+weight/KineticAccelWeight), angular cap likewise from InertiaAngAccel),
     // so a heavy weapon visibly cannot be flicked and the hit sweep follows the weapon you see.
@@ -300,7 +300,7 @@ struct Config {
     std::wstring iniPath;                 // where Load() read from (for SaveLearned)
 
     // [Cheats]  offline convenience for testing (writes the save's PlayerGameData)
-    int   cheatSetAllStats = 0;           // >0: raise every stat below this value to it (level adjusted); 0 = off
+    int   cheatSetAllStats = 0;           // >0: set every stat to exactly this value (level adjusted); 0 = off
 
     // [MenuNav]  left stick acts as a held D-pad while a menu is open (game auto-repeats), gestures muted
     bool  menuNavEnabled = true;

@@ -2380,12 +2380,14 @@ void ApplyStatCheat() {
     uint8_t* pgd = Deref(gdm + 0x8); if (!pgd) return;
     int stats[8]; if (!SafeRead(pgd + 0x3C, stats, sizeof(stats))) return;
     for (int& s : stats) if (s < 1 || s > 99) return;   // sanity: not a PlayerGameData we understand
+    // Sets every stat to EXACTLY the value (2026-08-24: it used to only raise, which left a
+    // test character at 50-everything with no way back for balance testing).
     int sum = 0, changed = 0;
-    for (int& s : stats) { if (s < want) { s = want; ++changed; } sum += s; }
+    for (int& s : stats) { if (s != want) { s = want; ++changed; } sum += s; }
     if (changed) {
         SafeWrite(pgd + 0x3C, stats, sizeof(stats));
         int level = sum - 79; SafeWrite(pgd + 0x68, &level, 4);
-        LOGI("[cheat] raised %d stats to %d (level -> %d)", changed, want, level);
+        LOGI("[cheat] set %d stats to %d (level -> %d)", changed, want, level);
     }
     applied = want;
 }

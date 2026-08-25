@@ -493,9 +493,21 @@ void GameFrameBody(uint8_t* player) {
     if (!ev) { static double lastWarn = 0; double n = NowSec(); if (n - lastWarn > 10) { lastWarn = n; LOGW("[combat] player CSChrTaeAnimEvent not found (vtable mismatch?)"); } RestoreAll(); g_prevStam = stam; return; }
 
     bool anyStrike = false;
+    // Per-strike stamina accounting: what the GAME took over the whole strike beyond our own
+    // drain (one hit = one behavior cost; several = the same swing is hitting more than once).
+    static int s_strikeStam[2] = {-1, -1}; static uint32_t s_strikeId[2] = {0, 0}; static int s_strikeFrames[2] = {0, 0};
     for (int h = HandRight; h >= HandLeft; --h) {   // right first (main hand)
         SwingCmd& k = cmd[h];
-        if (!k.active) { RestoreAtk(h); continue; }
+        if (!k.active) {
+            if (s_strikeStam[h] >= 0 && c.combatDebug) {
+                const int now = ReadStamina(player);
+                LOGD("[combat] strike %s #%u ended after %d frames: game charged %d total (stamina %d -> %d)", HandName(h), s_strikeId[h], s_strikeFrames[h], s_strikeStam[h] - now, s_strikeStam[h], now);
+            }
+            s_strikeStam[h] = -1;
+            RestoreAtk(h); continue;
+        }
+        if (k.first) { s_strikeId[h] = k.id; s_strikeFrames[h] = 0; }
+        ++s_strikeFrames[h];
         if (h == HandLeft && leftShield) { RestoreAtk(h); continue; }   // the shield blocks, it does not strike
         Template t;
         { std::lock_guard<std::mutex> g(g_mtx); t = g_tpl[k.slot]; if (!t.valid && k.slot == SlotHeavy) t = g_tpl[SlotLight]; if (!t.valid && k.slot == SlotLeft) { t = g_tpl[SlotLight]; t.a.source = 2; } }
@@ -549,7 +561,7 @@ void GameFrameBody(uint8_t* player) {
                 drain += (int)(base * (0.5f + 0.5f * qc) + 0.5f);
             }
             if (drain > 0 && stam > 0) { stam -= drain; if (stam < 0) stam = 0; WriteStamina(player, stam); }
-            s_stamAfterDrain[h] = stam;
+            s_stamAfterDrain[h] = stam; s_strikeStam[h] = stam;
             if (c.combatDebug) {
                 if (scaled) LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) mult %.2f drain %d stamina %d/%d", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, mult, drain, stam, maxStam);
                 else LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) VANILLA DAMAGE (no attack row to scale) drain %d stamina %d/%d", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, drain, stam, maxStam);
