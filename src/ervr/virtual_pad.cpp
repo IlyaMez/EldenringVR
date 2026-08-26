@@ -116,7 +116,7 @@ void VirtualPadUpdate(double now) {
         // Keep watching the game's menu state without controllers too (same thread, a few
         // reads): the readers earn trust as menus open and close, and unattended runs -
         // no headset, autopilot tapping START - can verify them from the [menu] log lines.
-        if (c.menuNavEnabled && GameERPlayerActive()) GameMenuOpen(now);
+        if (c.menuNavEnabled && GameERPlayerActive()) CombatSetMenuOpen(GameMenuOpen(now) == 1);
         std::lock_guard<std::mutex> g(g_mtx); g_pad = pad; return;
     }
     pad.active = true;
@@ -172,6 +172,7 @@ void VirtualPadUpdate(double now) {
     // left the stick in D-pad mode until the next START cycle. A manual toggle (hold left stick
     // click without tilting) overrides the game state until the game agrees with it or the next
     // START press; BACK (map) forces the stick back to a stick the same way.
+    int gameMenu = -1;   // GameMenuOpen this update (-1 = not read / no trusted reader)
     bool lThumbDown = (in.buttons & VRB_LThumb) != 0;
     bool stickIdle = std::fabs(lx) < 0.3f && std::fabs(ly) < 0.3f;
     if (lThumbDown && !g_lthumbHold.down) { g_lthumbHold = {true, now, false}; g_lastDpadDir = 0; g_menuToggleFired = false; }
@@ -184,6 +185,7 @@ void VirtualPadUpdate(double now) {
         g_menuMode = g_menuManual = g_menuOverride = false;
     } else {
         int flag = GameMenuOpen(now);   // -1 = no trusted game-state reader yet
+        gameMenu = flag;
         bool toggle = c.menuNavToggleHold > 0.f && lThumbDown && !g_menuToggleFired && stickIdle && !g_lthumbHold.consumed &&
                       now - g_lthumbHold.since >= c.menuNavToggleHold;
         if (toggle) { g_menuToggleFired = true; g_lthumbHold.consumed = true; }
@@ -209,6 +211,10 @@ void VirtualPadUpdate(double now) {
         if (c.menuNavHaptics) { Haptic(HandLeft, g_menuMode ? 0.6f : 0.3f, now, g_menuMode ? 0.12 : 0.06); }
         g_menuDpadDir = 0;
     }
+    // Combat must stand down in menus even when the nav-mode guess is wrong: publish the union of
+    // the game's own menu state and the nav mode (manual toggles included). Combat gates its swing
+    // detection, injection, guard hold and chords on this directly (see CombatSetMenuOpen).
+    CombatSetMenuOpen(g_menuMode || gameMenu == 1);
 
     // Left stick click: tap = LS (crouch); hold + tilt = D-pad (quick slots).
     bool dpadMode = !g_menuMode && c.leftGripPlusStickIsDpad && lThumbDown;
@@ -342,7 +348,7 @@ void VirtualPadUpdate(double now) {
         CombatNotifyButton(mask, now);
         if (c.gestureHaptics) Haptic(h, amp, now, 0.08);
     };
-    if (!g_menuMode && !physical) {   // muted in menus: a swing there would press RB/RT/LB = tab switching / item use
+    if (!g_menuMode && !physical && !CombatMenuOpen()) {   // muted in menus: a swing there would press RB/RT/LB = tab switching / item use
         if (sr == Swing::Light) fire(g_map.light, HandRight, 0.5f);
         if (sr == Swing::Heavy) fire(g_map.heavy, HandRight, 1.0f);
         if (sl == Swing::LeftSwing) fire(g_map.leftSwing, HandLeft, 0.6f);

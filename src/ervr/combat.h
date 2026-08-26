@@ -29,6 +29,12 @@ void CombatNotifyButton(uint16_t xinputMask, double now);
 uint16_t CombatBlockedButtons();
 // XInput buttons virtual_pad must HOLD: the guard button while the left-hand shield is raised.
 uint16_t CombatHeldButtons();
+// Pad worker: publish whether any game menu is open (game state or menu-nav mode). While true,
+// physical combat stands down completely - no swings, no injection, no guard hold, no chords,
+// param edits restored - so the game never sees combat state under a menu (the equipment menu
+// refuses weapon changes while it does). CombatMenuOpen returns the gate's current state.
+void CombatSetMenuOpen(bool open);
+bool CombatMenuOpen();
 // Buttons combat FORCES on the pad this tick - the game's own chords (Y + RB/LB two-hand toggle, the
 // skill button, a learn press) - applied AFTER the attack-button block. Worker thread; drives the
 // chord timing, so call it exactly once per pad update.

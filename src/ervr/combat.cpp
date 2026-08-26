@@ -277,8 +277,8 @@ struct TwoHandState {
     float along = 0.f;               // m along the weapon axis (from the weapon hand's controller) where it was grabbed
     bool inZone = false;             // the free hand is on the shaft right now (its grip is the grab, not the skill button)
     bool owned = false;              // ERVR put the game into two-hand; only then does it take it back out
-    double zoneSince = 0, outSince = 0;
 } g_two;                             // under g_mtx
+std::atomic<int> g_menuOpen{0};            // pad worker -> everyone: a game menu is open (see CombatSetMenuOpen)
 int g_armStyle = 0;                        // game thread: ChrAsm.arm_style as last read (0 empty, 1 one-handed, 2 left both, 3 right both)
 std::atomic<int> g_armStyleShared{0};      // game thread -> worker: the same
 std::atomic<int> g_wepPresent[2]{0, 0};    // game thread -> worker: a (non-shield) weapon sits in that hand
@@ -723,7 +723,11 @@ void UpdateTwoHand(double now) {
         return;
     }
     if (s_attempts >= 3) {
-        if (!s_gaveUp) { s_gaveUp = true; LOGW("[combat] two-hand: the game stayed at arm style %d after 3 chords (wanted %d): nothing to two-hand in that hand, or the chord is not %s + %s/%s", g_armStyle, desired, Cfg().twoHandModifierButton.c_str(), Cfg().lightAttackButton.c_str(), Cfg().guardButton.c_str()); }
+        if (!s_gaveUp) {
+            s_gaveUp = true;
+            g_haptic.fetch_or(4u | 8u);   // fail buzz in both hands: the game refused the switch
+            LOGW("[combat] two-hand: the game stayed at arm style %d after 3 chords (wanted %d): nothing to two-hand in that hand, the chord is not %s + %s/%s, or the game is running too slow for the chord timing (raise TwoHandChordLead/Press at low fps)", g_armStyle, desired, Cfg().twoHandModifierButton.c_str(), Cfg().lightAttackButton.c_str(), Cfg().guardButton.c_str());
+        }
         return;
     }
     if (now - s_lastReq < 0.9 || g_chordReq.load() != 0) return;
@@ -892,6 +896,43 @@ void SkillFrame(uint8_t* player, CSChrTaeAnimEvent* ev, double now) {
     g_status.skillsRecorded = (int)g_skillLib.size();
 }
 
+// While a menu is open (combatDebug, 1 Hz): snapshot the modules that could make the equipment
+// menu refuse "change weapons" - the action-request module's ChrActions qwords (change_weapon_r/l
+// are bits 9/10; layout fromsoftware-rs action_request.rs, module container +0x80) and the damage
+// module's attack-entry table (+0x98, 16-byte entries {record id, active} - the registrar our
+// injected AttackBehavior lands in, confirmed by the event-1 handler disassembly). Comparing a
+// refusing menu against a fresh-spawn menu shows which value sticks after injected strikes.
+void MenuDiag(uint8_t* player) {
+    if (!Cfg().combatDebug) return;
+    static double s_last = 0; const double now = NowSec();
+    if (now - s_last < 1.0) return; s_last = now;
+    uint8_t* mods = Deref(player + Chr_Modules);
+    if (!mods) return;
+    uint8_t* areq = Deref(mods + 0x80);
+    uint8_t* dmg  = Deref(mods + 0x98);
+    char line[420]; size_t n = 0; line[0] = 0;
+    if (areq) {
+        uint64_t q[8] = {}; for (int i = 0; i < 8; ++i) SafeRead(areq + 0x10 + 8 * i, &q[i], 8);
+        uint64_t p[4] = {}; for (int i = 0; i < 4; ++i) SafeRead(areq + 0x70 + 8 * i, &p[i], 8);
+        n += (size_t)snprintf(line + n, sizeof(line) - n, "areq+10 %llx %llx %llx %llx %llx %llx %llx %llx +70 %llx %llx %llx %llx",
+                              (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
+                              (unsigned long long)q[4], (unsigned long long)q[5], (unsigned long long)q[6], (unsigned long long)q[7],
+                              (unsigned long long)p[0], (unsigned long long)p[1], (unsigned long long)p[2], (unsigned long long)p[3]);
+    } else n += (size_t)snprintf(line + n, sizeof(line) - n, "areq null");
+    if (dmg) {
+        uint8_t* b = nullptr; uint8_t* e = nullptr;
+        SafeRead(dmg + 0x18, &b, 8); SafeRead(dmg + 0x20, &e, 8);
+        long long cnt = b && e && e >= b ? (long long)((e - b) / 16) : -1;
+        n += (size_t)snprintf(line + n, sizeof(line) - n, " | dmg entries %lld:", cnt);
+        for (long long i = 0; i < cnt && i < 8 && n < sizeof(line) - 24; ++i) {
+            int32_t id = 0; uint8_t act = 0;
+            SafeRead(b + i * 16, &id, 4); SafeRead(b + i * 16 + 4, &act, 1);
+            n += (size_t)snprintf(line + n, sizeof(line) - n, " %d/%u", id, act);
+        }
+    } else n += (size_t)snprintf(line + n, sizeof(line) - n, " | dmg null");
+    LOGD("[combat] menudiag %s", line);
+}
+
 void GameFrameBody(uint8_t* player) {
     g_player = player;
     const Config& c = Cfg();
@@ -902,6 +943,14 @@ void GameFrameBody(uint8_t* player) {
     int stam = ReadStamina(player, &maxStam); g_status.stamina = stam;
     const int stamAtEntry = stam;
     if (!physical) { RestoreAll(); g_leftShield.store(0); g_wepWeight[0].store(0.f); g_wepWeight[1].store(0.f); EndFrameStamina(player, maxStam); return; }
+    // Any open menu: stand down on the game thread too - restore every live param edit, inject
+    // nothing, request no chords. The worker side is already idle (CombatHandlesSwings is false).
+    if (c.combatMenuGate && g_menuOpen.load()) {
+        RestoreAll(); g_leftShield.store(0);
+        MenuDiag(player);
+        EndFrameStamina(player, maxStam);
+        return;
+    }
     g_status.paramsReady = ParamsReady();
     const bool kinetic = c.kineticEnabled && g_status.paramsReady && !g_layoutBad;
     ReadEquipment(player);
@@ -992,10 +1041,16 @@ void GameFrameBody(uint8_t* player) {
             if (skillStrike) { g_skillSwing.armed = false; LOGI("[combat] skill strike: judge %d type %d (the skill's own attack row)", t.a.judgeId, t.a.attackType); }
         }
         anyStrike = true;
-        // Stable per-hand storage: the game keys the attack instance on the args pointer across frames.
-        static AttackBehaviorArgs s_ab[2]; static CSTaeAnimEventArgs s_args[2]; static float s_time[2]; static bool s_logNext[2];
+        // Stable per-hand storage: the game keys the attack instance on the args pointer across
+        // frames - stable WITHIN a strike, but a FRESH address for every new strike (round-robin
+        // pool). One address reused forever gave every strike of the session the same identity in
+        // the game's attack bookkeeping; suspected in the lingering combat state that made the
+        // equipment menu say "cannot change weapons now" minutes after the last swing (2026-08-26).
+        static AttackBehaviorArgs s_ab[2][8]; static CSTaeAnimEventArgs s_args[2][8];
+        static unsigned s_abSlot[2]; static float s_time[2]; static bool s_logNext[2];
         static int s_stamAfterDrain[2];
-        AttackBehaviorArgs& ab = s_ab[h]; CSTaeAnimEventArgs& args = s_args[h];
+        if (k.first) s_abSlot[h] = (s_abSlot[h] + 1) & 7;
+        AttackBehaviorArgs& ab = s_ab[h][s_abSlot[h]]; CSTaeAnimEventArgs& args = s_args[h][s_abSlot[h]];
         // Kinetic: scale the strike's attack row by quality x fatigue, refreshed every frame so the
         // value the sweep reads at contact reflects the tip speed at contact.
         float mult = 1.f; bool scaled = false;
@@ -1111,11 +1166,14 @@ void UpdateSwing(int h, float quality, float arc, float tip, float tipLive) {
 }
 void EndSwing(int h) { std::lock_guard<std::mutex> g(g_mtx); g_cmd[h].active = false; g_cmd[h].first = false; }
 
-// The grab (worker): the free hand's controller sits on the weapon hand's weapon axis - between
-// TwoHandGrabMin and TwoHandGrabMax metres along it, within TwoHandGrabRadius of it - with its grip
-// squeezed. Let go when the grip opens or the hand leaves the shaft (TwoHandReleaseRadius, after
-// a grace). The right weapon is tried first; closing the right hand on the left weapon two-hands
-// that one instead. Lost tracking (menus hand us empty poses) changes nothing.
+// The grab (worker): put the free hand on the hilt - within TwoHandGrabRadius of the weapon axis,
+// TwoHandGrabMin..TwoHandGrabMax m toward the pommel - and SQUEEZE its grip. That is the whole
+// gesture: the grip alone is the hold - two-handed for exactly as long as it stays closed, wherever
+// the hands move - and opening it is the only release. (Position gates on the hold - release radii,
+// stillness, dwell debounces, cooldowns - were tried 2026-08-25/26 and only broke it: swings read
+// as releases threw weapons between hands, and the gates kept honest grabs from ever taking.)
+// The right weapon is tried first; closing the right hand on the left weapon two-hands that one
+// instead. Lost tracking changes nothing: the grip stream is the hold.
 void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
     const Config& c = Cfg();
     TwoHandState s; { std::lock_guard<std::mutex> g(g_mtx); s = g_two; }
@@ -1132,6 +1190,13 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
     };
     // The grip is analog in VRInputState (the backend never sets VRB_LGrip/RGrip); threshold it as virtual_pad does.
     auto gripOf = [&](int h) { return in.handTrigger[h] >= c.gripThreshold; };
+    // A grab is a FRESH squeeze at the hilt: the grip must have closed within the last 0.75 s, so a
+    // hand that wanders past with its grip long held (guarding, habit) does nothing until it opens
+    // and squeezes again - but squeezing slightly before the hand arrives still grabs.
+    static bool s_prevGrip[2] = {false, false};
+    static double s_gripCloseT[2] = {-1e9, -1e9};
+    for (int h = 0; h < 2; ++h) { if (gripOf(h) && !s_prevGrip[h]) s_gripCloseT[h] = now; s_prevGrip[h] = gripOf(h); }
+    static const char* s_geoBlock = nullptr;   // why the take is not happening (previous tick; shown in the geometry line)
     // Calibration line (2 Hz): the geometry whenever a grip is squeezed with the hands near each
     // other, so a grab that does not take can be read off the log and the window adjusted.
     static double s_lastGeoLog = 0;
@@ -1140,7 +1205,7 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
             float along = 0.f, perp = 0.f;
             if (!gripOf(1 - w) || !geometry(w, &along, &perp) || std::fabs(along) > 0.6f || perp > 0.6f) continue;
             s_lastGeoLog = now;
-            LOGD("[combat] two-hand geometry: %s hand (grip) vs %s weapon: %.2f m toward the pommel along the %s axis (window %.2f..%.2f) off-axis %.2f m (radius %.2f) weapon %d%s", HandName(1 - w), HandName(w), along, handleAxis ? "handle" : "aim", c.twoHandGrabMin, c.twoHandGrabMax, perp, c.twoHandGrabRadius, g_wepPresent[w].load(), s.want ? " [held]" : "");
+            LOGD("[combat] two-hand geometry: %s hand (grip) vs %s weapon: %.2f m toward the pommel along the %s axis (window %.2f..%.2f) off-axis %.2f m (radius %.2f) weapon %d%s%s%s", HandName(1 - w), HandName(w), along, handleAxis ? "handle" : "aim", c.twoHandGrabMin, c.twoHandGrabMax, perp, c.twoHandGrabRadius, g_wepPresent[w].load(), s.want ? " [held]" : "", !s.want && s_geoBlock ? " blocked: " : "", !s.want && s_geoBlock ? s_geoBlock : "");
         }
     }
     if (!s.want) {
@@ -1150,32 +1215,23 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
             if (!g_wepPresent[w].load() || !geometry(w, &along, &perp)) continue;
             if (!(along >= c.twoHandGrabMin && along <= c.twoHandGrabMax && perp <= c.twoHandGrabRadius)) continue;
             zoneNow = true; s.pinHand = 1 - w; s.weaponHand = w;
-            if (c.twoHandHoldGrip && !gripOf(1 - w)) { s.zoneSince = 0; continue; }
-            if (s.zoneSince == 0) s.zoneSince = now;
-            if (now - s.zoneSince >= 0.08) {
-                s.want = true; s.along = along; s.outSince = 0;
+            s_geoBlock = !gripOf(1 - w) ? "grip not squeezed"
+                       : now - s_gripCloseT[1 - w] > 0.75 ? "grip was already closed - open it and squeeze again"
+                       : nullptr;
+            if (!s_geoBlock) {
+                s.want = true; s.along = along;
                 LOGI("[combat] two-hand: %s hand took the %s weapon %.2f m down the hilt (%.2f m off axis)", HandName(1 - w), HandName(w), along, perp);
             }
         }
         s.inZone = zoneNow;
-        if (!zoneNow) s.zoneSince = 0;
+        if (!zoneNow) s_geoBlock = nullptr;
     } else {
-        float along = 0.f, perp = 0.f;
-        if (geometry(s.weaponHand, &along, &perp)) {
-            // TwoHandHoldGrip: the hold also needs the grip, with hysteresis (half the take-hold threshold)
-            // so an analog grip relaxing a little does not drop the weapon. Default: the hand on the shaft is the hold.
-            const bool gripOk = !c.twoHandHoldGrip || in.handTrigger[s.pinHand] >= 0.5f * c.gripThreshold;
-            const bool hold = along >= c.twoHandGrabMin - 0.10f && along <= c.twoHandGrabMax + 0.15f && perp <= c.twoHandReleaseRadius && gripOk;
-            s.inZone = hold;
-            if (hold) s.outSince = 0;
-            else {
-                if (s.outSince == 0) s.outSince = now;
-                if (now - s.outSince >= c.twoHandReleaseSeconds) {
-                    s.want = false; s.zoneSince = 0;
-                    LOGI("[combat] two-hand: %s hand let go (%s)", HandName(s.pinHand), !gripOk ? "grip opened" : "left the shaft");
-                }
-            }
+        // The grip is the hold, full stop. Half the close threshold as hysteresis rides out analog dips.
+        if (in.handTrigger[s.pinHand] < 0.5f * c.gripThreshold) {
+            s.want = false;
+            LOGI("[combat] two-hand: %s hand let go (grip opened)", HandName(s.pinHand));
         }
+        s.inZone = s.want;   // the grabbing grip's pad mapping stays blocked while held
     }
     std::lock_guard<std::mutex> g(g_mtx); g_two = s;
 }
@@ -1293,6 +1349,9 @@ void CombatShutdown() { RestoreAll(); }
 // arrival-settle; CombatPollHands resets any in-flight swing the moment this goes false.
 bool CombatHandlesSwings() {
     if (!GameERPlayerActive()) return false;
+    // Menus stand combat down entirely (2026-08-26 "cannot change weapons now"): the equipment
+    // menu refuses changes while the game sees combat state, so nothing of ours may run there.
+    if (Cfg().combatMenuGate && g_menuOpen.load()) return false;
     if (GameERTransitionActive()) {
         // One line per transition window, so a future postmortem can see the suppression.
         static ULONGLONG s_lastLog = 0;
@@ -1375,6 +1434,13 @@ bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool*
 }
 
 float CombatHandWeight(int hand) { return hand == HandLeft || hand == HandRight ? g_wepWeight[hand].load() : 0.f; }
+
+void CombatSetMenuOpen(bool open) {
+    const int v = open ? 1 : 0;
+    if (g_menuOpen.exchange(v) != v && g_status.taeHooked)
+        LOGD("[combat] menu %s: physical combat %s", open ? "open" : "closed", open ? "standing down" : "re-armed");
+}
+bool CombatMenuOpen() { return Cfg().combatMenuGate && g_menuOpen.load() != 0; }
 
 uint16_t CombatHeldButtons() {
     const Config& c = Cfg();

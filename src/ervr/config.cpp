@@ -212,6 +212,7 @@ void Config::Load(const std::wstring& path) {
     cheatSetAllStats = GetI(ini, L"Cheats", L"SetAllStats", cheatSetAllStats);
     cheatInfiniteStamina = GetB(ini, L"Cheats", L"InfiniteStamina", cheatInfiniteStamina);
     combatDebug = GetB(ini, L"Combat", L"Debug", combatDebug);
+    combatMenuGate = GetB(ini, L"Combat", L"MenuGate", combatMenuGate);
     kineticEnabled = GetB(ini, L"Combat", L"Kinetic", kineticEnabled);
     kineticRefSpeed = GetF(ini, L"Combat", L"KineticRefSpeed", kineticRefSpeed);
     kineticArcRef = GetF(ini, L"Combat", L"KineticArc", kineticArcRef);
@@ -254,9 +255,6 @@ void Config::Load(const std::wstring& path) {
     twoHandGrabRadius = GetF(ini, L"Combat", L"TwoHandGrabRadius", twoHandGrabRadius);
     twoHandGrabMin = GetF(ini, L"Combat", L"TwoHandGrabMin", twoHandGrabMin);
     twoHandGrabMax = GetF(ini, L"Combat", L"TwoHandGrabMax", twoHandGrabMax);
-    twoHandReleaseRadius = GetF(ini, L"Combat", L"TwoHandReleaseRadius", twoHandReleaseRadius);
-    twoHandHoldGrip = GetB(ini, L"Combat", L"TwoHandHoldGrip", twoHandHoldGrip);
-    twoHandReleaseSeconds = GetF(ini, L"Combat", L"TwoHandReleaseSeconds", twoHandReleaseSeconds);
     twoHandPinHand = GetB(ini, L"Combat", L"TwoHandPinHand", twoHandPinHand);
     twoHandLightJudgeId = GetI(ini, L"Combat", L"TwoHandLightJudgeId", twoHandLightJudgeId);
     twoHandHeavyJudgeId = GetI(ini, L"Combat", L"TwoHandHeavyJudgeId", twoHandHeavyJudgeId);

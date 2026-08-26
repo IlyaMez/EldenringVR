@@ -413,11 +413,12 @@ Implementation (`src/ervr/combat.cpp`):
 
 ## Two-handing by grabbing the weapon, and the Ash of War without its animation
 
-`[Combat] TwoHand=grab` (default). Close your free hand on the weapon in your other hand — the controller within
-`TwoHandGrabRadius` (0.12 m) of the weapon axis, between `TwoHandGrabMin` and `TwoHandGrabMax` metres along it
-(the hilt / haft, not the blade), grip squeezed — and you are two-handing. Open the grip (or, with
-`TwoHandHoldGrip=false`, take the hand off the shaft) and you are back to one hand. Closing the *right* hand on the
-*left* weapon two-hands that one instead.
+`[Combat] TwoHand=grab` (default). Put your free hand on the hilt of the weapon in your other hand — the controller
+within `TwoHandGrabRadius` (0.18 m) of the weapon axis, between `TwoHandGrabMin` and `TwoHandGrabMax` metres along
+it — and *squeeze its grip*. That's the whole gesture: the grip alone is the hold — you stay two-handed for exactly
+as long as it stays squeezed, wherever the hands move — and opening it is the only release. The squeeze must be
+fresh (a grip already closed when the hand arrives is ignored — open it and squeeze again), so guarding or holding
+your own weapon never grabs. Closing the *right* hand on the *left* weapon two-hands that one instead.
 
 **How the switch is made.** ERVR never writes `ChrAsm.arm_style` (`PlayerIns+0x638 → +0x08`: 0 empty, 1 one-handed,
 2 left both hands, 3 right both hands — fromsoftware-rs). It sends the game's *own* chord — `TwoHandModifierButton` +
@@ -501,6 +502,12 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise — 
   before blaming the headset; `StereoMode=cinema` is the cheap fallback and always works.
 * Visual/comfort options live in `[VR]` (`RenderScale`, `WorldScale`, `FovDeg`, `IpdMm`, snap turn). There is no
   in‑headset settings menu yet — edit `ERVR.ini`, it hot‑reloads.
+* While any game menu is open, physical combat stands down completely (`[Combat] MenuGate`, default on):
+  no swing detection, no injected attacks, no guard hold, no two-hand chords, and the live param edits
+  are restored. The equipment menu refuses weapon changes while the game sees combat state
+  (“cannot change weapons now”); each strike also uses a fresh event-args identity so the game's
+  attack bookkeeping never carries one address across strikes. With `Debug=true` a 1 Hz
+  `[combat] menudiag` line dumps the action-request / damage-module state while a menu is up.
 * Physical melee has no attack animation at all: enemy AI/hitstop cues that key off the player's *attack state*
   (not the hit) are absent, and the game may still allow rolling mid-swing. Damage numbers are the weapon's real
   R1/R2 values regardless of how hard you swing (speed scaling is a planned hook).

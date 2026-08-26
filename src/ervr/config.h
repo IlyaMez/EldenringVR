@@ -315,16 +315,15 @@ struct Config {
     // two-hand chord (Y + RB / Y + LB) is sent and ChrAsm.arm_style read back as the authority.
     std::string twoHandMode = "grab";     // grab | off
     std::string twoHandModifierButton = "Y";   // the game's two-hand modifier (XInput name): Y + RB / Y + LB by default
-    float twoHandChordLead = 0.25f;       // s the modifier is held before the key goes down (the game wants to see Y first)
-    float twoHandChordPress = 0.15f;      // s the key is held with the modifier
-    float twoHandChordTail = 0.10f;       // s the modifier stays down after the key is released
+    // The game counts the chord in ITS OWN frames: at 20 fps (GPU-bound stereo) a 250 ms lead is only
+    // 5 frames - the same as the fast chord it ignored at 60 fps. Sized to survive ~15 fps.
+    float twoHandChordLead = 0.35f;       // s the modifier is held before the key goes down (the game wants to see Y first)
+    float twoHandChordPress = 0.25f;      // s the key is held with the modifier
+    float twoHandChordTail = 0.15f;       // s the modifier stays down after the key is released
     std::string twoHandAxis = "handle";   // the hilt runs along the controller's HANDLE (its -Y, toward the pommel; 2026-08-25: the pinned hand sat behind the hand with "forward") | forward (the aim axis, -Z)
     float twoHandGrabRadius = 0.18f;      // m from the hilt axis within which the free hand takes hold (two Touch controllers side by side are ~0.12 m apart)
     float twoHandGrabMin = -0.15f;        // m along the hilt axis from the weapon hand's controller, positive = toward the pommel (where the second hand sits)
     float twoHandGrabMax = 0.45f;         // ... negative = up toward the blade
-    float twoHandReleaseRadius = 0.35f;   // m from the axis at which the hold is lost (hysteresis)
-    bool  twoHandHoldGrip = false;        // true: the hold also needs that hand's grip (with hysteresis); false: the hand on the shaft IS the hold, take it off to let go
-    float twoHandReleaseSeconds = 0.25f;  // grace before a lost hold un-two-hands
     bool  twoHandPinHand = true;          // while two-handing the free hand's arm rides the weapon shaft (follows the inertial weapon)
     int   twoHandLightJudgeId = 200, twoHandHeavyJudgeId = -1;   // two-handed attack rows (R1 2H = 200 learned 2026-08-25; -1 = learn in auto mode, else the one-handed rows)
     // Skill (Ash of War) while two-handed: TwoHandSkillButton fires it. "effect" replays the TAE events the
@@ -351,6 +350,7 @@ struct Config {
     float menuNavToggleHold = 0.5f;       // hold left stick click (no tilt) this long -> toggle menu mode; 0 = off
     bool  menuNavHaptics = true;
     std::string menuSource = "auto";     // auto | menuman | hud | chain | start  (see game_memory.cpp GameMenuOpen)
+    bool  combatMenuGate = true;         // any open menu stands physical combat down (equip menu refuses weapon changes while the game sees combat state)
     std::string menuAob ="48 8B 0D ?? ?? ?? ?? 48 8B 53 08 48 8B 92 D8 00 00 00 48 83 C4 20 5B";  // CSMenuMan* global
     int   menuAobOffset = 3, menuAobInstrLen = 7;
     std::string menuChain;                // pointer chain from the CSMenuMan* global to a byte that is nonzero while a menu is open; empty = disabled
