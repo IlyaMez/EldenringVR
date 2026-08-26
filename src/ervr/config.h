@@ -311,6 +311,33 @@ struct Config {
     float shieldNormalPitchDeg = -90.f;   // shield face normal = controller forward pitched by this (-90 = the controller's -Y, measured 2026-08-24)
     float deflectSpeed = 1.2f;            // m/s shield speed INTO the attack at impact = deflect (stamina refunded)
     int   blockImpactStamina = 4;         // one-frame stamina drop while guarding that counts as a blocked hit
+    // Two-handing by grabbing: the free hand closes on the weapon hand's weapon shaft -> the game's own
+    // two-hand chord (Y + RB / Y + LB) is sent and ChrAsm.arm_style read back as the authority.
+    std::string twoHandMode = "grab";     // grab | off
+    std::string twoHandModifierButton = "Y";   // the game's two-hand modifier (XInput name): Y + RB / Y + LB by default
+    float twoHandChordLead = 0.25f;       // s the modifier is held before the key goes down (the game wants to see Y first)
+    float twoHandChordPress = 0.15f;      // s the key is held with the modifier
+    float twoHandChordTail = 0.10f;       // s the modifier stays down after the key is released
+    std::string twoHandAxis = "handle";   // the hilt runs along the controller's HANDLE (its -Y, toward the pommel; 2026-08-25: the pinned hand sat behind the hand with "forward") | forward (the aim axis, -Z)
+    float twoHandGrabRadius = 0.18f;      // m from the hilt axis within which the free hand takes hold (two Touch controllers side by side are ~0.12 m apart)
+    float twoHandGrabMin = -0.15f;        // m along the hilt axis from the weapon hand's controller, positive = toward the pommel (where the second hand sits)
+    float twoHandGrabMax = 0.45f;         // ... negative = up toward the blade
+    float twoHandReleaseRadius = 0.35f;   // m from the axis at which the hold is lost (hysteresis)
+    bool  twoHandHoldGrip = false;        // true: the hold also needs that hand's grip (with hysteresis); false: the hand on the shaft IS the hold, take it off to let go
+    float twoHandReleaseSeconds = 0.25f;  // grace before a lost hold un-two-hands
+    bool  twoHandPinHand = true;          // while two-handing the free hand's arm rides the weapon shaft (follows the inertial weapon)
+    int   twoHandLightJudgeId = 200, twoHandHeavyJudgeId = -1;   // two-handed attack rows (R1 2H = 200 learned 2026-08-25; -1 = learn in auto mode, else the one-handed rows)
+    // Skill (Ash of War) while two-handed: TwoHandSkillButton fires it. "effect" replays the TAE events the
+    // skill's animation carries (AddSpEffect_WeaponArts 331, AddSpEffect 67/66, BulletBehavior 2, FFX) without
+    // the animation; the first use per weapon/ash plays it the game's way once and records those events.
+    std::string twoHandSkill = "effect";  // effect | game | off
+    std::string twoHandSkillButton = "RTrigger";   // VR control: RTrigger RGrip LTrigger LGrip A B X Y RThumb LThumb none
+    std::string skillButton = "LT";       // the game's skill button (what "game" presses and "effect" records from)
+    float twoHandSkillRelearnHold = 1.0f; // hold the trigger this long: the game plays the skill and it is re-recorded
+    std::string skillReplayEvents = "331,67,66,2,96,110,112,120";   // TAE event ids replayed by "effect"
+    float skillRecordSeconds = 3.0f;      // how long after the game-driven press events are recorded
+    float skillSwingWindow = 2.5f;        // s after an effect-skill during which the next swing uses the skill's attack row
+    bool  skillChargeFp = true;           // "effect" charges the skill's FP (SwordArtsParam) and refuses without it
     std::wstring iniPath;                 // where Load() read from (for SaveLearned)
 
     // [Cheats]  offline convenience for testing (writes the save's PlayerGameData)

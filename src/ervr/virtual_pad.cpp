@@ -329,6 +329,8 @@ void VirtualPadUpdate(double now) {
         if (hr & 32u) Haptic(HandLeft, 1.0f, now, 0.18);                    // deflect: hard, long
         else if (hr & 16u) Haptic(HandLeft, 0.6f, now, 0.08);               // blocked hit: thud
         for (int h = 0; h < 2; ++h) if (hr & (64u << h)) Haptic((Hand)h, 0.9f, now, 0.07);   // strike landed: thud in the weapon hand
+        if (hr & 256u) { Haptic(HandLeft, 0.7f, now, 0.15); Haptic(HandRight, 0.7f, now, 0.15); }   // two-handed: both hands close on the weapon
+        else if (hr & 512u) { Haptic(HandLeft, 0.4f, now, 0.06); Haptic(HandRight, 0.4f, now, 0.06); }   // back to one hand
     }
     Swing sr = g_gest.Update(HandRight, tr.hand[HandRight], rGrip, now);
     Swing sl = g_gest.Update(HandLeft,  tr.hand[HandLeft],  lGrip, now);
@@ -352,8 +354,15 @@ void VirtualPadUpdate(double now) {
     if (pulses & VP_RT) rt = 255;
     if (!g_menuMode) {   // physical combat: trigger/grip must not start attack animations (menus still need RB/RT tabs)
         uint16_t blocked = CombatBlockedButtons();
+        // With the game's two-hand modifier (Y) physically held, trigger/grip are a CHORD (Y + RB / Y + LB
+        // two-hands), not an attack: let them through so the chord can be made by hand.
+        if (yDown) blocked &= ~(g_map.light | g_map.heavy | g_map.leftSwing | g_map.ltrig | g_map.rtrig);
         if (blocked) { held &= ~blocked; pulses &= ~blocked; if (blocked & VP_RT) rt = 0; if (blocked & VP_LT) lt = 0; }
         held |= CombatHeldButtons();   // raised shield = guard held
+        // The game's own chords combat plays through the block: two-hand toggle (Y + RB/LB), skill, learn press.
+        const uint16_t forced = CombatForcedButtons(now);
+        if (forced & VP_LT) lt = 255; if (forced & VP_RT) rt = 255;
+        held |= forced & ~(VP_LT | VP_RT);
     }
     pulses &= ~(VP_LT | VP_RT);
     held &= ~(VP_LT | VP_RT);

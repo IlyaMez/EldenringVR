@@ -1659,6 +1659,7 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
     DebugKeysHandRotX(&handRotX);   // Numpad 6/9 live calibration wins while active
     Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
     bool any = false;
+    Vec3 tp[2]; Quat tq[2]; Vec3 tcf[2], tcu[2]; bool tok[2] = {false, false};
     for (int h = 0; h < 2; ++h) {
         if (!f.handValid[h]) continue;
         Quat cq = (baseQ * f.handQ[h] * calib).Normalized();          // controller orientation in game world
@@ -1667,10 +1668,22 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
         if (g_skel.handAxesOk[h]) q = Quat::MapPairs(g_skel.handFwd[h], g_skel.handThumb[h], cf, cu);   // hand-local -> world
         Vec3 p = f.anchor + baseQ.Rotate(f.handP[h] * c.handScale) - cf * c.handBackOffset;
         if (c.handOrigin == "head") p = p + headOff;   // hands are head-relative: re-add where the view actually is
+        tp[h] = p; tq[h] = q; tcf[h] = cf; tcu[h] = cu; tok[h] = true;
+    }
+    // Two-handing: the free hand rides the weapon hand's hilt where it took hold - toward the pommel,
+    // i.e. down the controller's handle (-up) or back along its aim (-forward) - so it follows the
+    // (inertial, lagging) weapon instead of drifting off the shaft.
+    {
+        int pin = -1, wep = -1; float along = 0.f; bool handle = true;
+        if (CombatTwoHandPin(&pin, &wep, &along, &handle) && pin >= 0 && wep >= 0 && tok[pin] && tok[wep])
+            tp[pin] = tp[wep] + (handle ? tcu[wep] : tcf[wep]) * -along;
+    }
+    for (int h = 0; h < 2; ++h) {
+        if (!tok[h]) continue;
         float side = h == HandLeft ? -1.f : 1.f;
         Vec3 pole = Quat::YawQ(f.bodyYaw).Rotate(Vec3{side * c.elbowPoleOut, -c.elbowPoleDown, -c.elbowPoleBack});
-        if (h == HandLeft) SolveArm(g_skel, pose, local, w, g_skel.L_ua, g_skel.L_fa, g_skel.L_hand, p, q, pole);
-        else               SolveArm(g_skel, pose, local, w, g_skel.R_ua, g_skel.R_fa, g_skel.R_hand, p, q, pole);
+        if (h == HandLeft) SolveArm(g_skel, pose, local, w, g_skel.L_ua, g_skel.L_fa, g_skel.L_hand, tp[h], tq[h], pole);
+        else               SolveArm(g_skel, pose, local, w, g_skel.R_ua, g_skel.R_fa, g_skel.R_hand, tp[h], tq[h], pole);
         any = true;
     }
     g_status.armsActive = any;

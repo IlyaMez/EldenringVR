@@ -14,6 +14,8 @@ enum ParamIndex {
     PI_AtkParam_Pc      = 8,
     PI_BehaviorParam_PC = 13,
     PI_SpEffectParam    = 15,
+    PI_SwordArtsParam   = 82,
+    PI_EquipParamGem    = 154,
 };
 
 void ParamsInit();          // resolve the repository static (AOB); safe to call before params load

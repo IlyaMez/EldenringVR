@@ -409,8 +409,63 @@ Implementation (`src/ervr/combat.cpp`):
   picks light vs heavy (`HeavySwingSpeed`), `Swinging` while tip ≥ `SwingOffSpeed` (max `MaxSwingSeconds`), then
   `Cooldown`. Left hand swings use `Source=2` (left weapon). No stamina (`ChrDataModule+0x154`) → swing rejected
   with a long haptic buzz. One attack instance per swing, so the game's own hit list prevents multi-hits.
-* Not done yet: speed-scaled damage, hit-confirm haptics (needs the hit callback), guard-by-posture, per-stance
-  judge ids (two-handing has its own animations; re-learn via `Mode=buttons`), directional thrust vs slash.
+* Not done yet: directional thrust vs slash, charged (hold) skills.
+
+## Two-handing by grabbing the weapon, and the Ash of War without its animation
+
+`[Combat] TwoHand=grab` (default). Close your free hand on the weapon in your other hand — the controller within
+`TwoHandGrabRadius` (0.12 m) of the weapon axis, between `TwoHandGrabMin` and `TwoHandGrabMax` metres along it
+(the hilt / haft, not the blade), grip squeezed — and you are two-handing. Open the grip (or, with
+`TwoHandHoldGrip=false`, take the hand off the shaft) and you are back to one hand. Closing the *right* hand on the
+*left* weapon two-hands that one instead.
+
+**How the switch is made.** ERVR never writes `ChrAsm.arm_style` (`PlayerIns+0x638 → +0x08`: 0 empty, 1 one-handed,
+2 left both hands, 3 right both hands — fromsoftware-rs). It sends the game's *own* chord — `TwoHandModifierButton` +
+`LightAttackButton` for the right weapon, + `GuardButton` for the left (Y + RB / Y + LB in the default bindings),
+modifier down 100 ms before the key, played on the virtual pad *after* the attack-button block — and reads
+`arm_style` back as the authority. The game therefore does everything it does when you press the chord yourself:
+the strength bonus, the two-hand attack rows, HKS state, the weapon re-attached. A chord the game refuses is retried
+three times 0.9 s apart, then logged once and left alone until the wish changes (`[combat] two-hand: ...` and
+`[combat] arm style A -> B` in the log). A manual Y + RB still works; ERVR only takes you *out* of two-handing when it
+put you in. While two-handed:
+
+* the free hand's arm **rides the weapon shaft** where it took hold (`TwoHandPinHand`): its target is the weapon
+  hand's (inertial, lagging) controller plus the grab distance along the weapon axis, so the hand stays on the
+  haft while the greatsword catches up;
+* the free hand never swings on its own, and its grip button is the grab — not the skill (LT) it is mapped to;
+* swings use the **two-handed attack rows**. They differ from the one-handed ones (`SlotLight2H`/`SlotHeavy2H`):
+  with `Mode=auto` + `Learn=true` the first two-handed light / heavy swing presses the button once so the game plays
+  its two-handed attack and the hook learns the row (`[combat] learned light-2h attack: judgeId ...`), pinnable via
+  `TwoHandLightJudgeId` / `TwoHandHeavyJudgeId`; an unknown row falls back to the one-handed one.
+
+**The Ash of War.** With both hands on the weapon, `TwoHandSkillButton` (default `RTrigger` — RB is blocked in
+physical combat anyway, so the right trigger is free) fires the weapon's skill. `TwoHandSkill=game` just sends the
+skill button. `TwoHandSkill=effect` (default) gives you **the effect without the animation**, and this is where
+"effect" has a precise meaning: a skill's effect is a handful of TAE events its animation carries —
+`AddSpEffect_WeaponArts` (event 331, `{SpEffect if enough FP, SpEffect if not}`: the weapon buff or the fizzle),
+`AddSpEffect` (67 / 66: self-buffs), `BulletBehavior` (2: projectiles, spawned from the weapon's own dummy-polys,
+which follow your hands), the FFX spawns (96/110/112/120) — ids from DSAnimStudio's `TAE.Template.ER.xml`. ERVR
+replays exactly those, at their recorded times, through the same `CSChrTaeAnimEvent` slots physical melee already
+calls (slot 2 for generic events, slot 3 for behaviors), with a stable args copy per instance and
+`is_first_execution` on the first frame. No animation plays, nothing locks you, no root motion.
+
+* **Where the events come from.** The first time you fire a given weapon + ash, the press goes to the game
+  (`SkillButton`, forced through the block) and both TAE hooks record every event the player runs for
+  `SkillRecordSeconds`: id, a copy of the args, first/last execution time, `*animTime`. That recording is kept for
+  the session (`[combat] skill recorded for weapon W arts A: ...` lists them; `Debug=true` prints each one as it is
+  seen). Every later press replays it. Hold the trigger `TwoHandSkillRelearnHold` s to play it the game's way again
+  and re-record (after swapping the ash, or if a replay misses something). Only ids in `SkillReplayEvents` are
+  replayed — add one from the `skill rec:` lines if a particular skill needs it.
+* **Attack skills** (Stamp, Lion's Claw, Square Off...). The skill's own `AttackBehavior` is *not* replayed at its
+  recorded time — you are not swinging then. It **arms your next swing** for `SkillSwingWindow` seconds with the
+  skill's attack row (`[combat] skill strike: judge ...`), so the strike you make *is* the skill's strike, kinetic
+  scaling and all.
+* **Costs are the game's.** The skill is resolved through the applied gem — `ChrAsm` gaitem handle → `CSGaitem`
+  singleton table → the weapon gaitem's gem slot → the gem item → `EquipParamGem.swordArtsParamId` — else the
+  weapon's own `swordArtsParamId`; `SwordArtsParam` (holder 82) gives the L2 FP / stamina cost (`+0x12` / `+0x09`).
+  `SkillChargeFP` charges them after the first frame's events ran (331 decides "enough FP" itself) and refuses with
+  a long buzz when FP is short; if the row is unreadable the FP the game took during the recording is used.
+* Charged (hold) skills replay their tap version; stance skills' R1/R2 follow-ups are the plain rows.
 
 ## Troubleshooting notes (learned the hard way)
 

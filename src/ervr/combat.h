@@ -29,6 +29,14 @@ void CombatNotifyButton(uint16_t xinputMask, double now);
 uint16_t CombatBlockedButtons();
 // XInput buttons virtual_pad must HOLD: the guard button while the left-hand shield is raised.
 uint16_t CombatHeldButtons();
+// Buttons combat FORCES on the pad this tick - the game's own chords (Y + RB/LB two-hand toggle, the
+// skill button, a learn press) - applied AFTER the attack-button block. Worker thread; drives the
+// chord timing, so call it exactly once per pad update.
+uint16_t CombatForcedButtons(double now);
+// Off-hand ride: while two-handing, the free hand's arm target sits on the weapon hand's hilt axis,
+// `alongToPommel` metres from that controller toward the pommel - down the controller's handle
+// (-Y) when `handleAxis`, else back along its aim axis (+Z). game_er applies it. False otherwise.
+bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool* handleAxis);
 // Weight the hand is carrying (EquipParamWeapon weight; both hands share it when two-handing;
 // 0 = empty/unknown). Drives the inertial arm in game_er.
 float CombatHandWeight(int hand);
@@ -51,6 +59,11 @@ struct CombatStatus {
     float lastQuality = 0.f, lastMult = 0.f;   // last strike's quality and damage multiplier
     bool shield = false, guarding = false;     // shield in the left hand / guard currently raised
     float blockQuality = 0.f;
+    int  armStyle = 0;              // ChrAsm arm style: 0 empty, 1 one-handed, 2 left two-handed, 3 right two-handed
+    bool twoHandWanted = false;     // the grab says two-hand
+    int  fp = -1;
+    const char* skill = "idle";     // skill state: idle | recording | replaying | window
+    int  skillsRecorded = 0;        // ash-of-war recordings held this session
 };
 CombatStatus CombatGetStatus();
 }

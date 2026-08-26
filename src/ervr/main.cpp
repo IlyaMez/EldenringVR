@@ -261,9 +261,10 @@ DWORD WINAPI Worker(LPVOID) {
                 LOGW("[stereo] loop at %.0f Hz -> GAME SPEED %.0f%%. GPU cannot hold 60 pairs/s; "
                      "lower the game resolution or graphics settings", pumpHz, pumpHz / 60.0 * 100.0);
             CombatStatus cs = CombatGetStatus();
-            LOGD("hb: combat: taeHook %d physical %d learned L%d H%d Left%d stamina %d | 5s: swings %ld, injected %ld | kinetic: params %d last q %.2f x%.2f | shield %d guard %d q %.2f",
+            LOGD("hb: combat: taeHook %d physical %d learned L%d H%d Left%d stamina %d | 5s: swings %ld, injected %ld | kinetic: params %d last q %.2f x%.2f | shield %d guard %d q %.2f | 2H: arm style %d grab %d | skill %s (%d recorded) fp %d",
                  cs.taeHooked, cs.physical, cs.learnedLight, cs.learnedHeavy, cs.learnedLeft, cs.stamina, cs.swings, cs.injected,
-                 cs.paramsReady, cs.lastQuality, cs.lastMult, cs.shield, cs.guarding, cs.blockQuality);
+                 cs.paramsReady, cs.lastQuality, cs.lastMult, cs.shield, cs.guarding, cs.blockQuality,
+                 cs.armStyle, cs.twoHandWanted, cs.skill, cs.skillsRecorded, cs.fp);
         }
         double spent = Now() - t;
         DWORD sleepMs = (DWORD)((period - spent) * 1000.0);

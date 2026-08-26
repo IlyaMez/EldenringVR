@@ -21,6 +21,21 @@
 // strikes. Shields: the left hand's pose against the head yields a block quality that holds
 // the guard button and scales the shield's guard cut rates / stability the same way; a hit
 // taken while the shield moves INTO the attack is a deflect (stamina refunded).
+//
+// Two-handing (2026-08-25): the free hand closing on the weapon hand's weapon shaft IS the
+// two-hand command. ERVR does not write ChrAsm.arm_style - it sends the game's own chord
+// (Y + RB for the right weapon, Y + LB for the left; the same chord toggles back) and reads
+// arm_style back as the authority, so HKS, the weapon's two-hand attack rows and the strength
+// bonus all come from the game. The free hand's arm then rides the weapon shaft.
+// Skill (Ash of War) while two-handed: the skill's effect lives in TAE events the skill
+// animation carries - AddSpEffect_WeaponArts (331: {SpEffect if enough FP, SpEffect if not}),
+// AddSpEffect (67/66), BulletBehavior (2), FFX spawns - so "the effect without the animation"
+// is those events replayed through the same CSChrTaeAnimEvent slots physical melee already
+// uses. They are recorded the first time a weapon's skill is played the game's way (forced
+// skill button, the hooks capture every event the player runs for SkillRecordSeconds) and
+// replayed on the trigger from then on; the skill's own AttackBehavior becomes the row the
+// next swing uses. FP/stamina costs come from SwordArtsParam (the applied gem's arts id via
+// CSGaitem, else the weapon's own). Event ids: DSAnimStudio TAE.Template.ER.xml.
 #include "combat.h"
 #include "config.h"
 #include "game_er.h"
@@ -35,6 +50,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -47,10 +63,14 @@ constexpr uint32_t RVA_ChrTaeAnimEventVft = 0x2a34280;   // CS::CSChrTaeAnimEven
 constexpr size_t Chr_Modules       = 0x190;
 constexpr size_t Mod_Data          = 0x00;   // CSChrDataModule
 constexpr size_t Mod_TimeAct       = 0x18;   // CSChrTimeActModule
+constexpr size_t Data_Fp           = 0x148;  // CSChrDataModule: hp 0x138, fp 0x148/max 0x14C, stamina 0x154/max 0x158 (fromsoftware-rs)
+constexpr size_t Data_MaxFp        = 0x14C;
 constexpr size_t Data_Stamina      = 0x154;
 constexpr size_t Data_MaxStamina   = 0x158;
 constexpr size_t TA_ChrTaeAnimEvent = 0x18; // CSChrTimeActModule -> CSChrTaeAnimEvent*
 constexpr uint32_t EV_AttackBehavior = 1;
+constexpr uint32_t EV_BulletBehavior = 2, EV_CommonBehavior = 5;   // the other slot-3 (behavior) events; everything else is slot 2
+constexpr uint32_t EV_AddSpEffectWeaponArts = 331;                 // {SpEffectID_EnoughFP, SpEffectID_NotEnoughFP, 0, 0}: an Ash of War's effect
 
 // PlayerIns -> ChrAsm (fromsoftware-rs PlayerIns @0x638; ChrAsm: arm_style @8, selected slots
 // left/right @0xC/0x10, equipment_param_ids[22] @0x7C in ChrAsmEquipEntries order:
@@ -59,6 +79,7 @@ constexpr size_t Player_ChrAsm   = 0x638;
 constexpr size_t Asm_ArmStyle    = 0x08;   // 0 empty, 1 one-handed, 2 left both hands, 3 right both hands
 constexpr size_t Asm_LeftSlot    = 0x0C;
 constexpr size_t Asm_RightSlot   = 0x10;
+constexpr size_t Asm_GaitemHandles = 0x24; // GaitemHandle[22], same order (bit 23 = indexed, bits 0-15 = CSGaitemImp table index)
 constexpr size_t Asm_ParamIds    = 0x7C;
 // EQUIP_PARAM_WEAPON_ST
 constexpr size_t   Wep_VariationId   = 0x04;   // i32 behaviorVariationId
@@ -66,8 +87,19 @@ constexpr size_t   Wep_Weight        = 0x10;   // f32
 constexpr size_t   Wep_GuardCut      = 0x34;   // f32 x4: phys, mag, fire, thun (% of damage blocked)
 constexpr size_t   Wep_StaminaGuardDef = 0xD8; // i16 stability
 constexpr size_t   Wep_DarkGuardCut  = 0x188;  // f32
+constexpr size_t   Wep_SwordArtsId   = 0x198;  // i32 swordArtsParamId: the weapon's own skill (an applied Ash of War overrides it through the gem)
 constexpr size_t   Wep_Type          = 0x1A6;  // u16 wepType (65 small / 67 medium / 69 great shield)
 constexpr uint32_t Wep_RowSize       = 0x298;
+// EQUIP_PARAM_GEM_ST (the applied Ash of War) and SWORD_ARTS_PARAM_ST (its per-button costs)
+constexpr size_t   Gem_SwordArtsId   = 0x18;   // i32
+constexpr uint32_t Gem_RowSize       = 0x60;
+constexpr size_t   Arts_UsePointL2   = 0x09;   // i8  stamina cost of the skill button (L2)
+constexpr size_t   Arts_UseMpL2      = 0x12;   // i16 FP cost of the skill button
+constexpr uint32_t Arts_RowSize      = 0x20;
+// CSGaitemImp (singleton "CSGaitem"): gaitems[5120] OwnedPtr<CSGaitemIns> @+8; CSGaitemIns item_id @0xC;
+// CSWepGaitemIns: gem slot table @0x18 -> slot 0's gaitem handle @0x28 (fromsoftware-rs gaitem.rs).
+constexpr size_t   Gaitem_Table = 0x08, Gaitem_ItemId = 0x0C, WepGaitem_GemHandle = 0x28;
+constexpr uint32_t Gaitem_Count = 5120;
 // BEHAVIOR_PARAM_ST
 constexpr size_t   Bhv_VariationId = 0x00, Bhv_JudgeId = 0x04, Bhv_RefType = 0x09, Bhv_RefId = 0x0C, Bhv_Stamina = 0x14;
 constexpr uint32_t Bhv_RowSize     = 0x20;
@@ -96,15 +128,18 @@ static_assert(sizeof(AttackBehaviorArgs) == 16, "AttackBehaviorArgs layout");
 
 using FnExecEvent = void (__fastcall*)(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args);
 FnExecEvent g_origExec = nullptr;      // slot 3 (behavior events) trampoline: used for injection
-constexpr int kExecSlot = 3;
+FnExecEvent g_origGeneric = nullptr;   // slot 2 (generic events: SpEffect, FFX, sound...) trampoline: skill replay
+constexpr int kExecSlot = 3, kGenericSlot = 2;
 void** g_taeVft = nullptr;
 
 // ---------------------------------------------------------------- state
-enum Slot { SlotLight = 0, SlotHeavy = 1, SlotLeft = 2 };
+// Two-handed attacks have rows of their own (learned into the 2H slots while the game reports
+// arm style 2/3, or configured); a missing 2H row falls back to the one-handed one.
+enum Slot { SlotLight = 0, SlotHeavy = 1, SlotLeft = 2, SlotLight2H = 3, SlotHeavy2H = 4, SlotCount = 5 };
 struct Template { bool valid = false; AttackBehaviorArgs a{}; };
-std::mutex g_mtx;                 // guards templates + swing commands + block state (worker <-> game thread)
-Template g_tpl[3];
-double g_lastBtn[3] = {-1e9, -1e9, -1e9};
+std::mutex g_mtx;                 // guards templates + swing commands + block state + two-hand state (worker <-> game thread)
+Template g_tpl[SlotCount];
+double g_lastBtn[3] = {-1e9, -1e9, -1e9};   // button presses map to light/heavy/left; the 2H slots learn from those while two-handed
 uint8_t* g_player = nullptr;      // last main player seen by the game thread (for owner match in the hook)
 
 struct SwingCmd {                 // worker -> game thread
@@ -159,7 +194,8 @@ double NowSec() {
     LARGE_INTEGER c; QueryPerformanceCounter(&c); return (double)c.QuadPart / (double)f.QuadPart;
 }
 uint8_t* Deref(const void* addr) { uint8_t* p = nullptr; return SafeRead(addr, &p, sizeof(p)) ? p : nullptr; }
-const char* SlotName(int s) { return s == SlotLight ? "light" : s == SlotHeavy ? "heavy" : "left"; }
+const char* SlotName(int s) { switch (s) { case SlotLight: return "light"; case SlotHeavy: return "heavy"; case SlotLeft: return "left"; case SlotLight2H: return "light-2h"; case SlotHeavy2H: return "heavy-2h"; } return "?"; }
+const wchar_t* SlotIniKey(int s) { switch (s) { case SlotLight: return L"LightJudgeId"; case SlotHeavy: return L"HeavyJudgeId"; case SlotLeft: return L"LeftJudgeId"; case SlotLight2H: return L"TwoHandLightJudgeId"; case SlotHeavy2H: return L"TwoHandHeavyJudgeId"; } return L"?"; }
 const char* HandName(int h) { return h == HandRight ? "right" : "left"; }
 float Lerp(float a, float b, float t) { return a + (b - a) * t; }
 
@@ -176,6 +212,19 @@ bool WriteStamina(uint8_t* player, int value) {
     if (value < 0) value = 0;
     return SafeWrite(data + Data_Stamina, &value, 4);
 }
+int ReadFp(uint8_t* player, int* maxOut = nullptr) {
+    uint8_t* mods = Deref(player + Chr_Modules); if (!mods) return -1;
+    uint8_t* data = Deref(mods + Mod_Data); if (!data) return -1;
+    int f = -1, m = -1; SafeRead(data + Data_Fp, &f, 4); SafeRead(data + Data_MaxFp, &m, 4);
+    if (maxOut) *maxOut = m;
+    return f;
+}
+bool WriteFp(uint8_t* player, int value) {
+    uint8_t* mods = Deref(player + Chr_Modules); uint8_t* data = mods ? Deref(mods + Mod_Data) : nullptr;
+    if (!data) return false;
+    if (value < 0) value = 0;
+    return SafeWrite(data + Data_Fp, &value, 4);
+}
 CSChrTaeAnimEvent* PlayerTaeEvent(uint8_t* player) {
     uint8_t* mods = Deref(player + Chr_Modules); if (!mods) return nullptr;
     uint8_t* ta = Deref(mods + Mod_TimeAct); if (!ta) return nullptr;
@@ -190,9 +239,9 @@ CSChrTaeAnimEvent* PlayerTaeEvent(uint8_t* player) {
 // weapon swaps / left-hand actions and then resolves the wrong weapon's BehaviorParam row.
 void ApplyConfigTemplates() {
     const Config& c = Cfg();
-    static int lastCfg[3] = {-2, -2, -2};   // ini hot-reload with new ids overrides learned templates
-    int cur[3] = {c.lightJudgeId, c.heavyJudgeId, c.leftJudgeId};
-    for (int i = 0; i < 3; ++i) if (cur[i] != lastCfg[i]) { if (lastCfg[i] != -2) g_tpl[i].valid = false; lastCfg[i] = cur[i]; }
+    static int lastCfg[SlotCount] = {-2, -2, -2, -2, -2};   // ini hot-reload with new ids overrides learned templates
+    int cur[SlotCount] = {c.lightJudgeId, c.heavyJudgeId, c.leftJudgeId, c.twoHandLightJudgeId, c.twoHandHeavyJudgeId};
+    for (int i = 0; i < SlotCount; ++i) if (cur[i] != lastCfg[i]) { if (lastCfg[i] != -2) g_tpl[i].valid = false; lastCfg[i] = cur[i]; }
     auto set = [&](int slot, int judge, uint8_t source) {
         if (judge < 0 || g_tpl[slot].valid) return;
         Template t; t.valid = true; t.a = {0, 0, judge, (uint8_t)0xFF, source, 0};
@@ -200,11 +249,12 @@ void ApplyConfigTemplates() {
         LOGI("[combat] %s attack from config: judgeId %d source %u", SlotName(slot), judge, source);
     };
     set(SlotLight, c.lightJudgeId, 1); set(SlotHeavy, c.heavyJudgeId, 1); set(SlotLeft, c.leftJudgeId, 2);
+    set(SlotLight2H, c.twoHandLightJudgeId, 1); set(SlotHeavy2H, c.twoHandHeavyJudgeId, 1);
 }
 void SaveLearned(int slot, int judgeId) {
     const Config& c = Cfg();
     if (!c.combatSaveLearned || c.iniPath.empty()) return;
-    const wchar_t* key = slot == SlotLight ? L"LightJudgeId" : slot == SlotHeavy ? L"HeavyJudgeId" : L"LeftJudgeId";
+    const wchar_t* key = SlotIniKey(slot);
     wchar_t v[16]; swprintf_s(v, L"%d", judgeId);
     if (WritePrivateProfileStringW(L"Combat", key, v, c.iniPath.c_str())) LOGI("[combat] saved [Combat] %S=%d to ERVR.ini", key, judgeId);
 }
@@ -216,10 +266,126 @@ bool PhysicalActiveLocked() {
     return g_tpl[SlotLight].valid;   // auto
 }
 
-// ---------------------------------------------------------------- TAE hook (game thread)
+// ---------------------------------------------------------------- two-handing + skill state
+// The worker owns the grab detection and the skill trigger; the game thread reads
+// ChrAsm.arm_style (the authority) and asks for the game's own chord when the two disagree. The
+// chord itself is played on the worker (CombatForcedButtons), where the pad is built.
+struct TwoHandState {
+    bool want = false;               // the grab says: two-hand
+    int  weaponHand = HandRight;     // whose weapon is held...
+    int  pinHand = HandLeft;         // ...by which free hand
+    float along = 0.f;               // m along the weapon axis (from the weapon hand's controller) where it was grabbed
+    bool inZone = false;             // the free hand is on the shaft right now (its grip is the grab, not the skill button)
+    bool owned = false;              // ERVR put the game into two-hand; only then does it take it back out
+    double zoneSince = 0, outSince = 0;
+} g_two;                             // under g_mtx
+int g_armStyle = 0;                        // game thread: ChrAsm.arm_style as last read (0 empty, 1 one-handed, 2 left both, 3 right both)
+std::atomic<int> g_armStyleShared{0};      // game thread -> worker: the same
+std::atomic<int> g_wepPresent[2]{0, 0};    // game thread -> worker: a (non-shield) weapon sits in that hand
+// Chord requests, game thread -> worker: 1 = two-hand toggle of the right weapon (modifier + light),
+// 2 = of the left weapon (modifier + guard), 3 = the skill button, 4/5 = a learn press (light/heavy)
+// so the game teaches its two-handed attack rows.
+std::atomic<int> g_chordReq{0};
+struct ChordRun { int phase = 0; double t = 0; uint16_t lead = 0, key = 0; int kind = 0; } g_chord;   // worker only
+
+// Skill (Ash of War): trigger on the worker, recording and replay on the game thread.
+std::atomic<int> g_skillReq{0};            // worker -> game thread: 1 = effect (replay; record if unknown), 2 = the game's way (+ record)
+struct RecEvent {
+    uint32_t id = 0, animId = 0;
+    uint8_t args[64]{}; size_t argLen = 0; // the game's TAE args, copied (plain values per the TAE templates)
+    float from = 0, to = 0;
+    float firstT = 0, lastT = 0;           // s after the press: first / last frame this instance executed
+    float animTime0 = 0;                   // *animTime at its first execution
+    int count = 0;
+    const void* inst = nullptr;            // the game's args pointer = the instance's identity while recording
+};
+struct SkillRecording {
+    bool valid = false;
+    int weaponId = 0, arts = -1;           // key: the weapon (affinity + level) and the SwordArtsParam it carried
+    std::vector<RecEvent> ev;
+    int fpObserved = 0;                    // FP the game took while recording (cost fallback)
+    bool hasAttack = false; AttackBehaviorArgs attack{};   // the skill's first AttackBehavior: the next swing's row
+    float length = 0.f;
+};
+std::vector<SkillRecording> g_skillLib;    // game thread only
+struct SkillRec { bool active = false; double start = 0; int fpStart = 0, fpMin = 0; SkillRecording rec; } g_rec;
+struct SkillPlay {
+    bool active = false; double start = 0; int libIndex = -1;
+    struct St { bool started = false, done = false; CSTaeAnimEventArgs args{}; float time = 0.f; uint8_t argBuf[64]{}; };
+    std::vector<St> st;                    // sized once at start: the game keys instances on the args pointer
+    bool costCharged = false; int fpCost = 0, stamCost = 0;
+} g_play;
+struct SkillSwing { bool armed = false; double until = 0; AttackBehaviorArgs a{}; } g_skillSwing;   // game thread
+struct SkillInfo { int weaponId = 0; int arts = -1, gem = -1; int fpCost = 0, stamCost = 0; bool logged = false; } g_skillInfo[2];   // per hand, game thread
+
+uint32_t ParseVRButton(const std::string& n) {
+    if (n == "RTrigger") return VRB_RTrigger; if (n == "LTrigger") return VRB_LTrigger;
+    if (n == "RGrip") return VRB_RGrip;       if (n == "LGrip") return VRB_LGrip;
+    if (n == "A") return VRB_A; if (n == "B") return VRB_B; if (n == "X") return VRB_X; if (n == "Y") return VRB_Y;
+    if (n == "RThumb") return VRB_RThumb;     if (n == "LThumb") return VRB_LThumb;
+    return 0;
+}
+// The XInput button a VR control is mapped to in [Buttons] (what a two-handed skill trigger must not also send).
+uint16_t MappedButtonOf(const std::string& n, const Config& c) {
+    if (n == "RTrigger") return ParseXInputButton(c.btnRTrigger); if (n == "LTrigger") return ParseXInputButton(c.btnLTrigger);
+    if (n == "RGrip") return ParseXInputButton(c.btnRGrip);       if (n == "LGrip") return ParseXInputButton(c.btnLGrip);
+    if (n == "A") return ParseXInputButton(c.btnA); if (n == "B") return ParseXInputButton(c.btnB);
+    if (n == "X") return ParseXInputButton(c.btnX); if (n == "Y") return ParseXInputButton(c.btnY);
+    if (n == "RThumb") return ParseXInputButton(c.btnRThumb);     if (n == "LThumb") return ParseXInputButton(c.btnLThumb);
+    return 0;
+}
+bool ReplayAllowed(uint32_t id) {   // game thread
+    static std::string s_src; static std::vector<uint32_t> s_ids;
+    const std::string& s = Cfg().skillReplayEvents;
+    if (s != s_src) {
+        s_src = s; s_ids.clear(); size_t p = 0;
+        while (p < s.size()) { size_t q = s.find(',', p); if (q == std::string::npos) q = s.size(); if (q > p) s_ids.push_back((uint32_t)atoi(s.substr(p, q - p).c_str())); p = q + 1; }
+    }
+    for (uint32_t x : s_ids) if (x == id) return true;
+    return false;
+}
+bool TwoHandedStyle(int style) { return style == 2 || style == 3; }
+int  TwoHandedWeaponHand(int style) { return style == 2 ? HandLeft : HandRight; }
+
+// Skill recording (game thread, from both TAE hooks): every event the game runs on the player
+// while the window is open is kept - id, a copy of its args, when it started, how long it kept
+// executing - keyed by the game's own args pointer, which identifies the instance across frames.
+void RecordEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args, uint32_t id) {
+    SkillRec& r = g_rec;
+    const float t = (float)(NowSec() - r.start);
+    void* a = nullptr; float from = 0, to = 0; const float* at = nullptr; uint32_t animId = 0;
+    SafeRead(&args->args, &a, sizeof(a)); SafeRead(&args->from, &from, 4); SafeRead(&args->to, &to, 4);
+    SafeRead(&args->animTime, &at, sizeof(at)); SafeRead(&self->animId, &animId, 4);
+    for (RecEvent& e : r.rec.ev) if (e.inst == a && e.id == id) { e.lastT = t; ++e.count; return; }
+    if (r.rec.ev.size() >= 64) return;
+    RecEvent e; e.id = id; e.animId = animId; e.inst = a; e.from = from; e.to = to; e.firstT = e.lastT = t; e.count = 1;
+    if (at) SafeRead(at, &e.animTime0, 4);
+    if (a) { for (size_t n = sizeof(e.args); n >= 8; n /= 2) if (SafeRead(a, e.args, n)) { e.argLen = n; break; } }
+    if (id == EV_AttackBehavior && !r.rec.hasAttack && e.argLen >= sizeof(AttackBehaviorArgs)) { memcpy(&r.rec.attack, e.args, sizeof(AttackBehaviorArgs)); r.rec.hasAttack = true; }
+    r.rec.ev.push_back(e);
+    if (Cfg().combatDebug) {
+        int32_t w[4] = {0, 0, 0, 0}; memcpy(w, e.args, e.argLen < 16 ? e.argLen : 16);
+        LOGD("[combat] skill rec: t %.2f event %u anim %u args %d %d %d %d (%zu B) %.2f..%.2f", t, id, animId, w[0], w[1], w[2], w[3], e.argLen, from, to);
+    }
+}
+
+// ---------------------------------------------------------------- TAE hooks (game thread)
+// Slot 2: the generic events (SpEffect, FFX, sound, ...). Only watched while a skill is being recorded.
+void __fastcall Hook_GenericEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args) {
+    if (!g_tripped && g_rec.active) {
+        uint32_t id = 0; uint8_t* owner = nullptr;
+        if (SafeRead(&args->eventId, &id, 4) && id != EV_AttackBehavior && id != EV_BulletBehavior && id != EV_CommonBehavior   // those pass through slot 3 too
+            && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player) RecordEvent(self, args, id);
+    }
+    g_origGeneric(self, args);
+}
+// Slot 3: the behavior events (attack / bullet / common).
 void __fastcall Hook_ExecEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args) {
     uint32_t id = 0; uint8_t* owner = nullptr; void* a = nullptr; uint8_t first = 0;
     bool isPlayer = false;
+    // Recording: this slot sees every event too, but only dispatches the behavior ones (slot 2 records the rest).
+    if (!g_tripped && g_rec.active && SafeRead(&args->eventId, &id, 4) && (id == EV_AttackBehavior || id == EV_BulletBehavior || id == EV_CommonBehavior)
+        && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player) RecordEvent(self, args, id);
     if (!g_tripped && SafeRead(&args->eventId, &id, 4) && id == EV_AttackBehavior && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player) {
         isPlayer = true;
         SafeRead(&args->args, &a, sizeof(a)); SafeRead(&args->isFirstExecution, &first, 1);
@@ -239,16 +405,18 @@ void __fastcall Hook_ExecEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args
                     int best = -1; double bt = -1e9;
                     for (int s = 0; s < 3; ++s) if (now - g_lastBtn[s] < 1.0 && g_lastBtn[s] > bt) { bt = g_lastBtn[s]; best = s; }
                     if (best >= 0) {
+                        // While the game reports a two-handed arm style the press taught the 2H row.
+                        int slot = best;
+                        if (TwoHandedStyle(g_armStyle) && best != SlotLeft) slot = best == SlotLight ? SlotLight2H : SlotHeavy2H;
                         AttackBehaviorArgs t = ab; t.source = best == SlotLeft ? 2 : 1; t.attackIndex = 0;
-                        bool changed = !g_tpl[best].valid || memcmp(&g_tpl[best].a, &t, sizeof(t)) != 0;
-                        g_tpl[best].valid = true; g_tpl[best].a = t; g_lastBtn[best] = -1e9;
-                        if (changed) { learnedSlot = best; learnedJudge = ab.judgeId; }
+                        bool changed = !g_tpl[slot].valid || memcmp(&g_tpl[slot].a, &t, sizeof(t)) != 0;
+                        g_tpl[slot].valid = true; g_tpl[slot].a = t; g_lastBtn[best] = -1e9;
+                        if (changed) { learnedSlot = slot; learnedJudge = ab.judgeId; }
                     }
                 }
                 if (learnedSlot >= 0) {
-                    LOGI("[combat] learned %s attack: judgeId %d (type %d dir %u state %d, anim %u) -> [Combat] %sJudgeId=%d",
-                         SlotName(learnedSlot), learnedJudge, ab.attackType, ab.dirType, ab.stateInfo, self->animId,
-                         learnedSlot == SlotLight ? "Light" : learnedSlot == SlotHeavy ? "Heavy" : "Left", learnedJudge);
+                    LOGI("[combat] learned %s attack: judgeId %d (type %d dir %u state %d, anim %u) -> [Combat] %S=%d",
+                         SlotName(learnedSlot), learnedJudge, ab.attackType, ab.dirType, ab.stateInfo, self->animId, SlotIniKey(learnedSlot), learnedJudge);
                     SaveLearned(learnedSlot, learnedJudge);
                 }
             }
@@ -271,7 +439,6 @@ struct HandWeapon {
     uint8_t* row = nullptr;   // EQUIP_PARAM_WEAPON_ST base row
     bool isShield = false;
 };
-int g_armStyle = 0;
 HandWeapon g_wep[2];
 std::atomic<float> g_wepWeight[2]{0.f, 0.f};   // game thread -> worker: equipped weight per hand (inertia)
 bool g_layoutBad = false;      // a param row size disagreed with the layout we compiled against: never write
@@ -525,6 +692,206 @@ void EndFrameStamina(uint8_t* player, int maxStam) {
     g_prevStam = ReadStamina(player);
 }
 
+// ---------------------------------------------------------------- two-handing (game thread)
+// ChrAsm.arm_style is the authority. When the grab disagrees with it the game's own chord is
+// requested (modifier + light for the right weapon, modifier + guard for the left; the same
+// chord toggles back), at most 3 tries per wish; a wish the game keeps refusing (nothing in
+// that hand, a two-hand-only weapon) is logged once and left alone until the wish changes.
+void UpdateTwoHand(double now) {
+    bool want, owned; int wh;
+    { std::lock_guard<std::mutex> g(g_mtx); want = g_two.want; owned = g_two.owned; wh = g_two.weaponHand; }
+    g_armStyleShared.store(g_armStyle);
+    for (int h = 0; h < 2; ++h) g_wepPresent[h].store(g_wep[h].valid && g_wep[h].row && !g_wep[h].isShield ? 1 : 0);
+    static int s_lastStyle = -1, s_desired = -1, s_attempts = 0, s_chordStyle = 0; static double s_lastReq = 0; static bool s_gaveUp = false;
+    if (g_armStyle != s_lastStyle) {
+        if (s_lastStyle >= 0) {
+            LOGI("[combat] arm style %d -> %d (%s)", s_lastStyle, g_armStyle, g_armStyle == 3 ? "right weapon two-handed" : g_armStyle == 2 ? "left weapon two-handed" : g_armStyle == 1 ? "one-handed" : "empty-handed");
+            // Felt, not just logged: both hands tick when the grip closes on the weapon, once when it opens.
+            g_haptic.fetch_or(TwoHandedStyle(g_armStyle) ? 256u : 512u);
+            // Ours if it followed our chord: then letting go takes it back out, even if the grab had
+            // already been released before the game got round to switching (2026-08-25 17:51 log).
+            if (g_armStyle == s_chordStyle && now - s_lastReq < 2.0) { std::lock_guard<std::mutex> g(g_mtx); g_two.owned = TwoHandedStyle(g_armStyle); owned = g_two.owned; }
+        }
+        s_lastStyle = g_armStyle;
+    }
+    if (g_armStyle == 0 || Cfg().twoHandMode != "grab") return;
+    const int desired = want ? (wh == HandRight ? 3 : 2) : (owned ? 1 : g_armStyle);
+    if (desired != s_desired) { s_desired = desired; s_attempts = 0; s_gaveUp = false; }
+    if (g_armStyle == desired) {
+        if (want && !owned) { std::lock_guard<std::mutex> g(g_mtx); if (g_two.want) g_two.owned = true; }
+        if (!want && owned) { std::lock_guard<std::mutex> g(g_mtx); g_two.owned = false; }
+        return;
+    }
+    if (s_attempts >= 3) {
+        if (!s_gaveUp) { s_gaveUp = true; LOGW("[combat] two-hand: the game stayed at arm style %d after 3 chords (wanted %d): nothing to two-hand in that hand, or the chord is not %s + %s/%s", g_armStyle, desired, Cfg().twoHandModifierButton.c_str(), Cfg().lightAttackButton.c_str(), Cfg().guardButton.c_str()); }
+        return;
+    }
+    if (now - s_lastReq < 0.9 || g_chordReq.load() != 0) return;
+    const int req = (desired == 2 || (desired == 1 && g_armStyle == 2)) ? 2 : 1;   // only the two-handed hand's chord toggles it
+    g_chordReq.store(req); s_lastReq = now; ++s_attempts; s_chordStyle = desired;
+    LOGI("[combat] two-hand: %s -> chord %s + %s (arm style %d -> %d, try %d)", want ? "grabbed" : "let go", Cfg().twoHandModifierButton.c_str(), req == 1 ? Cfg().lightAttackButton.c_str() : Cfg().guardButton.c_str(), g_armStyle, desired, s_attempts);
+}
+
+// ---------------------------------------------------------------- skill / Ash of War (game thread)
+uint8_t* GaitemByHandle(uint8_t* imp, uint32_t handle) {
+    if (!imp || !(handle & (1u << 23))) return nullptr;
+    const uint32_t index = handle & 0xFFFF; if (index >= Gaitem_Count) return nullptr;
+    return Deref(imp + Gaitem_Table + (size_t)index * 8);
+}
+// The skill on a hand's weapon: the applied Ash of War (the weapon's gaitem -> gem slot -> gem
+// item -> EquipParamGem.swordArtsParamId) else the weapon's own swordArtsParamId; SwordArtsParam
+// then gives the skill button's FP / stamina cost. Re-resolved when the weapon changes.
+void ResolveSkill(uint8_t* player, int h) {
+    SkillInfo& si = g_skillInfo[h]; const HandWeapon& w = g_wep[h];
+    if (!w.valid || !w.row) { si = SkillInfo{}; return; }
+    if (si.weaponId == w.paramId && si.logged) return;
+    si = SkillInfo{}; si.weaponId = w.paramId;
+    static uint8_t* s_slot = nullptr; static bool s_tried = false;
+    if (!s_tried) { s_tried = true; s_slot = FindSingletonSlot("CSGaitem"); }
+    uint8_t* asmp = Deref(player + Player_ChrAsm);
+    uint8_t* imp = s_slot ? Deref(s_slot) : nullptr;
+    if (asmp && imp) {
+        uint32_t slot = 0; SafeRead(asmp + (h == HandLeft ? Asm_LeftSlot : Asm_RightSlot), &slot, 4); if (slot > 2) slot = 0;
+        uint32_t hdl = 0; SafeRead(asmp + Asm_GaitemHandles + (slot * 2 + (h == HandRight ? 1 : 0)) * 4, &hdl, 4);
+        uint8_t* wg = GaitemByHandle(imp, hdl); uint32_t item = 0;
+        if (wg && SafeRead(wg + Gaitem_ItemId, &item, 4) && (int)(item & 0x0FFFFFFF) == w.paramId) {   // layout check: the entry names our weapon
+            uint32_t gh = 0; SafeRead(wg + WepGaitem_GemHandle, &gh, 4);
+            uint8_t* gg = GaitemByHandle(imp, gh); uint32_t gid = 0;
+            if (gg && SafeRead(gg + Gaitem_ItemId, &gid, 4) && gid != 0xFFFFFFFF) {
+                si.gem = (int)(gid & 0x0FFFFFFF);
+                uint32_t sz = 0; uint8_t* row = ParamsRow(PI_EquipParamGem, (uint32_t)si.gem, &sz);
+                if (row && (sz == 0 || sz == Gem_RowSize)) SafeRead(row + Gem_SwordArtsId, &si.arts, 4);
+                else if (row) LOGW("[combat] EQUIP_PARAM_GEM_ST row size 0x%X != 0x%X: gem ignored", sz, Gem_RowSize);
+            }
+        } else if (wg) { static bool s_warned = false; if (!s_warned) { s_warned = true; LOGW("[combat] CSGaitem entry item 0x%08X != equipped weapon %d: applied Ash of War not readable (layout?)", item, w.paramId); } }
+    }
+    if (si.arts < 0) SafeRead(w.row + Wep_SwordArtsId, &si.arts, 4);
+    if (si.arts >= 0) {
+        uint32_t sz = 0; uint8_t* row = ParamsRow(PI_SwordArtsParam, (uint32_t)si.arts, &sz);
+        if (row && (sz == 0 || sz == Arts_RowSize)) { int16_t mp = 0; int8_t sp = 0; SafeRead(row + Arts_UseMpL2, &mp, 2); SafeRead(row + Arts_UsePointL2, &sp, 1); si.fpCost = mp; si.stamCost = sp; }
+        else if (row) LOGW("[combat] SWORD_ARTS_PARAM_ST row size 0x%X != 0x%X: skill costs unknown", sz, Arts_RowSize);
+    }
+    si.logged = true;
+    LOGI("[combat] %s hand skill: SwordArtsParam %d%s (FP %d, stamina %d)", HandName(h), si.arts, si.gem >= 0 ? " from the applied Ash of War" : " (the weapon's own)", si.fpCost, si.stamCost);
+}
+
+int FindRecording(int weaponId, int arts) {
+    for (size_t i = 0; i < g_skillLib.size(); ++i) if (g_skillLib[i].valid && g_skillLib[i].weaponId == weaponId && g_skillLib[i].arts == arts) return (int)i;
+    return -1;
+}
+void FinishRecording() {
+    SkillRec& r = g_rec; r.active = false;
+    SkillRecording rec = r.rec;
+    rec.valid = !rec.ev.empty(); rec.fpObserved = r.fpStart - r.fpMin;
+    // Times relative to the FIRST event, not the press: the chord latency and the animation's
+    // startup are not part of the effect - a tap replays it at once.
+    float t0 = 1e9f; for (const RecEvent& e : rec.ev) if (e.firstT < t0) t0 = e.firstT;
+    for (RecEvent& e : rec.ev) { e.firstT -= t0; e.lastT -= t0; if (e.lastT > rec.length) rec.length = e.lastT; }
+    if (!rec.valid) { LOGW("[combat] skill: nothing recorded for weapon %d (arts %d) - did the game play the skill? (%s must be the skill button)", rec.weaponId, rec.arts, Cfg().skillButton.c_str()); return; }
+    char sum[400]; size_t n = 0; sum[0] = 0;
+    for (size_t i = 0; i < rec.ev.size() && n < sizeof(sum) - 48; ++i) {
+        const RecEvent& e = rec.ev[i]; int32_t a0 = 0, a1 = 0; memcpy(&a0, e.args, 4); memcpy(&a1, e.args + 4, 4);
+        n += (size_t)snprintf(sum + n, sizeof(sum) - n, "%s%u@%.2f", i ? ", " : "", e.id, e.firstT);
+        if (e.id == EV_AddSpEffectWeaponArts || e.id == 67 || e.id == 66) n += (size_t)snprintf(sum + n, sizeof(sum) - n, "(spEffect %d/%d)", a0, a1);
+        else if (e.id == EV_AttackBehavior) { int32_t j = 0; memcpy(&j, e.args + 8, 4); n += (size_t)snprintf(sum + n, sizeof(sum) - n, "(judge %d)", j); }
+        else if (e.id == EV_BulletBehavior) { int32_t j = 0; memcpy(&j, e.args + 8, 4); n += (size_t)snprintf(sum + n, sizeof(sum) - n, "(dmy %d judge %d)", a0, j); }
+    }
+    const int at = FindRecording(rec.weaponId, rec.arts);
+    if (at >= 0) g_skillLib[at] = rec; else g_skillLib.push_back(rec);
+    LOGI("[combat] skill recorded for weapon %d arts %d: %zu event instances over %.2f s, FP -%d%s: %s", rec.weaponId, rec.arts, rec.ev.size(), rec.length, rec.fpObserved, rec.hasAttack ? ", has an attack" : "", sum);
+    int unlisted = 0; for (const RecEvent& e : rec.ev) if (e.id != EV_AttackBehavior && !ReplayAllowed(e.id)) ++unlisted;
+    if (unlisted) LOGI("[combat] skill: %d of those event ids are not in SkillReplayEvents and will not be replayed", unlisted);
+}
+// Replay = the effect without the animation. Each recorded instance runs at its recorded time
+// with is_first_execution on its first frame, then every frame until its recorded end, through
+// the slot its id belongs to. The skill's AttackBehavior is not replayed: it arms the next swing.
+// Returns false when nothing is recorded for this weapon/arts (the caller then plays it the
+// game's way and records); true when handled, including a refusal for lack of FP.
+bool StartReplay(uint8_t* player, int h, double now) {
+    const SkillInfo& si = g_skillInfo[h];
+    const int idx = FindRecording(si.weaponId, si.arts);
+    if (idx < 0) return false;
+    const Config& c = Cfg();
+    const SkillRecording& rec = g_skillLib[idx];
+    int maxFp = 0; const int fp = ReadFp(player, &maxFp);
+    const int cost = si.fpCost > 0 ? si.fpCost : rec.fpObserved;
+    if (c.skillChargeFp && cost > 0 && maxFp > 0 && fp >= 0 && fp < cost) { g_haptic.fetch_or(4u << h); LOGI("[combat] skill: not enough FP (%d < %d)", fp, cost); return true; }
+    g_play = SkillPlay{}; g_play.active = true; g_play.start = now; g_play.libIndex = idx; g_play.st.resize(rec.ev.size());
+    g_play.fpCost = c.skillChargeFp ? cost : 0; g_play.stamCost = si.stamCost;
+    if (rec.hasAttack && c.skillSwingWindow > 0.f) { g_skillSwing.armed = true; g_skillSwing.until = now + c.skillSwingWindow; g_skillSwing.a = rec.attack; }
+    LOGI("[combat] skill: replaying %zu events for weapon %d arts %d (FP -%d)%s", rec.ev.size(), rec.weaponId, rec.arts, g_play.fpCost, rec.hasAttack ? " - the next swing is the skill's attack" : "");
+    return true;
+}
+void RunReplay(uint8_t* player, CSChrTaeAnimEvent* ev, double now) {
+    SkillPlay& p = g_play; if (!p.active) return;
+    if (p.libIndex < 0 || p.libIndex >= (int)g_skillLib.size() || p.st.size() != g_skillLib[p.libIndex].ev.size()) { p.active = false; return; }
+    const SkillRecording& rec = g_skillLib[p.libIndex];
+    const float t = (float)(now - p.start);
+    bool pending = false;
+    for (size_t i = 0; i < rec.ev.size(); ++i) {
+        const RecEvent& e = rec.ev[i]; SkillPlay::St& s = p.st[i];
+        if (s.done) continue;
+        if (e.id == EV_AttackBehavior || !ReplayAllowed(e.id) || e.argLen == 0) { s.done = true; continue; }
+        const bool behavior = e.id == EV_BulletBehavior || e.id == EV_CommonBehavior;
+        if (!behavior && !g_origGeneric) { s.done = true; continue; }
+        if (!s.started) {
+            if (t < e.firstT) { pending = true; continue; }
+            s.started = true;
+            memcpy(s.argBuf, e.args, sizeof(s.argBuf));
+            memset(&s.args, 0, sizeof(s.args));
+            s.args.eventId = e.id; s.args.args = s.argBuf; s.args.from = e.from; s.args.to = e.to; s.args.taeVersion = 0x1a; s.args.animTime = &s.time;
+            s.time = e.animTime0; s.args.isFirstExecution = 1;
+        } else {
+            if (t > e.lastT + 0.001f) { s.done = true; continue; }
+            s.time = e.animTime0 + (t - e.firstT); s.args.isFirstExecution = 0;
+        }
+        pending = true;
+        if (behavior) g_origExec(ev, &s.args); else g_origGeneric(ev, &s.args);
+        InterlockedIncrement(&g_injected);
+    }
+    // Costs go on after the first frame's events ran (331 decides "enough FP" on its own).
+    if (!p.costCharged) {
+        p.costCharged = true;
+        if (p.fpCost > 0) { const int fp = ReadFp(player); if (fp >= 0) WriteFp(player, fp - p.fpCost); }
+        if (p.stamCost > 0 && Cfg().kineticStaminaMode != "off") { const int s = ReadStamina(player); if (s >= 0) WriteStamina(player, s - p.stamCost); }
+    }
+    if (!pending) { p.active = false; if (Cfg().combatDebug) LOGD("[combat] skill: replay done after %.2f s", t); }
+}
+// One frame of the skill system: recording window, trigger requests, replay.
+void SkillFrame(uint8_t* player, CSChrTaeAnimEvent* ev, double now) {
+    const Config& c = Cfg();
+    const bool two = TwoHandedStyle(g_armStyle);
+    const int wh = TwoHandedWeaponHand(g_armStyle);
+    ResolveSkill(player, wh);
+    if (g_rec.active) {
+        const int fp = ReadFp(player); if (fp >= 0 && fp < g_rec.fpMin) g_rec.fpMin = fp;
+        if (now - g_rec.start >= (c.skillRecordSeconds > 0.5f ? c.skillRecordSeconds : 0.5f)) FinishRecording();
+    }
+    const int req = g_skillReq.exchange(0);
+    if (req && two && c.twoHandSkill != "off") {
+        const SkillInfo& si = g_skillInfo[wh];
+        if (g_rec.active || g_play.active) { if (c.combatDebug) LOGD("[combat] skill: busy (%s)", g_rec.active ? "recording" : "replaying"); }
+        else if (!si.logged) LOGW("[combat] skill: no weapon resolved in the %s hand", HandName(wh));
+        else {
+            bool gameWay = req == 2 || c.twoHandSkill == "game";
+            if (!gameWay && !StartReplay(player, wh, now)) { gameWay = true; LOGI("[combat] skill: nothing recorded yet for weapon %d arts %d: the game plays it this once and ERVR records it", si.weaponId, si.arts); }
+            if (gameWay) {
+                if (g_chordReq.load() != 0) LOGW("[combat] skill: chord busy, press dropped");
+                else {
+                    g_chordReq.store(3);
+                    const bool record = c.twoHandSkill != "game";
+                    if (record) { g_rec = SkillRec{}; g_rec.active = true; g_rec.start = now; g_rec.rec.weaponId = si.weaponId; g_rec.rec.arts = si.arts; const int fp = ReadFp(player); g_rec.fpStart = g_rec.fpMin = fp < 0 ? 0 : fp; }
+                    LOGI("[combat] skill: pressing %s (the game plays it)%s", c.skillButton.c_str(), record ? ", recording its events" : "");
+                }
+            }
+        }
+    }
+    RunReplay(player, ev, now);
+    if (g_skillSwing.armed && now > g_skillSwing.until) { g_skillSwing.armed = false; if (c.combatDebug) LOGD("[combat] skill: swing window expired unused"); }
+    g_status.skill = g_rec.active ? "recording" : g_play.active ? "replaying" : g_skillSwing.armed ? "window" : "idle";
+    g_status.skillsRecorded = (int)g_skillLib.size();
+}
+
 void GameFrameBody(uint8_t* player) {
     g_player = player;
     const Config& c = Cfg();
@@ -557,6 +924,9 @@ void GameFrameBody(uint8_t* player) {
     // instance pauses for KineticHitPause (the blade passes through this enemy; a second enemy
     // later in the arc can still be hit) or, at 0, the strike ends.
     const double nowS = NowSec();
+    UpdateTwoHand(nowS);
+    SkillFrame(player, ev, nowS);
+    g_status.fp = ReadFp(player);
     // Stamina modes: "off" takes the bar out of the loop entirely (no gate, no drain, no fatigue,
     // the attack's behavior cost forced to 1 and that 1 given back), "game" leaves the game's
     // charges alone, "full" adds ERVR's drain + fatigue on top.
@@ -594,7 +964,17 @@ void GameFrameBody(uint8_t* player) {
         if (!c.kineticContinuous && !k.first && nowS < s_hitPauseUntil[h]) { anyStrike = true; continue; }   // paused: instance kept, no sweep
         if (h == HandLeft && leftShield) { RestoreAtk(h); continue; }   // the shield blocks, it does not strike
         Template t;
-        { std::lock_guard<std::mutex> g(g_mtx); t = g_tpl[k.slot]; if (!t.valid && k.slot == SlotHeavy) t = g_tpl[SlotLight]; if (!t.valid && k.slot == SlotLeft) { t = g_tpl[SlotLight]; t.a.source = 2; } }
+        {
+            std::lock_guard<std::mutex> g(g_mtx);
+            int slot = k.slot;
+            if (TwoHandedStyle(g_armStyle) && (slot == SlotLight || slot == SlotHeavy)) { const int s2 = slot == SlotLight ? SlotLight2H : SlotHeavy2H; if (g_tpl[s2].valid) slot = s2; }
+            t = g_tpl[slot];
+            if (!t.valid && (slot == SlotHeavy || slot == SlotHeavy2H)) t = g_tpl[SlotLight];
+            if (!t.valid && slot == SlotLeft) { t = g_tpl[SlotLight]; t.a.source = 2; }
+        }
+        // Skill window: the two-handed weapon's next swing is the skill's own attack row.
+        bool skillStrike = false;
+        if (g_skillSwing.armed && TwoHandedStyle(g_armStyle) && h == TwoHandedWeaponHand(g_armStyle)) { t.valid = true; t.a = g_skillSwing.a; t.a.attackIndex = 0; skillStrike = true; }
         if (!t.valid) continue;
         if (k.first) {
             // maxStam > 0 means the read is real: ER lets stamina go NEGATIVE after a hit is charged
@@ -609,6 +989,7 @@ void GameFrameBody(uint8_t* player) {
             }
             { std::lock_guard<std::mutex> g(g_mtx); if (g_cmd[h].id == k.id) g_cmd[h].first = false; }
             InterlockedIncrement(&g_swings);
+            if (skillStrike) { g_skillSwing.armed = false; LOGI("[combat] skill strike: judge %d type %d (the skill's own attack row)", t.a.judgeId, t.a.attackType); }
         }
         anyStrike = true;
         // Stable per-hand storage: the game keys the attack instance on the args pointer across frames.
@@ -730,6 +1111,100 @@ void UpdateSwing(int h, float quality, float arc, float tip, float tipLive) {
 }
 void EndSwing(int h) { std::lock_guard<std::mutex> g(g_mtx); g_cmd[h].active = false; g_cmd[h].first = false; }
 
+// The grab (worker): the free hand's controller sits on the weapon hand's weapon axis - between
+// TwoHandGrabMin and TwoHandGrabMax metres along it, within TwoHandGrabRadius of it - with its grip
+// squeezed. Let go when the grip opens or the hand leaves the shaft (TwoHandReleaseRadius, after
+// a grace). The right weapon is tried first; closing the right hand on the left weapon two-hands
+// that one instead. Lost tracking (menus hand us empty poses) changes nothing.
+void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
+    const Config& c = Cfg();
+    TwoHandState s; { std::lock_guard<std::mutex> g(g_mtx); s = g_two; }
+    if (c.twoHandMode != "grab") { if (s.want || s.inZone) { std::lock_guard<std::mutex> g(g_mtx); g_two = TwoHandState{}; } return; }
+    // The hilt axis, pointing from the weapon hand's controller TOWARD THE POMMEL (where the second hand
+    // goes): down the controller's handle (-Y) by default, or back along its aim axis (+Z).
+    const bool handleAxis = c.twoHandAxis != "forward";
+    auto geometry = [&](int w, float* along, float* perp) {
+        const Pose& wp = tr.hand[w]; const Pose& fp = tr.hand[1 - w];
+        if (!wp.valid || !fp.valid || !in.controllerConnected[w] || !in.controllerConnected[1 - w]) return false;
+        Vec3 d = fp.pos - wp.pos; Vec3 ax = wp.rot.Rotate(handleAxis ? Vec3{0.f, -1.f, 0.f} : Vec3{0.f, 0.f, 1.f});
+        *along = d.Dot(ax); *perp = (d - ax * *along).Length();
+        return true;
+    };
+    // The grip is analog in VRInputState (the backend never sets VRB_LGrip/RGrip); threshold it as virtual_pad does.
+    auto gripOf = [&](int h) { return in.handTrigger[h] >= c.gripThreshold; };
+    // Calibration line (2 Hz): the geometry whenever a grip is squeezed with the hands near each
+    // other, so a grab that does not take can be read off the log and the window adjusted.
+    static double s_lastGeoLog = 0;
+    if (now - s_lastGeoLog > 0.5) {
+        for (int w = 0; w < 2; ++w) {
+            float along = 0.f, perp = 0.f;
+            if (!gripOf(1 - w) || !geometry(w, &along, &perp) || std::fabs(along) > 0.6f || perp > 0.6f) continue;
+            s_lastGeoLog = now;
+            LOGD("[combat] two-hand geometry: %s hand (grip) vs %s weapon: %.2f m toward the pommel along the %s axis (window %.2f..%.2f) off-axis %.2f m (radius %.2f) weapon %d%s", HandName(1 - w), HandName(w), along, handleAxis ? "handle" : "aim", c.twoHandGrabMin, c.twoHandGrabMax, perp, c.twoHandGrabRadius, g_wepPresent[w].load(), s.want ? " [held]" : "");
+        }
+    }
+    if (!s.want) {
+        bool zoneNow = false;
+        for (int w = HandRight; w >= HandLeft && !s.want; --w) {
+            float along = 0.f, perp = 0.f;
+            if (!g_wepPresent[w].load() || !geometry(w, &along, &perp)) continue;
+            if (!(along >= c.twoHandGrabMin && along <= c.twoHandGrabMax && perp <= c.twoHandGrabRadius)) continue;
+            zoneNow = true; s.pinHand = 1 - w; s.weaponHand = w;
+            if (c.twoHandHoldGrip && !gripOf(1 - w)) { s.zoneSince = 0; continue; }
+            if (s.zoneSince == 0) s.zoneSince = now;
+            if (now - s.zoneSince >= 0.08) {
+                s.want = true; s.along = along; s.outSince = 0;
+                LOGI("[combat] two-hand: %s hand took the %s weapon %.2f m down the hilt (%.2f m off axis)", HandName(1 - w), HandName(w), along, perp);
+            }
+        }
+        s.inZone = zoneNow;
+        if (!zoneNow) s.zoneSince = 0;
+    } else {
+        float along = 0.f, perp = 0.f;
+        if (geometry(s.weaponHand, &along, &perp)) {
+            // TwoHandHoldGrip: the hold also needs the grip, with hysteresis (half the take-hold threshold)
+            // so an analog grip relaxing a little does not drop the weapon. Default: the hand on the shaft is the hold.
+            const bool gripOk = !c.twoHandHoldGrip || in.handTrigger[s.pinHand] >= 0.5f * c.gripThreshold;
+            const bool hold = along >= c.twoHandGrabMin - 0.10f && along <= c.twoHandGrabMax + 0.15f && perp <= c.twoHandReleaseRadius && gripOk;
+            s.inZone = hold;
+            if (hold) s.outSince = 0;
+            else {
+                if (s.outSince == 0) s.outSince = now;
+                if (now - s.outSince >= c.twoHandReleaseSeconds) {
+                    s.want = false; s.zoneSince = 0;
+                    LOGI("[combat] two-hand: %s hand let go (%s)", HandName(s.pinHand), !gripOk ? "grip opened" : "left the shaft");
+                }
+            }
+        }
+    }
+    std::lock_guard<std::mutex> g(g_mtx); g_two = s;
+}
+// The skill trigger (worker), only while the game reports a two-handed arm style. "effect": a tap
+// replays the recorded effect (or records it the first time), holding past TwoHandSkillRelearnHold
+// plays it the game's way again and re-records. "game": the press goes straight through.
+void PollSkillTrigger(const VRInputState& in, double now) {
+    const Config& c = Cfg();
+    static bool s_down = false; static double s_downT = 0; static bool s_long = false;
+    const uint32_t mask = ParseVRButton(c.twoHandSkillButton);
+    // Triggers and grips are analog in VRInputState (the backend sets no VRB_*Trigger/Grip bits): derive them.
+    uint32_t buttons = in.buttons;
+    if (in.indexTrigger[HandLeft]  >= c.triggerThreshold) buttons |= VRB_LTrigger;
+    if (in.indexTrigger[HandRight] >= c.triggerThreshold) buttons |= VRB_RTrigger;
+    if (in.handTrigger[HandLeft]   >= c.gripThreshold)    buttons |= VRB_LGrip;
+    if (in.handTrigger[HandRight]  >= c.gripThreshold)    buttons |= VRB_RGrip;
+    const bool two = TwoHandedStyle(g_armStyleShared.load());
+    const bool dn = mask && (buttons & mask) != 0 && two && c.twoHandSkill != "off";
+    if (dn && !s_down) {
+        s_down = true; s_downT = now; s_long = false;
+        if (c.twoHandSkill == "game") { s_long = true; g_skillReq.store(2); }   // straight through, on the press
+    } else if (dn && s_down && !s_long && c.twoHandSkillRelearnHold > 0.f && now - s_downT >= c.twoHandSkillRelearnHold) {
+        s_long = true; g_skillReq.store(2);
+    } else if (!dn && s_down) {
+        s_down = false;
+        if (!s_long && two) g_skillReq.store(1);
+    }
+}
+
 // Shield pose against the head -> guard held + block quality. The threat is assumed to be where
 // you look, flattened to the horizon (enemies stand on the same ground).
 //
@@ -795,6 +1270,11 @@ bool CombatInit(uint8_t* base, bool versionOk) {
         g_status.taeHooked = true;
         LOGI("[combat] TAE behavior-event hook installed (CSChrTaeAnimEvent vft[%d] @ %p)", kExecSlot, target);
     } else LOGW("[combat] failed to hook TAE event exec @ %p", target);
+    // Slot 2 (generic events): watched only while a skill is recorded, called for its replay.
+    void* generic = nullptr; SafeRead(&vft[kGenericSlot], &generic, sizeof(generic));
+    if (generic && MH_CreateHook(generic, (void*)&Hook_GenericEvent, (void**)&g_origGeneric) == MH_OK && MH_EnableHook(generic) == MH_OK)
+        LOGI("[combat] TAE generic-event hook installed (vft[%d] @ %p): skill effects can be recorded and replayed", kGenericSlot, generic);
+    else { g_origGeneric = nullptr; LOGW("[combat] failed to hook TAE generic events @ %p: skill effects (SpEffect/FFX) will not replay, only bullets and attacks", generic); }
     { std::lock_guard<std::mutex> g(g_mtx); ApplyConfigTemplates(); }
     return g_status.taeHooked;
 }
@@ -836,9 +1316,62 @@ uint32_t CombatTakeHapticRequests() { return g_haptic.exchange(0); }
 
 uint16_t CombatBlockedButtons() {
     const Config& c = Cfg();
-    if (!c.combatBlockAttackButtons || !CombatHandlesSwings()) return 0;
-    uint16_t m = ParseXInputButton(c.lightAttackButton) | ParseXInputButton(c.heavyAttackButton);
+    if (!CombatHandlesSwings()) return 0;
+    uint16_t m = c.combatBlockAttackButtons ? (uint16_t)(ParseXInputButton(c.lightAttackButton) | ParseXInputButton(c.heavyAttackButton)) : 0;
+    if (c.twoHandMode == "grab") {
+        // The grip that holds the weapon is a grab, not the button it is mapped to (LT = the skill).
+        std::lock_guard<std::mutex> g(g_mtx);
+        if (g_two.want || g_two.inZone) m |= ParseXInputButton(g_two.pinHand == HandLeft ? c.btnLGrip : c.btnRGrip);
+    }
+    // The two-handed skill trigger must not also send what it is mapped to.
+    if (c.twoHandSkill != "off" && TwoHandedStyle(g_armStyleShared.load())) m |= MappedButtonOf(c.twoHandSkillButton, c);
     return m;
+}
+
+// The game's own chords, played on the pad after the block: modifier down, the key a little
+// later (the game wants the modifier seen first), both up. A lone key (skill / learn press) is
+// just the key. One chord at a time; a new request waits for the running one to finish.
+uint16_t CombatForcedButtons(double now) {
+    const Config& c = Cfg();
+    ChordRun& r = g_chord;
+    if (!CombatHandlesSwings()) { r.phase = 0; g_chordReq.store(0); return 0; }
+    if (r.phase == 0) {
+        const int req = g_chordReq.exchange(0);
+        if (!req) return 0;
+        r.kind = req; r.t = now; r.phase = 1; r.lead = 0; r.key = 0;
+        switch (req) {
+        case 1: r.lead = ParseXInputButton(c.twoHandModifierButton); r.key = ParseXInputButton(c.lightAttackButton); break;
+        case 2: r.lead = ParseXInputButton(c.twoHandModifierButton); r.key = ParseXInputButton(c.guardButton); break;
+        case 3: r.key = ParseXInputButton(c.skillButton); break;
+        case 4: r.key = ParseXInputButton(c.lightAttackButton); break;
+        case 5: r.key = ParseXInputButton(c.heavyAttackButton); break;
+        default: r.phase = 0; return 0;
+        }
+        if (!r.key) { r.phase = 0; LOGW("[combat] chord %d: no button configured", req); return 0; }
+        if (req == 4 || req == 5) { std::lock_guard<std::mutex> g(g_mtx); g_lastBtn[req == 4 ? SlotLight : SlotHeavy] = now; }   // the hook learns from this press
+        if (!r.lead) r.phase = 2;
+        if (c.combatDebug) LOGD("[combat] chord %d: %s%s%s", req, r.lead ? XInputButtonName(r.lead) : "", r.lead ? " + " : "", XInputButtonName(r.key));
+    }
+    // A lone key (skill / learn press) uses the gesture press duration; a chord uses the slower,
+    // human-like two-hand timing (the game watches for RB/LB while Y is held).
+    const double press = r.lead ? (c.twoHandChordPress > 0.05f ? c.twoHandChordPress : 0.05) : (c.gesturePressDuration > 0.08 ? c.gesturePressDuration : 0.08);
+    const double lead = c.twoHandChordLead > 0.05f ? c.twoHandChordLead : 0.05, tail = c.twoHandChordTail > 0.02f ? c.twoHandChordTail : 0.02;
+    switch (r.phase) {
+    case 1: if (now - r.t >= lead) { r.phase = 2; r.t = now; } return r.lead;                       // modifier down first
+    case 2: if (now - r.t >= press) { r.phase = 3; r.t = now; } return (uint16_t)(r.lead | r.key);   // + the key
+    case 3: if (now - r.t >= tail) r.phase = 0; return r.lead;                                      // key up, modifier lingers
+    }
+    r.phase = 0; return 0;
+}
+
+bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool* handleAxis) {
+    const Config& c = Cfg();
+    if (!c.twoHandPinHand) return false;
+    const int style = g_armStyleShared.load();
+    std::lock_guard<std::mutex> g(g_mtx);
+    if (!g_two.want || !TwoHandedStyle(style) || TwoHandedWeaponHand(style) != g_two.weaponHand) return false;
+    *pinHand = g_two.pinHand; *weaponHand = g_two.weaponHand; *alongToPommel = g_two.along; *handleAxis = c.twoHandAxis != "forward";
+    return true;
 }
 
 float CombatHandWeight(int hand) { return hand == HandLeft || hand == HandRight ? g_wepWeight[hand].load() : 0.f; }
@@ -854,16 +1387,23 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
     const Config& c = Cfg();
     if (!CombatHandlesSwings()) {
         for (int h = 0; h < 2; ++h) { if (g_sm[h].st != HandSM::Idle) EndSwing(h); g_sm[h].st = HandSM::Idle; g_sm[h].tipValid = false; g_sm[h].arc = 0; }
-        std::lock_guard<std::mutex> g(g_mtx); g_block = BlockState{};
+        std::lock_guard<std::mutex> g(g_mtx); g_block = BlockState{}; g_two = TwoHandState{};
         return;
     }
     PollBlock(tr, now);
+    PollTwoHand(tr, in, now);
+    PollSkillTrigger(in, now);
     const bool leftShield = g_leftShield.load() != 0;
+    // Two-handed: the free hand is on the weapon, it never swings on its own (the game's arm style
+    // is the authority; a grab in progress already holds that hand still).
+    const int style = g_armStyleShared.load();
+    int freeHand = TwoHandedStyle(style) ? 1 - TwoHandedWeaponHand(style) : -1;
+    { std::lock_guard<std::mutex> g(g_mtx); if (g_two.want) freeHand = g_two.pinHand; }
     for (int h = 0; h < 2; ++h) {
         HandSM& s = g_sm[h];
         const Pose& p = tr.hand[h];
-        bool grip = in.buttons & (h == HandLeft ? VRB_LGrip : VRB_RGrip);
-        bool allowed = p.valid && in.controllerConnected[h] && (h == HandRight || (c.combatLeftHand && !leftShield)) && (!c.gestureRequiresGrip || grip);
+        bool grip = in.handTrigger[h] >= c.gripThreshold;   // analog in VRInputState; VRB_*Grip is never set by the backend
+        bool allowed = p.valid && in.controllerConnected[h] && h != freeHand && (h == HandRight || (c.combatLeftHand && !leftShield)) && (!c.gestureRequiresGrip || grip);
         const float reach = h == HandRight ? c.weaponReachRight : c.weaponReachLeft;
         float handSpd = 0.f;
         float tip = allowed ? TipSpeed(p, reach, &handSpd) : 0.f;
@@ -907,9 +1447,19 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                 const float vq = c.kineticEnabled ? s.vVirtPeak : s.peak;
                 const float q = StrikeQuality(vq, s.arc, weight, c);
                 int slot;
-                if (h == HandLeft) slot = SlotLeft;
+                if (h == HandLeft && !TwoHandedStyle(style)) slot = SlotLeft;
                 else if (c.kineticEnabled) slot = (q >= c.kineticHeavyQuality && s.arc >= 0.8f * ArcRefFor(weight, c)) ? SlotHeavy : SlotLight;
                 else slot = s.peak >= c.heavySwingSpeed ? SlotHeavy : SlotLight;
+                // Two-handed rows not known yet (auto mode): this swing presses the button instead, so the
+                // game plays the two-handed attack once and the hook learns its row (as 1H learning does).
+                if (TwoHandedStyle(style) && c.combatLearn && c.combatMode == "auto" && slot != SlotLeft) {
+                    bool known; { std::lock_guard<std::mutex> g(g_mtx); known = g_tpl[slot == SlotLight ? SlotLight2H : SlotHeavy2H].valid; }
+                    if (!known) {
+                        if (g_chordReq.load() == 0) { g_chordReq.store(slot == SlotLight ? 4 : 5); LOGI("[combat] two-handed %s row unknown: pressing %s so the game teaches it", SlotName(slot), slot == SlotLight ? c.lightAttackButton.c_str() : c.heavyAttackButton.c_str()); }
+                        s.st = HandSM::Cooldown; s.t = now;
+                        break;
+                    }
+                }
                 StartSwing(h, slot, now, q, s.arc, vq); s.st = HandSM::Swinging; s.t = now;
                 g_haptic.fetch_or(1u << h);
                 if (c.combatDebug) LOGD("[combat] %s swing start: %s (tip %.2f m/s, virtual %.2f m/s, hand %.2f m/s, arc %.2f/%.2f m, weight %.1f, quality %.2f)", HandName(h), SlotName(slot), s.peak, s.vVirtPeak, handSpd, s.arc, ArcRefFor(weight, c), weight, q);
@@ -948,7 +1498,8 @@ CombatStatus CombatGetStatus() {
     const bool phys = CombatHandlesSwings();
     CombatStatus s = g_status;
     s.physical = phys;
-    { std::lock_guard<std::mutex> g(g_mtx); s.learnedLight = g_tpl[SlotLight].valid; s.learnedHeavy = g_tpl[SlotHeavy].valid; s.learnedLeft = g_tpl[SlotLeft].valid; }
+    { std::lock_guard<std::mutex> g(g_mtx); s.learnedLight = g_tpl[SlotLight].valid; s.learnedHeavy = g_tpl[SlotHeavy].valid; s.learnedLeft = g_tpl[SlotLeft].valid; s.twoHandWanted = g_two.want; }
+    s.armStyle = g_armStyleShared.load();
     s.injected = InterlockedExchange(&g_injected, 0); s.swings = InterlockedExchange(&g_swings, 0);
     return s;
 }
