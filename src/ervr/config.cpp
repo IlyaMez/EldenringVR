@@ -237,6 +237,12 @@ void Config::Load(const std::wstring& path) {
     kineticFatigueFloor = GetF(ini, L"Combat", L"KineticFatigueFloor", kineticFatigueFloor);
     kineticPoiseScales = GetB(ini, L"Combat", L"KineticPoiseScales", kineticPoiseScales);
     kineticStaminaDamageScales = GetB(ini, L"Combat", L"KineticStaminaDamageScales", kineticStaminaDamageScales);
+    combatEnemyWatch = GetB(ini, L"Combat", L"EnemyWatch", combatEnemyWatch);
+    combatEnemyWatchRadius = GetF(ini, L"Combat", L"EnemyWatchRadius", combatEnemyWatchRadius);
+    kineticAlignVariation = GetB(ini, L"Combat", L"KineticAlignVariation", kineticAlignVariation);
+    kineticSwingBudget = GetF(ini, L"Combat", L"KineticSwingBudget", kineticSwingBudget);
+    kineticFlinchFirstHitOnly = GetB(ini, L"Combat", L"KineticFlinchFirstHitOnly", kineticFlinchFirstHitOnly);
+    kineticHitRadiusScale = GetF(ini, L"Combat", L"KineticHitRadiusScale", kineticHitRadiusScale);
     blockEnabled = GetB(ini, L"Combat", L"Block", blockEnabled);
     guardButton = GetS(ini, L"Combat", L"GuardButton", guardButton);
     shieldWepTypes = GetS(ini, L"Combat", L"ShieldWepTypes", shieldWepTypes);
@@ -256,6 +262,8 @@ void Config::Load(const std::wstring& path) {
     twoHandGrabMin = GetF(ini, L"Combat", L"TwoHandGrabMin", twoHandGrabMin);
     twoHandGrabMax = GetF(ini, L"Combat", L"TwoHandGrabMax", twoHandGrabMax);
     twoHandPinHand = GetB(ini, L"Combat", L"TwoHandPinHand", twoHandPinHand);
+    twoHandPinOrient = GetB(ini, L"Combat", L"TwoHandPinOrient", twoHandPinOrient);
+    twoHandPinSideOffset = GetF(ini, L"Combat", L"TwoHandPinSideOffset", twoHandPinSideOffset);
     twoHandLightJudgeId = GetI(ini, L"Combat", L"TwoHandLightJudgeId", twoHandLightJudgeId);
     twoHandHeavyJudgeId = GetI(ini, L"Combat", L"TwoHandHeavyJudgeId", twoHandHeavyJudgeId);
     twoHandSkill = GetS(ini, L"Combat", L"TwoHandSkill", twoHandSkill);

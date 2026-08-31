@@ -81,6 +81,9 @@ bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc)
 // The save's character level (PlayerGameData +0x68), -1 if unavailable. Logged with combat so an
 // over-levelled test character is not mistaken for a broken damage model.
 int GameERPlayerLevel();
+// WorldChrMan (null until in-game). Combat's enemy watcher reads the game's own by-distance
+// ChrIns list from it (hit / damage ground truth).
+uint8_t* GameERWorldChrMan();
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

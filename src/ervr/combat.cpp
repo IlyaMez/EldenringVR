@@ -53,6 +53,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 namespace ervr {
@@ -104,11 +105,25 @@ constexpr uint32_t Gaitem_Count = 5120;
 constexpr size_t   Bhv_VariationId = 0x00, Bhv_JudgeId = 0x04, Bhv_RefType = 0x09, Bhv_RefId = 0x0C, Bhv_Stamina = 0x14;
 constexpr uint32_t Bhv_RowSize     = 0x20;
 // ATK_PARAM_ST (player rows: the *_correction u16s are the motion values, in percent)
+constexpr size_t   Atk_HitRadius = 0x00;         // f32 x4: hit0..hit3 capsule radius (fromsoftware-rs generated.rs)
+constexpr size_t   Atk_HitStopTime = 0x14;       // f32
 constexpr size_t   Atk_PhysCorr = 0x3E, Atk_MagCorr = 0x40, Atk_FireCorr = 0x42, Atk_ThunCorr = 0x44, Atk_StamCorr = 0x46;
+constexpr size_t   Atk_DmgLevel = 0x72;          // u8 hit-reaction level (0 = no reaction anim)
 constexpr size_t   Atk_DarkCorr = 0x186;
 constexpr size_t   Atk_SuperArmorCorr = 0x1B0;   // f32 poise-damage motion value
 constexpr uint32_t Atk_RowSize  = 0x1C8;
 constexpr uint32_t BehaviorPcBase = 100000000u;
+// WorldChrMan: the game's own list of nearby ChrIns sorted by distance to the main player,
+// rebuilt every frame for the update-omission system (fromsoftware-rs world_chr_man.rs; the
+// struct's own arithmetic reproduces our in-game-verified main_player 0x1E508 / chr_cam
+// 0x1ECE0, so the neighbouring offsets are trusted). DLVector = {allocator, first, last, end}.
+constexpr size_t WCM_ChrByDistFirst = 0x1F1D8;
+constexpr size_t WCM_ChrByDistLast  = 0x1F1E0;
+constexpr size_t ChrDist_Stride = 0x10;          // {ChrIns* @0, f32 distance @8, pad}
+// ChrIns (fromsoftware-rs chr_ins.rs; modules @0x190 = the same container stamina already uses)
+constexpr size_t Chr_NpcId    = 0x64;            // i32, the 4-digit character id (e.g. 3070)
+constexpr size_t Data_Hp      = 0x138;
+constexpr size_t Data_MaxHp   = 0x13C;
 
 struct CSChrTaeAnimEvent { void** vft; uint64_t unk08; uint32_t animId; uint32_t pad; uint8_t* owner; };
 struct CSTaeAnimEventArgs {
@@ -547,10 +562,21 @@ uint8_t* FindBehaviorRow(int variation, int judge, uint32_t* idOut) {
     return b;
 }
 
-// The AtkParam_Pc row a (weapon variation, judge id) pair resolves to. The BehaviorParam_PC row
-// id formula (1_0000_0000 + variation*1000 + judge, verified in ER 1.16 for 700/800/2400) is
+// The AtkParam_Pc rows a (weapon variation, judge id) pair can resolve to. The BehaviorParam_PC
+// row id formula (1_0000_0000 + variation*1000 + judge, verified in ER 1.16 for 700/800/2400) is
 // checked by reading the row's own variation/judge fields back, with a field scan as fallback.
-struct AtkResolve { bool valid = false; int variation = -1, judge = -1; uint8_t* atkRow = nullptr; uint8_t* bhvRow = nullptr; uint32_t bhvId = 0, atkId = 0; int bhvStamina = 0; };
+// ALL candidate variations that carry the judge are collected and edited together (2026-08-31):
+// the game runs its own variation fallback for a unique-moveset weapon (var 214 has no basic
+// rows), and editing only OUR best candidate left the row the game actually used untouched -
+// full vanilla damage on every real hit while the strike log printed a mult.
+struct AtkResolve {
+    bool valid = false; int variation = -1, judge = -1;
+    int n = 0;
+    uint8_t* atkRow[4] = {}; uint8_t* bhvRow[4] = {};
+    uint32_t bhvId[4] = {}; uint32_t atkId[4] = {};
+    int resolvedVar = -1;    // best candidate variation (first with a row) - the alignment target
+    int bhvStamina = 0;      // of the best candidate
+};
 AtkResolve g_resolve[2];
 AtkResolve* ResolveAttack(int h, int wepVariation, int judge) {
     AtkResolve& r = g_resolve[h];
@@ -558,26 +584,33 @@ AtkResolve* ResolveAttack(int h, int wepVariation, int judge) {
     r = AtkResolve{}; r.variation = wepVariation; r.judge = judge;
     if (!ParamsReady() || judge < 0) return nullptr;
     int cands[4]; const int nc = VariationCandidates(wepVariation, cands);
-    uint8_t* b = nullptr; uint32_t bhvId = 0; int variation = wepVariation;
-    for (int i = 0; i < nc && !b; ++i) { b = FindBehaviorRow(cands[i], judge, &bhvId); if (b) variation = cands[i]; }
-    if (!b) { LOGW("[combat] no BehaviorParam_PC row for judge %d under variation %d or its class bases: strikes keep vanilla damage", judge, wepVariation); return nullptr; }
-    if (variation != wepVariation) LOGI("[combat] %s hand: judge %d not under variation %d; using class variation %d", HandName(h), judge, wepVariation, variation);
-    { uint32_t sz = 0; ParamsRow(PI_BehaviorParam_PC, bhvId, &sz); CheckRowSize("BEHAVIOR_PARAM_ST", sz, Bhv_RowSize); }
-    int refId = -1; uint8_t refType = 0xFF;
-    SafeRead(b + Bhv_RefType, &refType, 1); SafeRead(b + Bhv_RefId, &refId, 4); SafeRead(b + Bhv_Stamina, &r.bhvStamina, 4);
-    if (refType != 0 || refId < 0) { LOGW("[combat] BehaviorParam_PC %u refType %u refId %d is not an attack: no scaling", bhvId, refType, refId); return nullptr; }
-    uint32_t asz = 0;
-    uint8_t* a = ParamsRow(PI_AtkParam_Pc, (uint32_t)refId, &asz);
-    if (!a) { LOGW("[combat] no AtkParam_Pc row %d for BehaviorParam_PC %u", refId, bhvId); return nullptr; }
-    CheckRowSize("ATK_PARAM_ST", asz, Atk_RowSize);
-    r.atkRow = a; r.bhvRow = b; r.bhvId = bhvId; r.atkId = (uint32_t)refId; r.valid = true;
-    uint16_t mv = 0; SafeRead(a + Atk_PhysCorr, &mv, 2);
-    LOGI("[combat] %s hand judge %d -> BehaviorParam_PC %u (stamina %d) -> AtkParam_Pc %d (phys MV %u%%)", HandName(h), judge, bhvId, r.bhvStamina, refId, mv);
+    for (int i = 0; i < nc && r.n < 4; ++i) {
+        uint32_t bhvId = 0;
+        uint8_t* b = FindBehaviorRow(cands[i], judge, &bhvId);
+        if (!b) continue;
+        { uint32_t sz = 0; ParamsRow(PI_BehaviorParam_PC, bhvId, &sz); CheckRowSize("BEHAVIOR_PARAM_ST", sz, Bhv_RowSize); }
+        int refId = -1; uint8_t refType = 0xFF; int stam = 0;
+        SafeRead(b + Bhv_RefType, &refType, 1); SafeRead(b + Bhv_RefId, &refId, 4); SafeRead(b + Bhv_Stamina, &stam, 4);
+        if (refType != 0 || refId < 0) { LOGW("[combat] BehaviorParam_PC %u refType %u refId %d is not an attack: skipped", bhvId, refType, refId); continue; }
+        uint32_t asz = 0;
+        uint8_t* a = ParamsRow(PI_AtkParam_Pc, (uint32_t)refId, &asz);
+        if (!a) { LOGW("[combat] no AtkParam_Pc row %d for BehaviorParam_PC %u", refId, bhvId); continue; }
+        CheckRowSize("ATK_PARAM_ST", asz, Atk_RowSize);
+        if (r.n == 0) { r.resolvedVar = cands[i]; r.bhvStamina = stam; }
+        r.bhvRow[r.n] = b; r.atkRow[r.n] = a; r.bhvId[r.n] = bhvId; r.atkId[r.n] = (uint32_t)refId; ++r.n;
+    }
+    if (r.n == 0) { LOGW("[combat] no BehaviorParam_PC row for judge %d under variation %d or its class bases: strikes keep vanilla damage", judge, wepVariation); return nullptr; }
+    r.valid = true;
+    if (r.resolvedVar != wepVariation) LOGI("[combat] %s hand: judge %d not under variation %d; editing %d candidate row(s), best class variation %d", HandName(h), judge, wepVariation, r.n, r.resolvedVar);
+    uint16_t mv = 0; SafeRead(r.atkRow[0] + Atk_PhysCorr, &mv, 2);
+    LOGI("[combat] %s hand judge %d -> BehaviorParam_PC %u (stamina %d) -> AtkParam_Pc %u (phys MV %u%%), %d row(s) edited per strike", HandName(h), judge, r.bhvId[0], r.bhvStamina, r.atkId[0], mv, r.n);
     return &r;
 }
 
-// Live edit of one AtkParam_Pc row's motion values; originals captured once, restored on end.
-struct AtkEdit { bool active = false; uint8_t* row = nullptr; uint16_t orig[6]{}; float origSA = 0.f; float mult = -1.f; };
+// Live edit of the resolved AtkParam_Pc rows' motion values (plus hit-reaction level, hitstop,
+// poise and capsule radii); originals captured once, restored when the strike ends.
+struct AtkRowEdit { uint8_t* row = nullptr; uint16_t orig[6]{}; float origSA = 0.f; float origRad[4]{}; float origHitStop = 0.f; uint8_t origDmg = 0; };
+struct AtkEdit { bool active = false; int n = 0; AtkRowEdit e[4]; float mult = -1.f; bool suppress = false; };
 AtkEdit g_atk[2];
 const size_t kAtkCorr[6] = {Atk_PhysCorr, Atk_MagCorr, Atk_FireCorr, Atk_ThunCorr, Atk_DarkCorr, Atk_StamCorr};
 
@@ -585,56 +618,129 @@ const size_t kAtkCorr[6] = {Atk_PhysCorr, Atk_MagCorr, Atk_FireCorr, Atk_ThunCor
 // hits, every frame of contact), so the only real disconnect is to make that cost 1 at the source
 // - the BehaviorParam_PC row's stamina field - for the strike's duration. The 1 that is still
 // charged is the hit signal (haptics) and is refunded.
-struct BhvEdit { bool active = false; uint8_t* row = nullptr; int orig = 0; };
+struct BhvEdit { bool active = false; int n = 0; uint8_t* row[4] = {}; int orig[4] = {}; };
 BhvEdit g_bhv[2];
+bool OtherHandOwnsRow(const BhvEdit& o, uint8_t* row, int* origOut) {
+    if (!o.active) return false;
+    for (int i = 0; i < o.n; ++i) if (o.row[i] == row) { if (origOut) *origOut = o.orig[i]; return true; }
+    return false;
+}
 void RestoreBhv(int h) {
     BhvEdit& e = g_bhv[h];
     if (!e.active) return;
-    if (!(g_bhv[1 - h].active && g_bhv[1 - h].row == e.row)) SafeWrite(e.row + Bhv_Stamina, &e.orig, 4);
-    e.active = false; e.row = nullptr;
+    for (int i = 0; i < e.n; ++i)
+        if (!OtherHandOwnsRow(g_bhv[1 - h], e.row[i], nullptr)) SafeWrite(e.row[i] + Bhv_Stamina, &e.orig[i], 4);
+    e = BhvEdit{};
 }
-void ApplyBhvStamina(int h, uint8_t* row, int value) {
-    if (g_layoutBad || !row) return;
+void ApplyBhvStamina(int h, const AtkResolve* r, int value) {
+    if (g_layoutBad || !r || r->n == 0) return;
     BhvEdit& e = g_bhv[h];
-    if (e.active && e.row != row) RestoreBhv(h);
+    if (e.active && e.row[0] != r->bhvRow[0]) RestoreBhv(h);
     if (!e.active) {
-        const BhvEdit& o = g_bhv[1 - h];
-        if (o.active && o.row == row) e.orig = o.orig; else SafeRead(row + Bhv_Stamina, &e.orig, 4);
-        e.active = true; e.row = row;
+        e.n = r->n;
+        for (int i = 0; i < e.n; ++i) {
+            e.row[i] = r->bhvRow[i];
+            if (!OtherHandOwnsRow(g_bhv[1 - h], e.row[i], &e.orig[i])) SafeRead(e.row[i] + Bhv_Stamina, &e.orig[i], 4);
+        }
+        e.active = true;
     }
-    int cur = -1; SafeRead(row + Bhv_Stamina, &cur, 4);
-    if (cur != value) SafeWrite(row + Bhv_Stamina, &value, 4);
+    for (int i = 0; i < e.n; ++i) {
+        int cur = -1; SafeRead(e.row[i] + Bhv_Stamina, &cur, 4);
+        if (cur != value) SafeWrite(e.row[i] + Bhv_Stamina, &value, 4);
+    }
 }
 
+const AtkRowEdit* OtherHandAtkRow(const AtkEdit& o, uint8_t* row) {
+    if (!o.active) return nullptr;
+    for (int i = 0; i < o.n; ++i) if (o.e[i].row == row) return &o.e[i];
+    return nullptr;
+}
+void RestoreAtk(int h);
+void ApplyWepVarRestore(int h);
 void RestoreAtk(int h) {
     RestoreBhv(h);
+    ApplyWepVarRestore(h);
     AtkEdit& e = g_atk[h];
     if (!e.active) return;
-    // Both hands on the same row: the other edit still owns it, leave its values in place.
-    if (g_atk[1 - h].active && g_atk[1 - h].row == e.row) { e.active = false; e.row = nullptr; return; }
-    for (int i = 0; i < 6; ++i) SafeWrite(e.row + kAtkCorr[i], &e.orig[i], 2);
-    SafeWrite(e.row + Atk_SuperArmorCorr, &e.origSA, 4);
-    e.active = false; e.row = nullptr; e.mult = -1.f;
+    for (int i = 0; i < e.n; ++i) {
+        AtkRowEdit& re = e.e[i];
+        // Both hands on the same row: the other edit still owns it, leave its values in place.
+        if (OtherHandAtkRow(g_atk[1 - h], re.row)) continue;
+        for (int j = 0; j < 6; ++j) SafeWrite(re.row + kAtkCorr[j], &re.orig[j], 2);
+        SafeWrite(re.row + Atk_SuperArmorCorr, &re.origSA, 4);
+        for (int j = 0; j < 4; ++j) SafeWrite(re.row + Atk_HitRadius + j * 4, &re.origRad[j], 4);
+        SafeWrite(re.row + Atk_HitStopTime, &re.origHitStop, 4);
+        SafeWrite(re.row + Atk_DmgLevel, &re.origDmg, 1);
+    }
+    e = AtkEdit{};
 }
-void ApplyAtk(int h, uint8_t* row, float mult) {
-    if (g_layoutBad || !row) return;
+// mult scales the motion values; suppressReaction (after the first landed hit of a strike) takes
+// the hit reaction out: dmg_level 0, no hitstop, no poise damage - contact keeps hurting but a
+// swing staggers an enemy at most once, so continuous contact cannot stunlock.
+void ApplyAtk(int h, const AtkResolve* r, float mult, bool suppressReaction) {
+    if (g_layoutBad || !r || r->n == 0) return;
     AtkEdit& e = g_atk[h];
-    if (e.active && e.row != row) RestoreAtk(h);
+    if (e.active && e.e[0].row != r->atkRow[0]) RestoreAtk(h);
     if (!e.active) {
-        const AtkEdit& o = g_atk[1 - h];
-        if (o.active && o.row == row) { memcpy(e.orig, o.orig, sizeof(e.orig)); e.origSA = o.origSA; }
-        else { for (int i = 0; i < 6; ++i) SafeRead(row + kAtkCorr[i], &e.orig[i], 2); SafeRead(row + Atk_SuperArmorCorr, &e.origSA, 4); }
-        e.active = true; e.row = row; e.mult = -1.f;
+        e.n = r->n;
+        for (int i = 0; i < e.n; ++i) {
+            AtkRowEdit& re = e.e[i]; re.row = r->atkRow[i];
+            if (const AtkRowEdit* o = OtherHandAtkRow(g_atk[1 - h], re.row)) { re = *o; }
+            else {
+                for (int j = 0; j < 6; ++j) SafeRead(re.row + kAtkCorr[j], &re.orig[j], 2);
+                SafeRead(re.row + Atk_SuperArmorCorr, &re.origSA, 4);
+                for (int j = 0; j < 4; ++j) SafeRead(re.row + Atk_HitRadius + j * 4, &re.origRad[j], 4);
+                SafeRead(re.row + Atk_HitStopTime, &re.origHitStop, 4);
+                SafeRead(re.row + Atk_DmgLevel, &re.origDmg, 1);
+            }
+        }
+        e.active = true; e.mult = -1.f; e.suppress = false;
     }
-    if (std::fabs(mult - e.mult) < 0.002f) return;
-    e.mult = mult;
+    if (std::fabs(mult - e.mult) < 0.002f && suppressReaction == e.suppress) return;
+    e.mult = mult; e.suppress = suppressReaction;
     const Config& c = Cfg();
-    for (int i = 0; i < 6; ++i) {
-        if (i == 5 && !c.kineticStaminaDamageScales) continue;
-        float v = (float)e.orig[i] * mult; uint16_t w = (uint16_t)(v < 0 ? 0 : v > 65535.f ? 65535.f : v + 0.5f);
-        SafeWrite(row + kAtkCorr[i], &w, 2);
+    const float radScale = c.kineticHitRadiusScale > 0.f ? c.kineticHitRadiusScale : 1.f;
+    for (int i = 0; i < e.n; ++i) {
+        AtkRowEdit& re = e.e[i];
+        for (int j = 0; j < 6; ++j) {
+            if (j == 5 && !c.kineticStaminaDamageScales) continue;
+            float v = (float)re.orig[j] * mult; uint16_t w = (uint16_t)(v < 0 ? 0 : v > 65535.f ? 65535.f : v + 0.5f);
+            SafeWrite(re.row + kAtkCorr[j], &w, 2);
+        }
+        float sa = suppressReaction ? 0.f : (c.kineticPoiseScales ? re.origSA * mult : re.origSA);
+        SafeWrite(re.row + Atk_SuperArmorCorr, &sa, 4);
+        for (int j = 0; j < 4; ++j) { if (re.origRad[j] > 0.f) { float rr = re.origRad[j] * radScale; SafeWrite(re.row + Atk_HitRadius + j * 4, &rr, 4); } }
+        float hs = suppressReaction ? 0.f : re.origHitStop; SafeWrite(re.row + Atk_HitStopTime, &hs, 4);
+        uint8_t dl = suppressReaction ? 0 : re.origDmg; SafeWrite(re.row + Atk_DmgLevel, &dl, 1);
     }
-    if (c.kineticPoiseScales) { float sa = e.origSA * mult; SafeWrite(row + Atk_SuperArmorCorr, &sa, 4); }
+}
+
+// Variation alignment (2026-08-31): a unique-moveset weapon's behaviorVariationId (SoNaF = 214)
+// has no rows for the basic judges, so what the GAME resolves for our injected AttackBehavior is
+// its own affair - possibly nothing (whiffed strikes: 0 hits all session in the 13:50 log) or a
+// row we did not edit. For the strike's duration the weapon row's behaviorVariationId is pointed
+// at the best candidate variation that actually has the judge, so the game and ERVR provably
+// agree on the row. Never done for a skill strike (the skill's judges live under the weapon's
+// own variation).
+struct WepVarEdit { bool active = false; uint8_t* row = nullptr; int orig = 0; };
+WepVarEdit g_wepVar[2];
+void ApplyWepVarRestore(int h) {
+    WepVarEdit& e = g_wepVar[h];
+    if (!e.active) return;
+    if (!(g_wepVar[1 - h].active && g_wepVar[1 - h].row == e.row)) SafeWrite(e.row + Wep_VariationId, &e.orig, 4);
+    e = WepVarEdit{};
+}
+void ApplyWepVariation(int h, uint8_t* row, int variation) {
+    if (g_layoutBad || !row) return;
+    WepVarEdit& e = g_wepVar[h];
+    if (e.active && e.row != row) ApplyWepVarRestore(h);
+    if (!e.active) {
+        const WepVarEdit& o = g_wepVar[1 - h];
+        if (o.active && o.row == row) e.orig = o.orig; else SafeRead(row + Wep_VariationId, &e.orig, 4);
+        e.active = true; e.row = row;
+    }
+    int cur = -1; SafeRead(row + Wep_VariationId, &cur, 4);
+    if (cur != variation) SafeWrite(row + Wep_VariationId, &variation, 4);
 }
 
 // Shield guard edit (EQUIP_PARAM_WEAPON_ST of the left-hand shield).
@@ -933,6 +1039,71 @@ void MenuDiag(uint8_t* player) {
     LOGD("[combat] menudiag %s", line);
 }
 
+// ---------------------------------------------------------------- enemy watcher (game thread)
+// Ground truth for "did that swing actually hit": the game's own by-distance ChrIns list gives
+// every character near the player; a frame-over-frame HP drop on any of them IS a landed hit
+// (and its size IS the damage dealt). The stamina-drop proxy this replaces misread shield
+// blocks as strike hits (13:51:38 log: the only "HIT" of the session was a 47-stamina guard
+// impact) and went blind when the behavior stamina charge was 1 (masked by regen).
+struct EnemyFrame {
+    bool  available = false;   // the list was readable this frame
+    int   dmgEvents = 0;       // enemies whose HP dropped this frame
+    int   dmgTotal = 0;        // sum of those drops
+    float nearest = 1e9f;      // distance of the nearest live non-player character
+    int   nearestNpc = 0;
+};
+struct EnemyPrev { int hp; uint32_t seenFrame; };
+std::unordered_map<uint8_t*, EnemyPrev> g_enemyPrev;
+uint32_t g_enemyFrame = 0;
+
+int ChrHp(uint8_t* chr, int* maxOut) {
+    uint8_t* mods = Deref(chr + Chr_Modules); if (!mods) return -1;
+    uint8_t* data = Deref(mods + Mod_Data); if (!data) return -1;
+    int hp = -1; SafeRead(data + Data_Hp, &hp, 4);
+    if (maxOut) { *maxOut = -1; SafeRead(data + Data_MaxHp, maxOut, 4); }
+    return hp;
+}
+
+EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c) {
+    EnemyFrame ef;
+    if (!c.combatEnemyWatch) return ef;
+    uint8_t* wcm = GameERWorldChrMan();
+    if (!wcm) return ef;
+    uint8_t *first = nullptr, *last = nullptr;
+    if (!SafeRead(wcm + WCM_ChrByDistFirst, &first, 8) || !SafeRead(wcm + WCM_ChrByDistLast, &last, 8)) return ef;
+    if (!first || !last || last < first) return ef;
+    size_t count = (size_t)(last - first) / ChrDist_Stride;
+    if (count > 512) return ef;   // torn read / not a vector
+    ef.available = true;
+    ++g_enemyFrame;
+    const float radius = c.combatEnemyWatchRadius > 0.f ? c.combatEnemyWatchRadius : 8.f;
+    for (size_t i = 0; i < count; ++i) {
+        uint8_t* chr = nullptr; float dist = 0.f;
+        if (!SafeRead(first + i * ChrDist_Stride, &chr, 8) || !chr || chr == player) continue;
+        if (!SafeRead(first + i * ChrDist_Stride + 8, &dist, 4)) continue;
+        if (dist > radius) break;   // the list is sorted by distance
+        int maxHp = -1; int hp = ChrHp(chr, &maxHp);
+        if (hp < 0 || maxHp <= 0) continue;
+        int npc = 0; SafeRead(chr + Chr_NpcId, &npc, 4);
+        if (hp > 0 && dist < ef.nearest) { ef.nearest = dist; ef.nearestNpc = npc; }
+        auto it = g_enemyPrev.find(chr);
+        if (it != g_enemyPrev.end()) {
+            const int delta = it->second.hp - hp;
+            if (delta > 0) {
+                ++ef.dmgEvents; ef.dmgTotal += delta;
+                if (c.combatDebug) LOGD("[combat] enemy npc %d (%.1f m): hp %d -> %d/%d (-%d)%s%s", npc, dist, it->second.hp, hp, maxHp, delta, anyStrikeActive ? "" : " (no strike active)", hp <= 0 ? " KILLED" : "");
+            }
+            it->second.hp = hp; it->second.seenFrame = g_enemyFrame;
+        } else g_enemyPrev[chr] = {hp, g_enemyFrame};
+    }
+    // Prune characters not seen for ~4 s of frames (despawn frees the ChrIns; a later spawn could
+    // reuse the address, so stale previous-HP entries must not linger).
+    if ((g_enemyFrame & 0xFF) == 0)
+        for (auto it = g_enemyPrev.begin(); it != g_enemyPrev.end();)
+            it = g_enemyFrame - it->second.seenFrame > 256 ? g_enemyPrev.erase(it) : std::next(it);
+    return ef;
+}
+
 void GameFrameBody(uint8_t* player) {
     g_player = player;
     const Config& c = Cfg();
@@ -962,16 +1133,15 @@ void GameFrameBody(uint8_t* player) {
     if (!ev) { static double lastWarn = 0; double n = NowSec(); if (n - lastWarn > 10) { lastWarn = n; LOGW("[combat] player CSChrTaeAnimEvent not found (vtable mismatch?)"); } RestoreAll(); EndFrameStamina(player, maxStam); return; }
 
     bool anyStrike = false;
-    // Per-strike stamina accounting: what the GAME took over the whole strike beyond our own
-    // drain (one hit = one behavior cost; several = the same swing is hitting more than once).
+    // Per-strike accounting: frames, landed hit-frames, damage dealt (enemy watcher), and what
+    // the GAME took in stamina over the whole strike beyond our own drain.
     static int s_strikeStam[2] = {-1, -1}; static uint32_t s_strikeId[2] = {0, 0}; static int s_strikeFrames[2] = {0, 0};
     static int s_strikeHits[2] = {0, 0}; static double s_hitPauseUntil[2] = {0, 0};
-    // HIT GATE. The game's own per-attack hit list does NOT deduplicate our injected attack: a
-    // blade resting in an enemy hit it every frame (measured 2026-08-25: 8-10 hits, ~170 stamina
-    // charged, in one 11-frame swing). The game charges the behavior's stamina cost exactly when a
-    // hit lands, so a one-frame stamina drop during a strike IS the hit. After a hit the attack
-    // instance pauses for KineticHitPause (the blade passes through this enemy; a second enemy
-    // later in the arc can still be hit) or, at 0, the strike ends.
+    static int s_strikeDmg[2] = {0, 0};
+    // Damage budget (continuous model): mult-slices spent on frames that actually damaged an
+    // enemy; the strike retires when the budget is gone, so one swing's total damage is bounded
+    // no matter how long the blade rests in the target or how high the frame rate.
+    static float s_spent[2] = {0, 0}; static float s_lastMult[2] = {0, 0}; static float s_qMax[2] = {0, 0};
     const double nowS = NowSec();
     UpdateTwoHand(nowS);
     SkillFrame(player, ev, nowS);
@@ -982,25 +1152,38 @@ void GameFrameBody(uint8_t* player) {
     const bool stamOff = c.kineticStaminaMode == "off", stamFull = c.kineticStaminaMode == "full";
     // Stamina goes NEGATIVE in ER, so validity is "the max is known", never the sign of the value.
     const bool stamKnown = maxStam > 0 && g_prevStam != INT_MIN;
-    const bool hitNow = stamKnown && (g_prevStam - stamAtEntry) >= (stamOff ? 1 : c.kineticHitStamina);
+    // HIT SIGNAL. Primary: a watched enemy's HP dropped this frame (ground truth - see
+    // WatchEnemies). Fallback when the list is unreadable: the one-frame stamina drop the game
+    // charges per hit - but never while the shield is up and the drop is guard-impact sized;
+    // 13:51:38 log: the session's only stamina-"HIT" was a 47-point blocked enemy attack.
+    const EnemyFrame ef = WatchEnemies(player, cmd[0].active || cmd[1].active, c);
+    bool stamHit = stamKnown && (g_prevStam - stamAtEntry) >= (stamOff ? 1 : c.kineticHitStamina);
+    if (blk.raised && stamKnown && (g_prevStam - stamAtEntry) >= c.blockImpactStamina) stamHit = false;
+    const bool hitNow = ef.available ? ef.dmgEvents > 0 : stamHit;
     static double s_lastHitHaptic[2] = {0, 0};
     for (int h = HandRight; h >= HandLeft; --h) {   // right first (main hand)
         SwingCmd& k = cmd[h];
         if (!k.active) {
             if (s_strikeStam[h] >= 0 && c.combatDebug) {
                 const int now = ReadStamina(player);
-                LOGD("[combat] strike %s #%u ended after %d frames, %d hits: game charged %d total (stamina %d -> %d)", HandName(h), s_strikeId[h], s_strikeFrames[h], s_strikeHits[h], s_strikeStam[h] - now, s_strikeStam[h], now);
+                LOGD("[combat] strike %s #%u ended after %d frames, %d hit-frames, %d damage dealt, budget spent %.2f: game charged %d stamina (stamina %d -> %d)", HandName(h), s_strikeId[h], s_strikeFrames[h], s_strikeHits[h], s_strikeDmg[h], s_spent[h], s_strikeStam[h] - now, s_strikeStam[h], now);
             }
             s_strikeStam[h] = -1;
             RestoreAtk(h); continue;
         }
-        if (k.first) { s_strikeId[h] = k.id; s_strikeFrames[h] = 0; s_strikeHits[h] = 0; s_hitPauseUntil[h] = 0; }
+        if (k.first) { s_strikeId[h] = k.id; s_strikeFrames[h] = 0; s_strikeHits[h] = 0; s_hitPauseUntil[h] = 0; s_strikeDmg[h] = 0; s_spent[h] = 0.f; s_lastMult[h] = 0.f; s_qMax[h] = 0.f; }
         ++s_strikeFrames[h];
         if (!k.first && hitNow && nowS >= s_hitPauseUntil[h]) {
             ++s_strikeHits[h];
+            s_strikeDmg[h] += ef.available ? ef.dmgTotal : 0;
+            // The damage seen this frame came from the sweep of the LAST frame's exec (and its
+            // mult); one budget slice per damaged enemy.
+            s_spent[h] += s_lastMult[h] * (float)(ef.dmgEvents > 1 ? ef.dmgEvents : 1);
             if (nowS - s_lastHitHaptic[h] > 0.1) { s_lastHitHaptic[h] = nowS; g_haptic.fetch_or(64u << h); }
-            if (stamOff) { WriteStamina(player, g_prevStam); stam = g_prevStam; }   // the game charged its behavior cost: give it back
-            if (c.combatDebug && (!c.kineticContinuous || s_strikeHits[h] == 1)) LOGD("[combat] %s strike HIT #%d (stamina %d -> %d)%s", HandName(h), s_strikeHits[h], g_prevStam, stamAtEntry, stamOff ? " refunded" : "");
+            // The game charged its behavior cost: give it back (only an actual drop - with the
+            // watcher signalling the hit there may be nothing to refund).
+            if (stamOff && stamAtEntry < g_prevStam) { WriteStamina(player, g_prevStam); stam = g_prevStam; }
+            if (c.combatDebug && (!c.kineticContinuous || s_strikeHits[h] == 1)) LOGD("[combat] %s strike HIT #%d (%d damage, stamina %d -> %d)%s", HandName(h), s_strikeHits[h], ef.dmgTotal, g_prevStam, stamAtEntry, stamOff ? " refunded" : "");
             if (!c.kineticContinuous) {
                 if (c.kineticHitPause <= 0.f) {
                     std::lock_guard<std::mutex> g(g_mtx);
@@ -1051,23 +1234,52 @@ void GameFrameBody(uint8_t* player) {
         static int s_stamAfterDrain[2];
         if (k.first) s_abSlot[h] = (s_abSlot[h] + 1) & 7;
         AttackBehaviorArgs& ab = s_ab[h][s_abSlot[h]]; CSTaeAnimEventArgs& args = s_args[h][s_abSlot[h]];
-        // Kinetic: scale the strike's attack row by quality x fatigue, refreshed every frame so the
-        // value the sweep reads at contact reflects the tip speed at contact.
+        // Kinetic: scale the strike's attack rows by quality x fatigue, refreshed every frame so
+        // the value the sweep reads at contact reflects the tip speed at contact.
         float mult = 1.f; bool scaled = false;
         if (kinetic) {
             const HandWeapon& w = g_wep[h];
             AtkResolve* r = w.valid && w.row ? ResolveAttack(h, w.variation, t.a.judgeId) : nullptr;
             const float fat = stamOff ? 1.f : Fatigue(stam, maxStam, c);
+            if (k.quality > s_qMax[h]) s_qMax[h] = k.quality;
+            if (k.qualityCommit > s_qMax[h]) s_qMax[h] = k.qualityCommit;
             if (c.kineticContinuous) {
                 // Every frame of contact is a hit, so each one is a slice of a vanilla hit sized by the
                 // tip's speed right now: nothing at rest, KineticContinuousMult at KineticRefSpeed.
                 const float ref = c.kineticRefSpeed > 0.5f ? c.kineticRefSpeed : 8.f;
                 float qv = (k.tipLive / ref) * (k.tipLive / ref); if (qv > 1.f) qv = 1.f; if (qv < 0.f) qv = 0.f;
                 mult = c.kineticContinuousMult * qv * fat * c.kineticDamageScale;
+                // Per-swing budget: the whole strike may deal at most QualityToMult(best quality)
+                // worth of vanilla-hit slices (x KineticSwingBudget); once spent, the strike
+                // retires - the touch dealt its swing's worth and the blade goes inert.
+                if (c.kineticSwingBudget > 0.f) {
+                    const float budget = c.kineticSwingBudget * QualityToMult(s_qMax[h], c) * c.kineticDamageScale;
+                    const float remain = budget - s_spent[h];
+                    if (remain <= 0.f) {
+                        if (c.combatDebug) LOGD("[combat] strike %s #%u budget spent (%.2f of %.2f): retiring", HandName(h), k.id, s_spent[h], budget);
+                        std::lock_guard<std::mutex> g(g_mtx);
+                        if (g_cmd[h].id == k.id) g_cmd[h].active = false;
+                        continue;   // next frame restores the rows and logs the strike
+                    }
+                    if (mult > remain) mult = remain;
+                }
             } else mult = QualityToMult(k.quality, c) * fat * c.kineticDamageScale;
-            if (r) { ApplyAtk(h, r->atkRow, mult); if (stamOff) ApplyBhvStamina(h, r->bhvRow, 1); scaled = true; }
+            if (r) {
+                // After the first landed hit-frame the strike keeps its damage but loses its hit
+                // reaction (dmg_level/hitstop/poise -> 0): one flinch per swing, no stunlock.
+                const bool suppress = c.kineticFlinchFirstHitOnly && s_strikeHits[h] > 0;
+                ApplyAtk(h, r, mult, suppress);
+                if (stamOff) ApplyBhvStamina(h, r, 1);
+                // A weapon whose own variation lacks this judge: point its behaviorVariationId at
+                // the candidate that has it for the strike's duration, so the game's own resolve
+                // lands on the rows edited above instead of whatever its fallback finds (or fails
+                // to find - the 13:50 session's whiffed strikes).
+                if (c.kineticAlignVariation && !skillStrike && r->resolvedVar != w.variation) ApplyWepVariation(h, w.row, r->resolvedVar);
+                scaled = true;
+            }
+            s_lastMult[h] = scaled ? mult : 1.f;
             g_status.lastQuality = k.quality; g_status.lastMult = scaled ? mult : 1.f;
-        }
+        } else s_lastMult[h] = 1.f;
         if (k.first) {
             ab = t.a;
             ab.source = h == HandLeft ? 2 : 1;                       // always the swinging hand's weapon
@@ -1090,8 +1302,12 @@ void GameFrameBody(uint8_t* player) {
             if (drain > 0 && stam > 0) { stam -= drain; if (stam < 0) stam = 0; WriteStamina(player, stam); }
             s_stamAfterDrain[h] = stam; s_strikeStam[h] = stam;
             if (c.combatDebug) {
-                if (scaled) LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) mult %.2f drain %d stamina %d/%d", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, mult, drain, stam, maxStam);
-                else LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) VANILLA DAMAGE (no attack row to scale) drain %d stamina %d/%d", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, drain, stam, maxStam);
+                char nearBuf[64];
+                if (!ef.available) snprintf(nearBuf, sizeof(nearBuf), "watcher off");
+                else if (ef.nearest > 1e8f) snprintf(nearBuf, sizeof(nearBuf), "no enemy in %.0f m", c.combatEnemyWatchRadius);
+                else snprintf(nearBuf, sizeof(nearBuf), "nearest npc %d at %.1f m", ef.nearestNpc, ef.nearest);
+                if (scaled) LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) mult %.2f drain %d stamina %d/%d | %s", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, mult, drain, stam, maxStam, nearBuf);
+                else LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) VANILLA DAMAGE (no attack row to scale) drain %d stamina %d/%d | %s", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, drain, stam, maxStam, nearBuf);
             }
         } else s_time[h] = (float)(NowSec() - k.start);
         args.isFirstExecution = k.first ? 1 : 0;

@@ -1659,7 +1659,7 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
     DebugKeysHandRotX(&handRotX);   // Numpad 6/9 live calibration wins while active
     Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
     bool any = false;
-    Vec3 tp[2]; Quat tq[2]; Vec3 tcf[2], tcu[2]; bool tok[2] = {false, false};
+    Vec3 tp[2]; Quat tq[2]; Quat tcq[2]; Vec3 tcf[2], tcu[2]; bool tok[2] = {false, false};
     for (int h = 0; h < 2; ++h) {
         if (!f.handValid[h]) continue;
         Quat cq = (baseQ * f.handQ[h] * calib).Normalized();          // controller orientation in game world
@@ -1668,15 +1668,23 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
         if (g_skel.handAxesOk[h]) q = Quat::MapPairs(g_skel.handFwd[h], g_skel.handThumb[h], cf, cu);   // hand-local -> world
         Vec3 p = f.anchor + baseQ.Rotate(f.handP[h] * c.handScale) - cf * c.handBackOffset;
         if (c.handOrigin == "head") p = p + headOff;   // hands are head-relative: re-add where the view actually is
-        tp[h] = p; tq[h] = q; tcf[h] = cf; tcu[h] = cu; tok[h] = true;
+        tp[h] = p; tq[h] = q; tcq[h] = cq; tcf[h] = cf; tcu[h] = cu; tok[h] = true;
     }
     // Two-handing: the free hand rides the weapon hand's hilt where it took hold - toward the pommel,
     // i.e. down the controller's handle (-up) or back along its aim (-forward) - so it follows the
-    // (inertial, lagging) weapon instead of drifting off the shaft.
+    // (inertial, lagging) weapon instead of drifting off the shaft. It also takes the WEAPON
+    // controller's orientation (mapped through its own hand's bone axes, so a left hand still grips
+    // like a left hand) instead of its own free-floating controller, and sits TwoHandPinSideOffset m
+    // off the hilt axis so the wrist clears the shaft instead of skewering it.
     {
         int pin = -1, wep = -1; float along = 0.f; bool handle = true;
-        if (CombatTwoHandPin(&pin, &wep, &along, &handle) && pin >= 0 && wep >= 0 && tok[pin] && tok[wep])
-            tp[pin] = tp[wep] + (handle ? tcu[wep] : tcf[wep]) * -along;
+        if (CombatTwoHandPin(&pin, &wep, &along, &handle) && pin >= 0 && wep >= 0 && tok[pin] && tok[wep]) {
+            Vec3 axis = handle ? tcu[wep] : tcf[wep];                            // up the blade; pommel = -axis
+            Vec3 side = (handle ? tcf[wep] : tcu[wep]).Cross(axis).Normalized();   // lateral, perpendicular to the hilt (sign verified in-game 2026-08-31)
+            tp[pin] = tp[wep] + axis * -along + side * c.twoHandPinSideOffset;
+            if (c.twoHandPinOrient)
+                tq[pin] = g_skel.handAxesOk[pin] ? Quat::MapPairs(g_skel.handFwd[pin], g_skel.handThumb[pin], tcf[wep], tcu[wep]) : tcq[wep];
+        }
     }
     for (int h = 0; h < 2; ++h) {
         if (!tok[h]) continue;
@@ -2192,6 +2200,8 @@ int GameERPlayerLevel() {
     int level = -1; SafeRead(pgd + 0x68, &level, 4);
     return level;
 }
+
+uint8_t* GameERWorldChrMan() { return WorldChrMan(); }
 
 // Full stereo, pass 2: write the OTHER eye's camera into every slot the real pass wrote.
 // Called by the frame pump between the two engine passes, on the main-loop thread, while

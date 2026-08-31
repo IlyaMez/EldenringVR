@@ -116,7 +116,7 @@ void VirtualPadUpdate(double now) {
         // Keep watching the game's menu state without controllers too (same thread, a few
         // reads): the readers earn trust as menus open and close, and unattended runs -
         // no headset, autopilot tapping START - can verify them from the [menu] log lines.
-        if (c.menuNavEnabled && GameERPlayerActive()) CombatSetMenuOpen(GameMenuOpen(now) == 1);
+        if (c.menuNavEnabled && GameERPlayerActive()) CombatSetMenuOpen(GameMenuOpen(now) == 1 || GameERForeignCamActive());
         std::lock_guard<std::mutex> g(g_mtx); g_pad = pad; return;
     }
     pad.active = true;
@@ -214,7 +214,15 @@ void VirtualPadUpdate(double now) {
     // Combat must stand down in menus even when the nav-mode guess is wrong: publish the union of
     // the game's own menu state and the nav mode (manual toggles included). Combat gates its swing
     // detection, injection, guard hold and chords on this directly (see CombatSetMenuOpen).
-    CombatSetMenuOpen(g_menuMode || gameMenu == 1);
+    // The MAP is invisible to both menu readers (menuman state 00, hud raw 0 the whole time it is
+    // up - 2026-08-31 log), so combat stayed live there and swings kept injecting into the world
+    // sim behind the map. The foreign-camera detector covers exactly that hole - it arms within
+    // ~300 ms of the map (or a cutscene) taking the view and gameplay blips never arm it. anyMenu
+    // is the full union; the stick shaping below keys off it too, because the map reads BOTH
+    // sticks raw (left pans, RIGHT ZOOMS - 2026-08-31 "can navigate but not zoom": ervrTurn was
+    // consuming the right stick for view yaw with the world sim still live behind the map).
+    const bool anyMenu = g_menuMode || gameMenu == 1 || GameERForeignCamActive();
+    CombatSetMenuOpen(anyMenu);
 
     // Left stick click: tap = LS (crouch); hold + tilt = D-pad (quick slots).
     bool dpadMode = !g_menuMode && c.leftGripPlusStickIsDpad && lThumbDown;
@@ -274,7 +282,7 @@ void VirtualPadUpdate(double now) {
         float nx = lx * cs + ly * sn, ny = -lx * sn + ly * cs;
         lx = nx; ly = ny;
     };
-    if (mb.active && !g_menuMode) {   // first person only: in third person the game steers its own camera
+    if (mb.active && !anyMenu) {   // first person only: in third person the game steers its own camera
         // VR-frame Yaw() is positive to the LEFT (0 = -Z); the game's yaw is positive to the right.
         float want = mb.viewYaw;                                             // default: leave the stick alone
         if (c.moveForward == "hand" && tr.hand[HandLeft].valid) want = mb.camYaw - tr.hand[HandLeft].rot.Yaw();
@@ -282,14 +290,14 @@ void VirtualPadUpdate(double now) {
         else if (c.moveForward == "camera") want = mb.camYaw;
         else if (mb.headValid) want = mb.camYaw + mb.headYaw;               // head (and hand without a controller)
         rotateStick(WrapPi(want - mb.viewYaw));
-    } else if (c.moveForward == "hand" && tr.hand[HandLeft].valid && tr.head.valid && !g_menuMode) {
+    } else if (c.moveForward == "hand" && tr.hand[HandLeft].valid && tr.head.valid && !anyMenu) {
         // Game-owned view yaw (default): forward is where you look; hand-relative = rotate by (controller - head) yaw.
         rotateStick(WrapPi(tr.hand[HandLeft].rot.Yaw() - tr.head.rot.Yaw()));
     }
 
     // ---- turning ---------------------------------------------------------------
     // When ERVR owns the view yaw the turn stick drives *our* yaw, not the game's camera.
-    bool ervrTurn = mb.active && c.cameraTurnErvr && !g_menuMode;   // menus keep the stock right stick
+    bool ervrTurn = mb.active && c.cameraTurnErvr && !anyMenu;   // menus AND the map keep the stock right stick (map zoom)
     if (ervrTurn) {
         static double s_lastTurn = 0;
         float dt = (float)Clamp((float)(now - s_lastTurn), 0.f, 0.1f);
@@ -306,7 +314,7 @@ void VirtualPadUpdate(double now) {
         else GameERAddBodyYaw(Deg2Rad(delta));   // body only: the view stays where it is
         if (!mb.lockedOn) rx = 0.f;   // locked on the right stick still switches targets; otherwise it is ours
         ry = 0.f;                     // pitch comes from the headset
-    } else if (c.snapTurn) {
+    } else if (c.snapTurn && !anyMenu) {
         // Snap turn without yaw ownership: convert right-stick X into short full-deflection pulses.
         if (std::fabs(rx) > 0.7f) {
             if (!g_snapActive || now - g_lastSnap >= c.snapTurnRepeatSeconds) { g_lastSnap = now; g_snapActive = true; }
@@ -315,7 +323,7 @@ void VirtualPadUpdate(double now) {
     } else {
         rx *= c.rightStickSensitivity; ry *= c.rightStickSensitivity;
     }
-    if (mb.active && c.moveRelativeToCamera && !g_menuMode) {
+    if (mb.active && c.moveRelativeToCamera && !anyMenu) {
         float d = WrapPi(mb.camYaw - mb.chrYaw);
         float cs = std::cos(d), sn = std::sin(d);
         float nx = lx * cs + ly * sn, ny = -lx * sn + ly * cs;

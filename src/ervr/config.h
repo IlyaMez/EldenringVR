@@ -301,6 +301,14 @@ struct Config {
     float kineticFatigueFloor = 0.5f;     // multiplier at 0 stamina
     bool  kineticPoiseScales = true;      // scale poise damage too
     bool  kineticStaminaDamageScales = true;   // scale stamina damage dealt to guarding enemies too
+    // 2026-08-31 consistency pass: enemy-HP hit detection, per-swing damage budget, one flinch
+    // per swing, aligned behavior variation, fattened hit capsules.
+    bool  combatEnemyWatch = true;        // read the game's by-distance ChrIns list: HP drops = landed hits (ground truth)
+    float combatEnemyWatchRadius = 8.f;   // m around the player worth watching
+    bool  kineticAlignVariation = true;   // during a strike point the weapon's behaviorVariationId at the variation whose rows we edit
+    float kineticSwingBudget = 1.0f;      // max damage per swing, in vanilla-hit units x QualityToMult (0 = unlimited)
+    bool  kineticFlinchFirstHitOnly = true;   // after a strike's first landed hit: no hit reaction / hitstop / poise (no stunlock)
+    float kineticHitRadiusScale = 1.3f;   // x the attack rows' hit capsule radii during a strike (a touch should touch)
     // Shields: left-hand shield pose vs the head -> block quality -> guard held + shield params scaled.
     bool  blockEnabled = true;
     std::string guardButton = "LB";
@@ -325,6 +333,8 @@ struct Config {
     float twoHandGrabMin = -0.15f;        // m along the hilt axis from the weapon hand's controller, positive = toward the pommel (where the second hand sits)
     float twoHandGrabMax = 0.45f;         // ... negative = up toward the blade
     bool  twoHandPinHand = true;          // while two-handing the free hand's arm rides the weapon shaft (follows the inertial weapon)
+    bool  twoHandPinOrient = true;        // ...and takes the weapon controller's orientation too, gripping the hilt like the main hand (else it keeps its own controller's free orientation)
+    float twoHandPinSideOffset = 0.03f;   // m the pinned hand sits off the hilt axis (perpendicular, so the wrist clears the shaft); negate to flip sides
     int   twoHandLightJudgeId = 200, twoHandHeavyJudgeId = -1;   // two-handed attack rows (R1 2H = 200 learned 2026-08-25; -1 = learn in auto mode, else the one-handed rows)
     // Skill (Ash of War) while two-handed: TwoHandSkillButton fires it. "effect" replays the TAE events the
     // skill's animation carries (AddSpEffect_WeaponArts 331, AddSpEffect 67/66, BulletBehavior 2, FFX) without
