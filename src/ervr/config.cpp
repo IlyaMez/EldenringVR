@@ -157,6 +157,7 @@ void Config::Load(const std::wstring& path) {
     stickGlitchFilter = GetB(ini, L"Sticks", L"GlitchFilter", stickGlitchFilter);
     stickGlitchSweepDegPerSec = GetF(ini, L"Sticks", L"GlitchSweepDegPerSec", stickGlitchSweepDegPerSec);
     stickGlitchRisePerSec = GetF(ini, L"Sticks", L"GlitchRisePerSec", stickGlitchRisePerSec);
+    stickGlitchFallPerSec = GetF(ini, L"Sticks", L"GlitchFallPerSec", stickGlitchFallPerSec);
 
     gesturesEnabled  = GetB(ini, L"Gestures", L"Enabled", gesturesEnabled);
     lightAttackSpeed = GetF(ini, L"Gestures", L"LightAttackSpeed", lightAttackSpeed);
@@ -230,6 +231,11 @@ void Config::Load(const std::wstring& path) {
     kineticInertia = GetB(ini, L"Combat", L"Inertia", kineticInertia);
     inertiaAngAccel = GetF(ini, L"Combat", L"InertiaAngAccel", inertiaAngAccel);
     inertiaSpringHz = GetF(ini, L"Combat", L"InertiaSpringHz", inertiaSpringHz);
+    inertiaNoOverrun = GetB(ini, L"Combat", L"InertiaNoOverrun", inertiaNoOverrun);
+    inertiaMaxLag = GetF(ini, L"Combat", L"InertiaMaxLag", inertiaMaxLag);
+    inertiaMaxLagAngle = GetF(ini, L"Combat", L"InertiaMaxLagAngle", inertiaMaxLagAngle);
+    if (inertiaMaxLag < 0.05f) inertiaMaxLag = 0.05f;
+    if (inertiaMaxLagAngle < 0.1f) inertiaMaxLagAngle = 0.1f; if (inertiaMaxLagAngle > 2.9f) inertiaMaxLagAngle = 2.9f;
     kineticArmPerWeight = GetF(ini, L"Combat", L"KineticArmPerWeight", kineticArmPerWeight);
     kineticStaminaScale = GetF(ini, L"Combat", L"KineticStaminaScale", kineticStaminaScale);
     kineticStaminaPerStrike = GetF(ini, L"Combat", L"KineticStaminaPerStrike", kineticStaminaPerStrike);
@@ -333,6 +339,7 @@ void Config::Load(const std::wstring& path) {
     bodyFollowMaxHorizontal = GetF(ini, L"FirstPerson", L"BodyFollowMaxHorizontal", bodyFollowMaxHorizontal);
     bodyFollowMaxDown = GetF(ini, L"FirstPerson", L"BodyFollowMaxDown", bodyFollowMaxDown);
     bodyFollowMaxUp = GetF(ini, L"FirstPerson", L"BodyFollowMaxUp", bodyFollowMaxUp);
+    bodyBackOffset = GetF(ini, L"FirstPerson", L"BodyBackOffset", bodyBackOffset);
     boneTorso = GetS(ini, L"FirstPerson", L"BoneTorso", boneTorso);
     boneHead = GetS(ini, L"FirstPerson", L"BoneHead", boneHead);
     boneLUpperArm = GetS(ini, L"FirstPerson", L"BoneLeftUpperArm", boneLUpperArm);

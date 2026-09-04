@@ -143,7 +143,8 @@ struct Config {
     float rightStickSensitivity = 1.0f;
     bool  stickGlitchFilter = true;         // physicality filter on the runtime's stick samples (2026-08-25 Quest Pro / VDXR left-stick corruption)
     float stickGlitchSweepDegPerSec = 720.f;// fastest a real thumb sweeps the stick around the rim; above half deflection the direction slews at this rate
-    float stickGlitchRisePerSec = 25.f;     // fastest a real thumb pushes from idle to full deflection (25/s = 40 ms); releases are instant
+    float stickGlitchRisePerSec = 25.f;     // fastest a real thumb pushes from idle to full deflection (25/s = 40 ms)
+    float stickGlitchFallPerSec = 30.f;     // fastest a real thumb releases (30/s = 33 ms full-to-idle); 0 = instant (pre-2026-08-31). Holds a REAL tilt through the runtime's dropout-to-zero corruption samples, which the instant fall turned into a permanently ~0.1 (dead) stick
 
     // [Gestures]
     bool  gesturesEnabled = true;
@@ -232,6 +233,7 @@ struct Config {
     std::string bodyAnchor = "head";      // head = put the head bone at the eye | root = shift by the headset offset only
     float bodyFollowMaxHorizontal = 0.6f; // m clamp for the skeleton shift (character root does not move)
     float bodyFollowMaxDown = 0.6f, bodyFollowMaxUp = 0.25f;
+    float bodyBackOffset = 0.08f;         // m: park the rig this far behind the camera (along its own facing) so the chest/pauldrons stay out of the bottom of the view
     std::string boneTorso = "Spine", boneHead = "Head";
     std::string boneLUpperArm = "L_UpperArm", boneLForearm = "L_Forearm", boneLHand = "L_Hand";
     std::string boneRUpperArm = "R_UpperArm", boneRForearm = "R_Forearm", boneRHand = "R_Hand";
@@ -294,6 +296,9 @@ struct Config {
     bool  kineticInertia = true;
     float inertiaAngAccel = 300.f;        // rad/s^2 at weight 0
     float inertiaSpringHz = 8.f;          // stiffness of the chase near the target (higher = tighter tracking)
+    bool  inertiaNoOverrun = true;        // the weapon never moves toward the hand faster than the hand (no catch-up whip)
+    float inertiaMaxLag = 0.5f;           // m the hand can get ahead of the weapon before dragging it
+    float inertiaMaxLagAngle = 2.0f;      // rad likewise (must stay < pi: the rotation error flips past 180 degrees)
     float kineticArmPerWeight = 0.012f;   // s of extra commit delay per weight unit (startup grows with weight)
     float kineticStaminaScale = 1.0f;     // x the game's own BehaviorParam stamina cost per strike (x 0.5..1 by quality)
     float kineticStaminaPerStrike = 8.f;  // fallback flat drain when the behavior row is unknown, x(1 + weight/12)

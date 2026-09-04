@@ -206,6 +206,12 @@ void VirtualPadUpdate(double now) {
             g_menuMode = g_menuManual;
         }
     }
+    // A takeover camera (map above all, cutscenes too) means the screen on top navigates with
+    // ANALOG sticks - the map pans with the left and zooms with the right - even when the menu
+    // readers still say "menu open" (the map entered through the pause menu keeps menuman's
+    // open bit set, and 14:39 on 2026-08-31 shows menu-nav D-pad mode hijacking the pan there).
+    const bool mapCam = GameERForeignCamActive();
+    if (mapCam && g_menuMode) g_menuMode = false;
     if (g_menuMode != wasMenu) {
         LOGI("[menu] navigation mode %s", g_menuMode ? "ON (left stick = D-pad, gestures muted)" : "off");
         if (c.menuNavHaptics) { Haptic(HandLeft, g_menuMode ? 0.6f : 0.3f, now, g_menuMode ? 0.12 : 0.06); }
@@ -221,7 +227,7 @@ void VirtualPadUpdate(double now) {
     // is the full union; the stick shaping below keys off it too, because the map reads BOTH
     // sticks raw (left pans, RIGHT ZOOMS - 2026-08-31 "can navigate but not zoom": ervrTurn was
     // consuming the right stick for view yaw with the world sim still live behind the map).
-    const bool anyMenu = g_menuMode || gameMenu == 1 || GameERForeignCamActive();
+    const bool anyMenu = g_menuMode || gameMenu == 1 || mapCam;
     CombatSetMenuOpen(anyMenu);
 
     // Left stick click: tap = LS (crouch); hold + tilt = D-pad (quick slots).

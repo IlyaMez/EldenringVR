@@ -1690,6 +1690,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         float handSpd = 0.f;
         float tip = allowed ? TipSpeed(p, reach, &handSpd) : 0.f;
         const float weight = g_wepWeight[h].load();
+        const float rawTip = tip;   // the controller's own tip speed (the inertial weapon's replaces it below)
         // With the inertial arm (game_er) the WEAPON the game renders and sweeps lags the
         // controller by its weight; its motion is the truth for speed and arc, so damage follows
         // what you see hit. The worker-side virtual-speed model is the fallback without it.
@@ -1744,7 +1745,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                 }
                 StartSwing(h, slot, now, q, s.arc, vq); s.st = HandSM::Swinging; s.t = now;
                 g_haptic.fetch_or(1u << h);
-                if (c.combatDebug) LOGD("[combat] %s swing start: %s (tip %.2f m/s, virtual %.2f m/s, hand %.2f m/s, arc %.2f/%.2f m, weight %.1f, quality %.2f)", HandName(h), SlotName(slot), s.peak, s.vVirtPeak, handSpd, s.arc, ArcRefFor(weight, c), weight, q);
+                if (c.combatDebug) LOGD("[combat] %s swing start: %s (tip %.2f m/s, controller tip %.2f m/s, virtual %.2f m/s, hand %.2f m/s, arc %.2f/%.2f m, weight %.1f, quality %.2f)", HandName(h), SlotName(slot), s.peak, rawTip, s.vVirtPeak, handSpd, s.arc, ArcRefFor(weight, c), weight, q);
             }
             break; }
         case HandSM::Swinging: {

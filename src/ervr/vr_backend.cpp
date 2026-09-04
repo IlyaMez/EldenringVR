@@ -60,8 +60,17 @@ void FilterStickGlitches(VRInputState& in, double now) {
         if (dt <= 0.f || dt > 0.05f) dt = 0.004f;   // first call / hitch: assume one 250 Hz poll
         float outMag = m;
         if (m > am) outMag = std::min(m, am + c.stickGlitchRisePerSec * dt);
+        // Fall is capped too (2026-08-31): the corruption also DROPS a held tilt to zero for
+        // single samples, and with an instant fall each dropout restarted the rise cap from
+        // idle - a real sustained tilt came out as a permanent ~0.1, i.e. a dead stick (the
+        // right stick's "can't zoom the map"). A spike from idle still dies: the rise cap
+        // keeps it under ~0.1, so there is nothing high for the fall cap to hold on to.
+        else if (c.stickGlitchFallPerSec > 0.f) outMag = std::max(m, am - c.stickGlitchFallPerSec * dt);
         float x, y;
-        if (m > 0.5f && am > 0.5f) {
+        if (m <= 1e-6f && outMag > 1e-6f && am > 1e-6f) {
+            // raw dropped out but the held magnitude survives: keep the last direction
+            x = f.ax / am * outMag; y = f.ay / am * outMag;
+        } else if (m > 0.5f && am > 0.5f) {
             const float cur = std::atan2(f.ay, f.ax), tgt = std::atan2(ry, rx);
             float d = tgt - cur;
             while (d > 3.14159265f) d -= 6.2831853f;

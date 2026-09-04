@@ -460,7 +460,11 @@ Skeleton g_skel;
 // still for a second, so stance changes (idle, crouch, sitting) still come through as discrete poses.
 std::vector<HkQsTransform> g_poseTemplate;
 Vec3 g_statPos{}; double g_statSince = 0; double g_templLastCapture = 0;
+// Stance re-capture settle guard: candidate snapshot of a pose that differs from the template, only promoted to
+// template once it has held still for a while (see UpdateArms) - a transient animation must never become the template.
+std::vector<HkQsTransform> g_templCand; double g_templCandAt = 0, g_templCheckAt = 0;
 bool CaptureTemplate(uint8_t* chr, const char* why);
+bool OursBone(int i);
 namespace posescan { void Disarm(const char* why); void MarkPhase(int bit); void Drive(void* pose, size_t bytes); }
 // Per-root-bone bookkeeping for the BodyFollowsHead shift, so applying it twice in a frame is a no-op.
 std::vector<Vec3> g_rootShiftBase, g_rootShiftWritten;
@@ -533,6 +537,7 @@ bool BuildSkeleton(uint8_t* chr) {
     ResetRecenter();   // new character / area load: start centred on wherever you are standing now
     g_anchorSmInit = false; g_headRestHeight = -1.f;
     g_poseTemplate.clear(); g_statPos = {}; g_statSince = 0; g_templLastCapture = 0;
+    g_templCand.clear(); g_templCandAt = 0; g_templCheckAt = 0;
     posescan::Disarm("skeleton rebuild");   // the watched buffer may be gone
     // Pose-fight probe bones: right arm chain + torso, plus twist helpers if the model has them.
     g_probeBones.clear(); g_probeNames.clear();
@@ -768,12 +773,41 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now) {
         const float w0 = 6.2831853f * (c.inertiaSpringHz > 0.5f ? c.inertiaSpringHz : 8.f);
         const float k = w0 * w0, d = 2.f * w0;
         // Braking is allowed at twice the cap: stopping a swing is easier than making one.
+        // Drag: the hand can only get so far ahead of a weapon it is holding. Beyond that the weapon
+        // is pulled along at the hand's speed (also keeps the rotation error on the short side of 180
+        // degrees, where the shortest-way rotvec would otherwise flip and send the weapon the long
+        // way round).
+        {
+            Vec3 g = p - s.pos; float gl = g.Length();
+            if (gl > c.inertiaMaxLag) { s.pos = p - g * (c.inertiaMaxLag / gl); s.vel = vT; }
+            Vec3 e = QuatToRotVec((q * s.q.Conj()).Normalized()); float el = e.Length();
+            if (el > c.inertiaMaxLagAngle) { s.q = (Quat::AxisAngle(e * (1.f / el), el - c.inertiaMaxLagAngle) * s.q).Normalized(); s.angVel = wT; }
+        }
         Vec3 a = (p - s.pos) * k + (vT - s.vel) * d;
         { float m = a.Length(), lim = a.Dot(s.vel) < 0 ? 2.f * aMax : aMax; if (m > lim) a = a * (lim / m); }
-        s.vel = s.vel + a * dt; s.pos = s.pos + s.vel * dt;
+        Vec3 velN = s.vel + a * dt;
         Vec3 al = QuatToRotVec((q * s.q.Conj()).Normalized()) * k + (wT - s.angVel) * d;
         { float m = al.Length(), lim = al.Dot(s.angVel) < 0 ? 2.f * alMax : alMax; if (m > lim) al = al * (lim / m); }
-        s.angVel = s.angVel + al * dt;
+        Vec3 angN = s.angVel + al * dt;
+        // The capped spring on its own overshoots: braking is capped too, so a lagging weapon keeps
+        // closing on the hand at full speed and whips 30-45 degrees past where the hand stopped (a
+        // mid-weight weapon even out-runs the hand by ~30% catching up). Two clamps on the velocity
+        // component toward the hand fix that: (1) approach no faster than 2x-cap braking can still
+        // stop within the gap (no overshoot: the lagging weapon follows through to the hand and stops
+        // there); (2) InertiaNoOverrun: never faster than the hand itself is moving that way, plus a
+        // small catch-up allowance so a resting hand's weapon still settles onto it.
+        auto clamp = [&](Vec3& vN, const Vec3& vOld, const Vec3& vHand, const Vec3& gap, float brake, float allow) {
+            float gl = gap.Length(); if (gl < 1e-5f) return;
+            Vec3 dir = gap * (1.f / gl);
+            float along = vN.Dot(dir), hand = vHand.Dot(dir);
+            float cap = hand + 0.9f * std::sqrt(2.f * brake * gl);
+            if (c.inertiaNoOverrun) { float run = (hand > vOld.Dot(dir) ? hand : vOld.Dot(dir)) + allow; if (run < cap) cap = run; }
+            if (along > cap) vN = vN - dir * (along - cap);
+        };
+        clamp(velN, s.vel, vT, p - s.pos, 2.f * aMax, 0.5f);
+        clamp(angN, s.angVel, wT, QuatToRotVec((q * s.q.Conj()).Normalized()), 2.f * alMax, 2.f);
+        s.vel = velN; s.pos = s.pos + s.vel * dt;
+        s.angVel = angN;
         float wm = s.angVel.Length();
         if (wm > 1e-6f) s.q = (Quat::AxisAngle(s.angVel * (1.f / wm), wm * dt) * s.q).Normalized();
         p = s.pos; q = s.q;
@@ -996,7 +1030,16 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
         f.headValid = true;
         f.headQ = hq; f.headP = hp; f.headRel = hp - psOrigin;
         f.eye = f.anchor + Quat::YawQ(f.baseYaw).Rotate(f.headRel);
-        { Vec3 hf = hq.Rotate({0, 0, 1}); f.headYaw = std::atan2(hf.x, hf.z); }
+        // Pitch-robust head yaw: atan2 of the forward vector alone collapses when you pitch the head toward
+        // straight down/up (the horizontal projection shrinks to noise and the yaw swings wildly - with
+        // BodyYaw=head that spun the whole rig while you looked at your own body). Blend in the head's up
+        // vector scaled by -forward.y: level it contributes nothing, pitched down the up vector's horizontal
+        // part points where the face points (pitched up, its negation does), so the sum stays a full-length
+        // facing vector at every pitch.
+        {
+            Vec3 hf = hq.Rotate({0, 0, 1}), hu = hq.Rotate({0, 1, 0});
+            f.headYaw = std::atan2(hf.x - hf.y * hu.x, hf.z - hf.y * hu.z);
+        }
         g_headYaw.store(f.headYaw); g_headYawValid.store(true);
         // Body: chase the head yaw (default) so shoulders/torso follow your real body; locked on, the game aims it.
         float want;
@@ -1423,6 +1466,13 @@ void CalibrateShoulderFlip(const Quat& rootQ, const WorldPose& w) {
     if (was != g_shoulderFlip) LOGI("[fp] shoulder line reads %s the root facing (%.0f deg off); %s", g_shoulderFlip ? "opposite to" : "along", Rad2Deg(d), g_shoulderFlip ? "flipping it" : "using it as is");
 }
 
+// Bones PoseMode=vr writes every frame: the root bones (yawed to BodyYaw + follow shift), the torso twist and
+// the whole arm chain. Everything else in the buffer is the game's own animation output.
+bool OursBone(int i) {
+    if (i == g_skel.torso || i == g_skel.L_ua || i == g_skel.L_fa || i == g_skel.L_hand ||
+        i == g_skel.R_ua || i == g_skel.R_fa || i == g_skel.R_hand) return true;
+    int p = g_skel.parents[i]; return p < 0 || p >= i;
+}
 // Snapshot the animation's current pose as the PoseMode=vr template. Only ever called when the pose buffer
 // holds the game's own output (skeleton build, or a fresh buffer while standing still), never our writes.
 bool CaptureTemplate(uint8_t* chr, const char* why) {
@@ -1430,6 +1480,14 @@ bool CaptureTemplate(uint8_t* chr, const char* why) {
     HkQsTransform* pose = g_skel.LivePose(); if (!pose) return false;
     std::vector<HkQsTransform> t(g_skel.boneCount);
     if (!SafeRead(pose, t.data(), sizeof(HkQsTransform) * g_skel.boneCount)) return false;
+    // Re-capture: keep the bones WE write from the previous template. The game's layered animation does not
+    // reliably rewrite the root bones between our last write and this read, so capturing them takes our own
+    // output - body yaw and follow shift baked into the template, the shift then applied a second time on top,
+    // and the rig parks half a shift off to one side of the camera until the next capture ("camera on the
+    // shoulder after a snapback"). The bones we write are re-derived every frame anyway, so keeping the old
+    // template's values loses nothing.
+    if ((int)g_poseTemplate.size() == g_skel.boneCount)
+        for (int i = 0; i < g_skel.boneCount; ++i) if (OursBone(i)) t[i] = g_poseTemplate[i];
     g_poseTemplate = std::move(t);
     Vec3 rp; Quat rq;   // shoulder flip must be calibrated on the game's own (facing-aligned) pose
     if (PlayerRoot(chr, rp, rq)) { WorldPose w; WorldFromLocal(g_skel, g_poseTemplate, rp, rq, w); CalibrateShoulderFlip(rq, w); }
@@ -1453,11 +1511,14 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
     std::vector<HkQsTransform> local;
     WorldPose w; if (!ComputeWorld(g_skel, pose, rootPos, rootQ, w, local)) return;
     // Pose-fight probe: was our last R_UpperArm write replaced by the game before this call?
+    // Doubles as the buffer-freshness answer: the game's full-body evaluation rewrites R_UpperArm every tick,
+    // so ours-still-there means the whole buffer is our own echo, not the animation's output.
+    bool poseForeign = false;
     int probe = g_skel.R_ua;
     if (probe >= 0 && g_probeLastPoint >= 0) {
         const HkQsTransform& t = local[probe];
         float d = std::fabs(t.q[0] - g_probeQ.x) + std::fabs(t.q[1] - g_probeQ.y) + std::fabs(t.q[2] - g_probeQ.z) + std::fabs(t.q[3] - g_probeQ.w);
-        if (d > 1e-3f) InterlockedIncrement(&g_poseForeign[g_probeLastPoint]);
+        if (d > 1e-3f) { poseForeign = true; InterlockedIncrement(&g_poseForeign[g_probeLastPoint]); }
         // Per-bone magnitude: how hard does the foreign layer move each tracked bone?
         for (size_t k = 0; k < g_probeBones.size(); ++k) {
             if (!g_probeHas[k]) continue;
@@ -1495,21 +1556,34 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
         // (idle after a run capture, crouch, sitting). "The animation's own" = the buffer differs from the
         // template on bones we never write; comparing bones we do write (roots, torso, arms) would see our own
         // previous output as "fresh animation" and bake our body-yaw rotation into the template (spinning rig).
+        //
+        // Settle guard: a stance is a pose the animation HOLDS. A transient with the root planted - an attack
+        // swing, an item pickup, an idle fidget - also differs from the template, and capturing it mid-motion
+        // is the "body drops into a crouch, snaps back seconds later" bug. So a differing pose first becomes a
+        // candidate, and only a candidate that is still the same pose 0.4 s later is captured; anything still
+        // moving keeps replacing its own candidate and never lands.
+        // The check only runs on a game-fresh buffer (poseForeign): on an echo frame the non-ours bones read
+        // back as the template we wrote, which looked like "stance returned to normal" and kept clearing the
+        // candidate a real stance change had just planted.
         double nowT = NowSec();
-        auto oursBone = [&](int i) {
-            if (i == g_skel.torso || i == g_skel.L_ua || i == g_skel.L_fa || i == g_skel.L_hand ||
-                i == g_skel.R_ua || i == g_skel.R_fa || i == g_skel.R_hand) return true;
-            int p = g_skel.parents[i]; return p < 0 || p >= i;   // root bones: we yaw them to BodyYaw
-        };
-        if ((f.root - g_statPos).Length() > 0.03f) { g_statPos = f.root; g_statSince = nowT; }
-        else if (nowT - g_statSince > 1.0 && nowT - g_templLastCapture > 3.0) {
-            float diff = 0.f;
+        if ((f.root - g_statPos).Length() > 0.03f) { g_statPos = f.root; g_statSince = nowT; g_templCandAt = 0; }
+        else if (poseForeign && nowT - g_statSince > 1.0 && nowT - g_templLastCapture > 3.0 && nowT - g_templCheckAt > 0.25) {
+            g_templCheckAt = nowT;
+            bool haveCand = g_templCandAt > 0 && (int)g_templCand.size() == g_skel.boneCount;
+            float diff = 0.f, cand = 0.f;
             for (int i = 0; i < g_skel.boneCount; ++i) {
-                if (oursBone(i)) continue;
-                for (int k = 0; k < 4; ++k) diff += std::fabs(local[i].q[k] - g_poseTemplate[i].q[k]);
+                if (OursBone(i)) continue;
+                for (int k = 0; k < 4; ++k) {
+                    diff += std::fabs(local[i].q[k] - g_poseTemplate[i].q[k]);
+                    if (haveCand) cand += std::fabs(local[i].q[k] - g_templCand[i].q[k]);
+                }
             }
-            g_templLastCapture = nowT;
-            if (diff > 0.2f) CaptureTemplate(player, "standing still");
+            if (diff <= 0.2f) g_templCandAt = 0;                                       // still the template's stance
+            else if (!haveCand || cand > 0.1f) { g_templCand = local; g_templCandAt = nowT; }   // new or still-moving pose: wait
+            else if (nowT - g_templCandAt > 0.4) {
+                g_templLastCapture = nowT; g_templCandAt = 0;
+                CaptureTemplate(player, "standing still, pose settled");
+            }
         }
         local = g_poseTemplate;
         // Yaw the whole rig (root bones, in the model-root frame) so the body faces BodyYaw regardless of
@@ -1537,6 +1611,10 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
                 float horiz = std::sqrt(off.x * off.x + off.z * off.z);
                 if (horiz > c.bodyFollowMaxHorizontal && horiz > 1e-4f) { float k = c.bodyFollowMaxHorizontal / horiz; off.x *= k; off.z *= k; }
                 off.y = Clamp(f.headRel.y, -c.bodyFollowMaxDown, c.bodyFollowMaxUp);
+                // Park the rig a little behind the camera: the eye sits inside the head bone, so with the head
+                // exactly under it the chest and pauldrons hang in the bottom of the view. After the clamp on
+                // purpose - this is a deliberate offset, not follow error.
+                off.x -= std::sin(f.bodyYaw) * c.bodyBackOffset; off.z -= std::cos(f.bodyYaw) * c.bodyBackOffset;
                 bodyOff = off;
                 // Convert into the frame the RENDERER uses, not the physics frame: root bone translations are
                 // applied by the model matrix, so a shift converted with the physics rotation comes out rotated
@@ -1619,6 +1697,7 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
         float horiz = std::sqrt(bodyOff.x * bodyOff.x + bodyOff.z * bodyOff.z);
         if (horiz > c.bodyFollowMaxHorizontal && horiz > 1e-4f) { float k = c.bodyFollowMaxHorizontal / horiz; bodyOff.x *= k; bodyOff.z *= k; }
         bodyOff.y = Clamp(bodyOff.y, -c.bodyFollowMaxDown, c.bodyFollowMaxUp);
+        bodyOff.x -= std::sin(f.bodyYaw) * c.bodyBackOffset; bodyOff.z -= std::cos(f.bodyYaw) * c.bodyBackOffset;   // see the PoseMode=vr comment
         Vec3 lo = rootQ.Conj().Rotate(bodyOff);
         // Step 4: write rotation + shift and propagate.
         for (int i = 0; i < g_skel.boneCount; ++i) {
@@ -1777,7 +1856,33 @@ bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
     if (g_camWallRecovery && c.fpCameraMode != "passthrough") WR(g_camWallRecovery, (uint8_t)0);   // the game refreshes this global; keep it off
     if (g_haveWrittenYaw) {
         float y = GameCamYaw(); ++g_camChecks;
-        if (std::fabs(WrapPi(y - g_lastWrittenYaw)) > Deg2Rad(1.f)) ++g_camForeign;
+        const bool foreignYaw = std::fabs(WrapPi(y - g_lastWrittenYaw)) > Deg2Rad(1.f);
+        if (foreignYaw) ++g_camForeign;
+        // Takeover detector, yaw edition (2026-08-31): the 14:31 session's map takeover wrote
+        // its own YAW every frame but left our FOV alone, so the FOV majority below never
+        // armed and the menu gate missed the whole map. LOG-ONLY (2026-08-31 16:38 session):
+        // yaw cannot reuse the FOV detector's 16-of-40 majority, because in ordinary play the
+        // game's final-camera smoother re-writes yaw AFTER us every frame (the long-standing
+        // "foreign camera yaw in N of N writes" warning) - the window saturates the moment the
+        // world loads and GameERForeignCamActive() never decays: pass 2 permanently held
+        // ("stays in cinema mode"), combat gated all session. FOV separates cleanly (gameplay
+        // blips <= 9% of reads); yaw is 100% foreign in gameplay, so majority-of-writes has no
+        // discriminating power. This block only samples the delta magnitudes so a usable yaw
+        // signal (if one exists) can be tuned from logs; it must NOT feed g_foreignFovTick.
+        {
+            static float s_maxDelta = 0.f; static long s_n = 0; static ULONGLONG s_lastLog = 0;
+            if (foreignYaw && !f.lockedOn) {
+                const float d = Rad2Deg(std::fabs(WrapPi(y - g_lastWrittenYaw)));
+                if (d > s_maxDelta) s_maxDelta = d;
+                ++s_n;
+                const ULONGLONG t = GetTickCount64();
+                if (t - s_lastLog > 30000) {
+                    s_lastLog = t;
+                    LOGI("[cam] yaw-takeover probe: %ld foreign-yaw reads (not locked on), max delta %.1f deg since last report", s_n, s_maxDelta);
+                    s_maxDelta = 0.f; s_n = 0;
+                }
+            }
+        }
         // The FINAL render camera, position included - the chr-cam yaw check cannot see position smoothing there.
         if (uint8_t* pc = PersCam1()) {
             float m[16];
@@ -1935,6 +2040,44 @@ uint64_t __fastcall Hook_CamFinalize(void* a, void* b, void* c, void* d) {
     return rv;
 }
 
+// Post-rebuild facing enforcement. The pre-hook physics pin measurably loses while moving - the probe logged
+// the rebuilt matrix 56-76 deg off BodyYaw in bursts - so the rebuild does not (always) take its rotation
+// from Phys_Orientation when the movement logic is steering. This matrix IS the rotation the renderer skins
+// the rig with, so enforce the facing on the artifact instead of chasing the unknown writer: yaw the freshly
+// rebuilt basis about world Y by the error, preserving any tilt and the position row. Runs right after the
+// original, before our pose/camera writes, so everything downstream (RenderRootQ, the camera rewrite) sees
+// the transform the frame actually renders with.
+void EnforceRenderFacing(void* ctrl, const FrameInfo& f) {
+    const Config& c = Cfg();
+    // Strafe mode only: under lock the game itself steers the character to the (fake) target, so the matrix
+    // already faces BodyYaw and this write would only matter in states (mounts, scripted turns) where forcing
+    // it is wrong. Keep the lock baseline byte-identical to pre-enforcement behavior.
+    if (c.fpFaceCameraMode != "strafe") return;
+    if (!c.fpPinBodyFacing || !c.fpFaceCamera || WorldDyingNow()) return;
+    float m[16];
+    if (!SafeRead((uint8_t*)ctrl + off::Ctrl_ModelMatrix, m, sizeof(m))) return;
+    Vec3 X{m[0], m[1], m[2]}, Y{m[4], m[5], m[6]}, Z{m[8], m[9], m[10]};
+    if (std::fabs(X.Length() - 1.f) > 0.05f || std::fabs(Y.Length() - 1.f) > 0.05f || std::fabs(Z.Length() - 1.f) > 0.05f) return;
+    float s = g_modelFacingSign > 0 ? 1.f : -1.f;   // model forward = local -Z unless calibration said otherwise
+    float facing = WrapPi(std::atan2(s * Z.x, s * Z.z) + Deg2Rad(c.bodyFacingOffsetDeg));
+    float d = WrapPi(f.bodyYaw - facing);
+    // Probe first (what the game left in the matrix, before the fix): 5 s max, logged when > 2 deg.
+    static float s_max = 0.f; static double s_at = 0;
+    if (std::fabs(d) > s_max) s_max = std::fabs(d);
+    double nw = NowSec();
+    if (nw - s_at > 5.0) {
+        s_at = nw;
+        if (s_max > Deg2Rad(2.f)) LOGI("[body] rebuilt model matrix facing was %.0f deg off BodyYaw (5 s max) - enforced back", Rad2Deg(s_max));
+        s_max = 0.f;
+    }
+    if (std::fabs(d) < Deg2Rad(0.3f)) return;
+    Quat r = Quat::YawQ(d);
+    X = r.Rotate(X); Y = r.Rotate(Y); Z = r.Rotate(Z);
+    m[0] = X.x; m[1] = X.y; m[2] = X.z;
+    m[4] = Y.x; m[5] = Y.y; m[6] = Y.z;
+    m[8] = Z.x; m[9] = Z.y; m[10] = Z.z;
+    SafeWrite((uint8_t*)ctrl + off::Ctrl_ModelMatrix, m, 48);   // basis rows only; the position row stays the game's
+}
 // Per-character model-matrix update, late in the frame. The pose probe measured the upper-body animation layer
 // (walk sway, weapon arts) evaluating every frame AFTER the camera step - this hook runs later still, so the
 // pose written here is what the renderer actually skins.
@@ -1957,6 +2100,14 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
         }
     }
     FrameInfo f; if (!BuildFrame(player, f)) return;
+    // Last word on the facing before the original rebuilds the model matrix FROM the physics orientation.
+    // The pin written at the pose hook / camera step can be overwritten by the game's own turn-toward-move
+    // logic later in the frame (it only runs while moving), and then the matrix - the rotation the renderer
+    // skins the rig with - carries the game's facing while the pose was solved in ours: the whole rig renders
+    // rotated by the difference, but only while moving. Re-pinning here makes the rebuild read our facing.
+    if (!post && Cfg().fpFaceCameraMode == "strafe") ApplyFaceCamera(player, f.root, f.bodyYaw);
+    // Rebuilt matrix in hand: force its facing to the yaw the pose below is solved in (see EnforceRenderFacing).
+    if (post) EnforceRenderFacing(ctrl, f);
     UpdateArms(player, f, 2);
     // Camera last, from the model matrix that was just rebuilt - the very transform the rig renders with. The
     // camera step runs earlier in the frame, so a camera written there sits on a root that is up to a frame of
