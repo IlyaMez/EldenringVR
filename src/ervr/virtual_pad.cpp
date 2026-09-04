@@ -404,6 +404,9 @@ void VirtualPadUpdate(double now) {
 
     pad.buttons = held | pulses;
     pad.lt = lt; pad.rt = rt;
+    // Cast aim: combat learns the casting hand from what the GAME is handed (a menu's presses are navigation, not casts).
+    CombatNotifyPad((g_menuMode || anyMenu || CombatMenuOpen()) ? (uint16_t)0
+                    : (uint16_t)(pad.buttons | (pad.lt > 127 ? VP_LT : 0) | (pad.rt > 127 ? VP_RT : 0)), now);
     pad.lx = ToStick(lx); pad.ly = ToStick(ly); pad.rx = ToStick(rx); pad.ry = ToStick(ry);
 
     // What the GAME is handed, logged on change. Pairs with "[xr] raw" (what the runtime

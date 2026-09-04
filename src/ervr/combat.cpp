@@ -157,6 +157,26 @@ Template g_tpl[SlotCount];
 double g_lastBtn[3] = {-1e9, -1e9, -1e9};   // button presses map to light/heavy/left; the 2H slots learn from those while two-handed
 uint8_t* g_player = nullptr;      // last main player seen by the game thread (for owner match in the hook)
 
+// Cast aim (ranged spells / skills / bows aimed by the casting hand). The worker owns the press
+// window, the game thread the passive hand (from the equipment); CombatCastAimHand joins them.
+std::atomic<int>    g_castPressHand{-1};   // hand whose attack/skill button fired last...
+std::atomic<double> g_castPressAt{-1e9};   // ...and when (NowSec clock): the hand a cast's aim events pick, if recent
+std::atomic<double> g_castUntil{0.0};      // the aim is live until then - armed by the game's own aim events, never by a press (2026-09-04: pressing guard / a grip forced the lock and the game turned the body after the hand)
+std::atomic<int>    g_castWepHand{-1};     // hand holding a catalyst/bow: the passive aim hand
+std::atomic<int>    g_wepRanged[2]{};      // per hand: the weapon is a CastAimWeaponTypes class
+std::atomic<int>    g_wepShield[2]{};      // per hand: the weapon is a shield (any combat mode, unlike g_leftShield)
+uint16_t g_padPrev = 0;                    // worker only: last game-facing pad mask, for press edges
+// The cast animation's own aim events, relaxed for the player while a casting hand is live.
+constexpr uint32_t EV_SetBulletAimAngle = 238;    // {up,down,right,left limit; up,down,right,left deadzone} i16 degrees (fromsoftware-rs tae.rs)
+constexpr uint32_t EV_EnableTwistModifier = 700;  // upper-body twist toward the aim: limits f32 x4, modifier id, target type, minimum angles f32 x4
+struct BulletAimAngleArgs { int16_t upLimit, downLimit, rightLimit, leftLimit, upDead, downDead, rightDead, leftDead; };
+static_assert(sizeof(BulletAimAngleArgs) == 16, "SetBulletAimAngle args layout");
+struct TwistModifierArgs { float upLimit, downLimit, rightLimit, leftLimit; int32_t modifierId; uint8_t targetType; uint8_t pad15[3]; float upMin, downMin, rightMin, leftMin; uint8_t unk28[12]; };
+static_assert(sizeof(TwistModifierArgs) == 0x34, "EnableTwistModifier args layout");
+// The game keeps a pointer to the twist event's args (CSChrBehaviorDataModule.twist_modifiers[].tae_event),
+// so the relaxed copies live in statics, never on the hook's stack. Events run on the game thread, serially.
+BulletAimAngleArgs g_aimArgsCopy{}; TwistModifierArgs g_twistArgsCopy{};
+
 struct SwingCmd {                 // worker -> game thread
     bool active = false;
     bool first = false;           // deliver is_first_execution on the next frame
@@ -384,14 +404,94 @@ void RecordEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args, uint32_t id)
     }
 }
 
+// ---------------------------------------------------------------- cast aim (worker + game thread)
+// A wepType listed in CastAimWeaponTypes: the hand holding it aims ranged effects even without a press.
+bool IsRangedWepType(uint16_t t) {
+    const std::string& s = Cfg().castAimWeaponTypes;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && (s[i] == ',' || s[i] == ' ')) ++i;
+        if (i >= s.size()) break;
+        char* end = nullptr; const long v = strtol(s.c_str() + i, &end, 10);
+        if (end == s.c_str() + i) break;
+        if (v == (long)t) return true;
+        i = (size_t)(end - s.c_str());
+    }
+    return false;
+}
+// A press (or a held charge) makes `hand` the aim hand for CastAimSeconds from now.
+void ArmCastAim(int hand, double now, const char* why) {
+    const Config& c = Cfg();
+    if (!c.castAim || hand < 0) return;
+    const bool wasLive = g_castUntil.load() > now;
+    const int prev = g_castPressHand.exchange(hand);
+    g_castUntil.store(now + (c.castAimSeconds > 0.f ? c.castAimSeconds : 0.f));
+    if (!wasLive || prev != hand) LOGD("[combat] cast aim: %s hand aims (%s)", HandName(hand), why);
+}
+// Arm from the game's OWN aim events - 238 SetBulletAimAngle at a cast's start, 2 BulletBehavior at each bullet -
+// so only an animation that actually aims something engages the lock. The hand: the one whose attack/skill
+// button was pressed within the last kCastPressMemory s, else the one holding a ranged weapon, else the right.
+// Game thread (TAE hooks).
+constexpr double kCastPressMemory = 3.0;
+void ArmCastAimFromEvent(const char* why) {
+    const double now = NowSec();
+    int hand = now - g_castPressAt.load() < kCastPressMemory ? g_castPressHand.load() : -1;
+    if (hand < 0) hand = g_castWepHand.load();
+    if (hand < 0) hand = HandRight;
+    ArmCastAim(hand, now, why);
+}
+// The cast animation's SetBulletAimAngle (238) clamps the bullet's aim with limits and deadzones sized
+// for a camera a few degrees off the body; EnableTwistModifier (700) does the same for the upper-body
+// twist. With a casting hand the player's copies are relaxed: deadzones / minimum angles zeroed (what
+// erfps2 does for its first-person camera), limits raised to CastAimLimitDeg. Returns true when the
+// event was run with the relaxed copy.
+bool RunRelaxedAimEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args, uint32_t id) {
+    const Config& c = Cfg();
+    uint8_t* owner = nullptr; void* a = nullptr;
+    if (!SafeRead(&self->owner, &owner, sizeof(owner)) || !owner || owner != g_player) return false;
+    if (!SafeRead(&args->args, &a, sizeof(a)) || !a) return false;
+    if (id == EV_SetBulletAimAngle) ArmCastAimFromEvent("SetBulletAimAngle");   // a cast is aiming: this is what makes the aim live
+    if (CombatCastAimHand(nullptr) < 0) return false;
+    if (id == EV_SetBulletAimAngle) {
+        BulletAimAngleArgs b{};
+        if (!SafeRead(a, &b, sizeof(b))) return false;
+        const BulletAimAngleArgs o = b;
+        const int16_t lim = (int16_t)Clamp(c.castAimLimitDeg, 0.f, 180.f);
+        b.upDead = b.downDead = b.rightDead = b.leftDead = 0;
+        if (lim > 0) {   // only widen a limit the animation set (0 / negative may mean "no limit": left alone)
+            if (b.upLimit > 0 && b.upLimit < lim) b.upLimit = lim;
+            if (b.downLimit > 0 && b.downLimit < lim) b.downLimit = lim;
+            if (b.rightLimit > 0 && b.rightLimit < lim) b.rightLimit = lim;
+            if (b.leftLimit > 0 && b.leftLimit < lim) b.leftLimit = lim;
+        }
+        g_aimArgsCopy = b;
+        args->args = &g_aimArgsCopy; g_origGeneric(self, args); args->args = a;
+        if (c.combatDebug) {
+            static double s_last = 0; const double n = NowSec();
+            if (n - s_last > 0.5) { s_last = n; LOGD("[combat] cast aim: SetBulletAimAngle limits %d/%d/%d/%d deadzones %d/%d/%d/%d -> limits %d/%d/%d/%d deadzones 0 (anim %u)", o.upLimit, o.downLimit, o.rightLimit, o.leftLimit, o.upDead, o.downDead, o.rightDead, o.leftDead, b.upLimit, b.downLimit, b.rightLimit, b.leftLimit, self->animId); }
+        }
+        return true;
+    }
+    TwistModifierArgs t{};
+    if (!SafeRead(a, &t, sizeof(t))) return false;
+    t.upMin = t.downMin = t.rightMin = t.leftMin = 0.f;
+    g_twistArgsCopy = t;
+    args->args = &g_twistArgsCopy; g_origGeneric(self, args); args->args = a;
+    return true;
+}
+
 // ---------------------------------------------------------------- TAE hooks (game thread)
-// Slot 2: the generic events (SpEffect, FFX, sound, ...). Only watched while a skill is being recorded.
+// Slot 2: the generic events (SpEffect, FFX, sound, ...). Watched while a skill is being recorded;
+// the cast animation's aim events are relaxed for the player while a casting hand aims.
 void __fastcall Hook_GenericEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args) {
-    if (!g_tripped && g_rec.active) {
-        uint32_t id = 0; uint8_t* owner = nullptr;
-        if (SafeRead(&args->eventId, &id, 4) && id != EV_AttackBehavior && id != EV_BulletBehavior && id != EV_CommonBehavior   // those pass through slot 3 too
+    uint32_t id = 0;
+    const bool haveId = !g_tripped && SafeRead(&args->eventId, &id, 4);
+    if (haveId && g_rec.active) {
+        uint8_t* owner = nullptr;
+        if (id != EV_AttackBehavior && id != EV_BulletBehavior && id != EV_CommonBehavior   // those pass through slot 3 too
             && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player) RecordEvent(self, args, id);
     }
+    if (haveId && (id == EV_SetBulletAimAngle || id == EV_EnableTwistModifier) && Cfg().castAim && RunRelaxedAimEvent(self, args, id)) return;
     g_origGeneric(self, args);
 }
 // Slot 3: the behavior events (attack / bullet / common).
@@ -401,6 +501,9 @@ void __fastcall Hook_ExecEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args
     // Recording: this slot sees every event too, but only dispatches the behavior ones (slot 2 records the rest).
     if (!g_tripped && g_rec.active && SafeRead(&args->eventId, &id, 4) && (id == EV_AttackBehavior || id == EV_BulletBehavior || id == EV_CommonBehavior)
         && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player) RecordEvent(self, args, id);
+    // Cast aim: a bullet leaving the player (spells without a SetBulletAimAngle, ranged skills, bows) arms the aim.
+    if (!g_tripped && Cfg().castAim && SafeRead(&args->eventId, &id, 4) && id == EV_BulletBehavior && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player)
+        ArmCastAimFromEvent("BulletBehavior");
     if (!g_tripped && SafeRead(&args->eventId, &id, 4) && id == EV_AttackBehavior && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player) {
         isPlayer = true;
         SafeRead(&args->args, &a, sizeof(a)); SafeRead(&args->isFirstExecution, &first, 1);
@@ -453,9 +556,79 @@ struct HandWeapon {
     uint16_t wepType = 0;
     uint8_t* row = nullptr;   // EQUIP_PARAM_WEAPON_ST base row
     bool isShield = false;
+    bool isRanged = false;    // a CastAimWeaponTypes class (staff, seal, bow, ...): the hand aims, its buttons cast
 };
 HandWeapon g_wep[2];
 std::atomic<float> g_wepWeight[2]{0.f, 0.f};   // game thread -> worker: equipped weight per hand (inertia)
+std::atomic<float> g_wepReach[2]{0.f, 0.f};    // game thread -> worker/game_er: grip->tip length per hand (0 = unknown)
+std::atomic<float> g_wepCom[2]{0.f, 0.f};      // ... and the centre-of-mass distance from the grip (0 = unknown)
+
+// Weapon geometry per category (EquipParamWeapon wepType = WEP_TYPE, values per Paramdex): grip->tip
+// length in m and the mass centre as a fraction of it. No param carries either, so this is a table
+// by category (the game's own hit capsule dummy polys could replace it later). Blades balance about a
+// third of the way out, hafted heads sit at the end, shields and fists hug the hand. Twinblades are
+// gripped in the middle: half the shaft is the lever, the mass is at the hand.
+struct WeaponGeom { float length, com; };
+WeaponGeom GeomForType(uint16_t t) {
+    switch (t) {
+    case 1:  return {0.35f, 0.40f};   // dagger
+    case 3:  return {0.95f, 0.35f};   // straight sword
+    case 5:  return {1.25f, 0.40f};   // greatsword
+    case 7:  return {1.60f, 0.45f};   // colossal sword
+    case 9:  return {0.85f, 0.40f};   // curved sword
+    case 11: return {1.20f, 0.45f};   // curved greatsword
+    case 13: return {1.00f, 0.35f};   // katana
+    case 14: return {0.70f, 0.10f};   // twinblade (centre grip)
+    case 15: return {1.00f, 0.30f};   // thrusting sword
+    case 16: return {1.20f, 0.40f};   // heavy thrusting sword
+    case 17: return {0.70f, 0.75f};   // axe
+    case 19: return {1.30f, 0.75f};   // greataxe
+    case 21: return {0.70f, 0.80f};   // hammer
+    case 23: return {1.30f, 0.85f};   // great hammer
+    case 24: return {0.80f, 0.85f};   // flail
+    case 25: return {1.60f, 0.40f};   // spear
+    case 28: return {1.90f, 0.45f};   // heavy spear
+    case 29: return {1.80f, 0.60f};   // halberd
+    case 31: return {1.70f, 0.65f};   // scythe / reaper
+    case 35: return {0.15f, 0.30f};   // fist
+    case 37: return {0.30f, 0.30f};   // claw
+    case 39: return {1.50f, 0.30f};   // whip
+    case 41: return {1.60f, 0.75f};   // colossal weapon
+    case 50: case 51: case 53: case 55: case 56: return {1.00f, 0.30f};   // bows, ballista
+    case 57: return {1.20f, 0.50f};   // glintstone staff
+    case 61: return {0.20f, 0.30f};   // sacred seal
+    case 65: return {0.30f, 0.15f};   // small shield
+    case 67: return {0.45f, 0.20f};   // medium shield
+    case 69: return {0.80f, 0.35f};   // greatshield
+    case 87: return {0.60f, 0.60f};   // torch
+    case 88: return {0.15f, 0.30f};   // hand-to-hand
+    case 89: return {0.30f, 0.50f};   // perfume bottle
+    case 90: return {0.70f, 0.40f};   // thrusting shield
+    case 91: return {0.40f, 0.50f};   // throwing blade
+    case 92: return {0.70f, 0.40f};   // backhand blade
+    case 93: return {1.15f, 0.35f};   // light greatsword
+    case 94: return {1.40f, 0.40f};   // great katana
+    case 95: return {0.40f, 0.40f};   // beast claw
+    }
+    return {0.f, 0.f};   // unknown category: the ini WeaponReach stands in
+}
+// ini override "type:length:comFraction,..." (WeaponGeometry) wins over the table.
+bool GeomOverride(uint16_t t, WeaponGeom* out) {
+    const std::string& s = Cfg().weaponGeometry;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t e = s.find(',', i); if (e == std::string::npos) e = s.size();
+        int ty = 0; float len = 0.f, com = 0.f;
+        if (sscanf_s(s.c_str() + i, "%d:%f:%f", &ty, &len, &com) == 3 && ty == (int)t && len > 0.05f) { *out = {len, com}; return true; }
+        i = e + 1;
+    }
+    return false;
+}
+WeaponGeom GeomFor(const HandWeapon& w) {
+    if (!w.valid || w.paramId <= 0) return {0.f, 0.f};
+    WeaponGeom g; if (!GeomOverride(w.wepType, &g)) g = GeomForType(w.wepType);
+    return g;
+}
 bool g_layoutBad = false;      // a param row size disagreed with the layout we compiled against: never write
 bool g_loggedLayout = false;
 
@@ -497,14 +670,34 @@ void ReadEquipment(uint8_t* player) {
         if (!row) { LOGW("[combat] %s weapon %d: no EquipParamWeapon row", HandName(h), id); w.valid = true; continue; }
         CheckRowSize("EQUIP_PARAM_WEAPON_ST", sz, Wep_RowSize);
         SafeRead(row + Wep_VariationId, &w.variation, 4); SafeRead(row + Wep_Weight, &w.weight, 4); SafeRead(row + Wep_Type, &w.wepType, 2);
-        w.row = row; w.isShield = IsShieldType(w.wepType); w.valid = true;
-        LOGI("[combat] %s hand: weapon %d variation %d weight %.1f wepType %u%s (player level %d)", HandName(h), id, w.variation, w.weight, w.wepType, w.isShield ? " (shield)" : "", GameERPlayerLevel());
+        w.row = row; w.isShield = IsShieldType(w.wepType); w.isRanged = !w.isShield && IsRangedWepType(w.wepType); w.valid = true;
+        const WeaponGeom g = GeomFor(w);
+        LOGI("[combat] %s hand: weapon %d variation %d weight %.1f wepType %u%s length %.2f m mass at %.2f m (player level %d)", HandName(h), id, w.variation, w.weight, w.wepType, w.isShield ? " (shield)" : w.isRanged ? " (ranged: cast aim)" : "", g.length, g.length * g.com, GameERPlayerLevel());
+    }
+    // Cast aim: publish the weapon classes for the worker (button routing, the physical block) and the
+    // passive aim hand - the one holding a catalyst/bow (two-handed: that weapon's hand; both hands: the right).
+    for (int h = 0; h < 2; ++h) {
+        g_wepRanged[h].store(g_wep[h].valid && g_wep[h].isRanged ? 1 : 0);
+        g_wepShield[h].store(g_wep[h].valid && g_wep[h].isShield ? 1 : 0);
+    }
+    {
+        int wepHand = -1;
+        if (TwoHandedStyle(style)) { const int th = TwoHandedWeaponHand(style); if (g_wep[th].valid && g_wep[th].isRanged) wepHand = th; }
+        else if (g_wep[HandRight].valid && g_wep[HandRight].isRanged) wepHand = HandRight;
+        else if (g_wep[HandLeft].valid && g_wep[HandLeft].isRanged) wepHand = HandLeft;
+        if (g_castWepHand.exchange(wepHand) != wepHand && Cfg().castAim)
+            LOGI("[combat] cast aim: %s", wepHand < 0 ? "no ranged weapon in hand - the head aims until an attack/skill button is pressed"
+                                                     : wepHand == HandRight ? "the right hand holds a ranged weapon and aims" : "the left hand holds a ranged weapon and aims");
     }
     // Carried weight per hand. Two-handing puts the one weapon in both hands (each arm carries
     // it, so each lags with it); the free hand of a two-hander carries nothing extra.
     float wl = g_wep[HandLeft].valid ? g_wep[HandLeft].weight : 0.f, wr = g_wep[HandRight].valid ? g_wep[HandRight].weight : 0.f;
     if (style == 3) wl = wr; else if (style == 2) wr = wl;
     g_wepWeight[HandLeft].store(wl); g_wepWeight[HandRight].store(wr);
+    WeaponGeom gl = GeomFor(g_wep[HandLeft]), gr = GeomFor(g_wep[HandRight]);
+    if (style == 3) gl = gr; else if (style == 2) gr = gl;
+    g_wepReach[HandLeft].store(gl.length); g_wepCom[HandLeft].store(gl.length * gl.com);
+    g_wepReach[HandRight].store(gr.length); g_wepCom[HandRight].store(gr.length * gr.com);
 }
 
 // Distinct behaviorVariationIds that actually have BehaviorParam_PC rows (built once, ~14k rows).
@@ -928,6 +1121,9 @@ bool StartReplay(uint8_t* player, int h, double now) {
     if (c.skillChargeFp && cost > 0 && maxFp > 0 && fp >= 0 && fp < cost) { g_haptic.fetch_or(4u << h); LOGI("[combat] skill: not enough FP (%d < %d)", fp, cost); return true; }
     g_play = SkillPlay{}; g_play.active = true; g_play.start = now; g_play.libIndex = idx; g_play.st.resize(rec.ev.size());
     g_play.fpCost = c.skillChargeFp ? cost : 0; g_play.stamCost = si.stamCost;
+    // Replayed bullets bypass the TAE hooks (they go straight to the trampoline), so a recording that shoots
+    // arms the aim here: its bullets fly where the two-handed weapon's hand points.
+    if (c.castAim) for (const RecEvent& e : rec.ev) if (e.id == EV_BulletBehavior) { ArmCastAim(h, now, "skill replay with bullets"); break; }
     if (rec.hasAttack && c.skillSwingWindow > 0.f) { g_skillSwing.armed = true; g_skillSwing.until = now + c.skillSwingWindow; g_skillSwing.a = rec.attack; }
     LOGI("[combat] skill: replaying %zu events for weapon %d arts %d (FP -%d)%s", rec.ev.size(), rec.weaponId, rec.arts, g_play.fpCost, rec.hasAttack ? " - the next swing is the skill's attack" : "");
     return true;
@@ -1113,6 +1309,17 @@ void GameFrameBody(uint8_t* player) {
     int maxStam = -1;
     int stam = ReadStamina(player, &maxStam); g_status.stamina = stam;
     const int stamAtEntry = stam;
+    // Every mode, before the physical gate: cast aim needs the weapon classes (the passive aim hand) in
+    // buttons mode too, and its state is reported here.
+    ReadEquipment(player);
+    {
+        bool casting = false; const int ah = CombatCastAimHand(&casting);
+        static int s_prevHand = -2; static bool s_prevCasting = false;
+        if ((ah != s_prevHand || casting != s_prevCasting) && c.combatDebug)
+            LOGD("[combat] cast aim: %s aims%s", ah < 0 ? "the head" : ah == HandRight ? "the right hand" : "the left hand", casting ? " (cast live: the body turns to the ray)" : "");
+        s_prevHand = ah; s_prevCasting = casting;
+        g_status.castAimHand = ah; g_status.casting = casting;
+    }
     if (!physical) { RestoreAll(); g_leftShield.store(0); g_wepWeight[0].store(0.f); g_wepWeight[1].store(0.f); EndFrameStamina(player, maxStam); return; }
     // Any open menu: stand down on the game thread too - restore every live param edit, inject
     // nothing, request no chords. The worker side is already idle (CombatHandlesSwings is false).
@@ -1124,7 +1331,6 @@ void GameFrameBody(uint8_t* player) {
     }
     g_status.paramsReady = ParamsReady();
     const bool kinetic = c.kineticEnabled && g_status.paramsReady && !g_layoutBad;
-    ReadEquipment(player);
     const bool leftShield = c.blockEnabled && g_wep[HandLeft].valid && g_wep[HandLeft].isShield && g_armStyle != 3;
     g_leftShield.store(leftShield ? 1 : 0);
     g_status.shield = leftShield;
@@ -1351,8 +1557,12 @@ float ArcRefFor(float weight, const Config& c) {
     const float arcRef = c.kineticArcRef > 0.05f ? c.kineticArcRef : 0.5f;
     return arcRef * (1.f + weight / 10.f);
 }
-float StrikeQuality(float tipSpeed, float arc, float weight, const Config& c) {
-    const float ref = c.kineticRefSpeed > 0.5f ? c.kineticRefSpeed : 8.f;
+// The reference speed is defined for a KineticRefReach lever: a longer weapon's vanilla swing moves its
+// tip proportionally faster, so quality 1 scales with the weapon's own length (a dagger flick and a
+// colossal-sword arc both measure against what that weapon's real swing would do).
+float StrikeQuality(float tipSpeed, float arc, float weight, float reach, const Config& c) {
+    float ref = c.kineticRefSpeed > 0.5f ? c.kineticRefSpeed : 8.f;
+    if (c.kineticRefReach > 0.05f && reach > 0.05f) ref *= reach / c.kineticRefReach;
     float q = (tipSpeed / ref) * (tipSpeed / ref); if (q > 1.5f) q = 1.5f;
     float a = arc / ArcRefFor(weight, c); if (a > 1.f) a = 1.f;
     return q * (0.6f + 0.4f * a);
@@ -1475,6 +1685,9 @@ void PollSkillTrigger(const VRInputState& in, double now) {
         s_down = false;
         if (!s_long && two) g_skillReq.store(1);
     }
+    // The skill (replayed or the game's) flies where the two-handed weapon's hand points: remember that hand for
+    // the skill's own aim events (a replay with bullets arms itself in StartReplay).
+    if (dn) { g_castPressHand.store(TwoHandedWeaponHand(g_armStyleShared.load())); g_castPressAt.store(now); }
 }
 
 // Shield pose against the head -> guard held + block quality. The threat is assumed to be where
@@ -1587,12 +1800,56 @@ void CombatNotifyButton(uint16_t mask, double now) {
     if (mask == ParseXInputButton(c.leftSwingButton))   g_lastBtn[SlotLeft] = now;
 }
 
+// Cast aim: which hand a game-facing press belongs to. Light/heavy = the right weapon (two-handed: the
+// two-handed weapon's hand, whichever it is); the left button = the left weapon unless it is a shield
+// (guard, not a cast); the skill button = the right weapon's skill, the left's only with an empty right hand.
+void CombatNotifyPad(uint16_t mask, double now) {
+    const Config& c = Cfg();
+    const uint16_t rise = (uint16_t)(mask & ~g_padPrev);
+    g_padPrev = mask;
+    if (!c.castAim) return;
+    const uint16_t light = ParseXInputButton(c.lightAttackButton), heavy = ParseXInputButton(c.heavyAttackButton);
+    const uint16_t left = ParseXInputButton(c.leftSwingButton), skill = ParseXInputButton(c.skillButton);
+    const int style = g_armStyleShared.load();
+    int hand = -1; const char* why = "press";
+    if (rise & (light | heavy)) { hand = TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : HandRight; why = (rise & light) ? "light attack" : "heavy attack"; }
+    if ((rise & left) && !g_wepShield[HandLeft].load()) { hand = TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : HandLeft; why = "left-hand attack"; }
+    if (rise & skill) {
+        if (TwoHandedStyle(style)) hand = TwoHandedWeaponHand(style);
+        else hand = (g_wepRanged[HandRight].load() || !g_wepRanged[HandLeft].load()) ? HandRight : HandLeft;
+        why = "skill button";
+    }
+    // A press only REMEMBERS the hand; the game's aim events arm the aim (a press by itself must not - guard
+    // and grip-mapped buttons are presses too).
+    if (hand >= 0) { g_castPressHand.store(hand); g_castPressAt.store(now); if (c.combatDebug) LOGD("[combat] cast aim: %s hand pressed (%s)", HandName(hand), why); }
+}
+
+int CombatCastAimHand(bool* casting) {
+    const Config& c = Cfg();
+    if (casting) *casting = false;
+    if (!c.castAim || !GameERPlayerActive()) return -1;
+    // Only a LIVE cast aims. A merely held catalyst used to aim passively (matrix + lock target down its ray)
+    // and in lock mode the game turned the body toward that target while moving: a seal held at your side
+    // spun the character around (2026-09-04). The passive hand (g_castWepHand) now only routes buttons.
+    if (g_castUntil.load() <= NowSec()) return -1;
+    int hand;
+    if (c.castAimHand == "right") hand = HandRight;
+    else if (c.castAimHand == "left") hand = HandLeft;
+    else hand = g_castPressHand.load();
+    if (casting) *casting = hand >= 0;
+    return hand;
+}
+
 uint32_t CombatTakeHapticRequests() { return g_haptic.exchange(0); }
 
 uint16_t CombatBlockedButtons() {
     const Config& c = Cfg();
     if (!CombatHandlesSwings()) return 0;
-    uint16_t m = c.combatBlockAttackButtons ? (uint16_t)(ParseXInputButton(c.lightAttackButton) | ParseXInputButton(c.heavyAttackButton)) : 0;
+    // A catalyst / bow in the attacking hand CASTS with the light/heavy buttons (no animation to keep off
+    // the arms): those pass. Two-handed, the attacking hand is the two-handed weapon's.
+    const int attackHand = TwoHandedStyle(g_armStyleShared.load()) ? TwoHandedWeaponHand(g_armStyleShared.load()) : HandRight;
+    const bool castsWithButtons = c.castAim && g_wepRanged[attackHand].load() != 0;
+    uint16_t m = c.combatBlockAttackButtons && !castsWithButtons ? (uint16_t)(ParseXInputButton(c.lightAttackButton) | ParseXInputButton(c.heavyAttackButton)) : 0;
     if (c.twoHandMode == "grab") {
         // The grip that holds the weapon is a grab, not the button it is mapped to (LT = the skill).
         std::lock_guard<std::mutex> g(g_mtx);
@@ -1650,6 +1907,16 @@ bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool*
 }
 
 float CombatHandWeight(int hand) { return hand == HandLeft || hand == HandRight ? g_wepWeight[hand].load() : 0.f; }
+float CombatHandReach(int hand) {
+    if (hand != HandLeft && hand != HandRight) return 0.f;
+    const float r = g_wepReach[hand].load();
+    return r > 0.05f ? r : (hand == HandRight ? Cfg().weaponReachRight : Cfg().weaponReachLeft);
+}
+float CombatHandCom(int hand) {
+    if (hand != HandLeft && hand != HandRight) return 0.f;
+    const float m = g_wepCom[hand].load();
+    return m > 0.01f ? m : 0.45f * CombatHandReach(hand);
+}
 
 void CombatSetMenuOpen(bool open) {
     const int v = open ? 1 : 0;
@@ -1686,7 +1953,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         const Pose& p = tr.hand[h];
         bool grip = in.handTrigger[h] >= c.gripThreshold;   // analog in VRInputState; VRB_*Grip is never set by the backend
         bool allowed = p.valid && in.controllerConnected[h] && h != freeHand && (h == HandRight || (c.combatLeftHand && !leftShield)) && (!c.gestureRequiresGrip || grip);
-        const float reach = h == HandRight ? c.weaponReachRight : c.weaponReachLeft;
+        const float reach = CombatHandReach(h);
         float handSpd = 0.f;
         float tip = allowed ? TipSpeed(p, reach, &handSpd) : 0.f;
         const float weight = g_wepWeight[h].load();
@@ -1728,7 +1995,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             const float armWindow = c.kineticEnabled ? c.swingArmWindow + weight * c.kineticArmPerWeight : c.swingArmWindow;
             if (now - s.t >= armWindow || (decel && !c.kineticEnabled)) {
                 const float vq = c.kineticEnabled ? s.vVirtPeak : s.peak;
-                const float q = StrikeQuality(vq, s.arc, weight, c);
+                const float q = StrikeQuality(vq, s.arc, weight, reach, c);
                 int slot;
                 if (h == HandLeft && !TwoHandedStyle(style)) slot = SlotLeft;
                 else if (c.kineticEnabled) slot = (q >= c.kineticHeavyQuality && s.arc >= 0.8f * ArcRefFor(weight, c)) ? SlotHeavy : SlotLight;
@@ -1745,7 +2012,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                 }
                 StartSwing(h, slot, now, q, s.arc, vq); s.st = HandSM::Swinging; s.t = now;
                 g_haptic.fetch_or(1u << h);
-                if (c.combatDebug) LOGD("[combat] %s swing start: %s (tip %.2f m/s, controller tip %.2f m/s, virtual %.2f m/s, hand %.2f m/s, arc %.2f/%.2f m, weight %.1f, quality %.2f)", HandName(h), SlotName(slot), s.peak, rawTip, s.vVirtPeak, handSpd, s.arc, ArcRefFor(weight, c), weight, q);
+                if (c.combatDebug) LOGD("[combat] %s swing start: %s (tip %.2f m/s, controller tip %.2f m/s, virtual %.2f m/s, hand %.2f m/s, arc %.2f/%.2f m, weight %.1f, reach %.2f m, quality %.2f)", HandName(h), SlotName(slot), s.peak, rawTip, s.vVirtPeak, handSpd, s.arc, ArcRefFor(weight, c), weight, reach, q);
             }
             break; }
         case HandSM::Swinging: {
@@ -1754,7 +2021,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             // landing late in the arc is not punished for the natural deceleration.
             float vEff = c.kineticEnabled ? (s.vVirt > 0.7f * s.vVirtPeak ? s.vVirt : 0.7f * s.vVirtPeak)
                                           : (s.vSmooth > 0.7f * s.peak ? s.vSmooth : 0.7f * s.peak);
-            UpdateSwing(h, StrikeQuality(vEff, s.arc, weight, c), s.arc, vEff, inertial ? tip : s.vSmooth);
+            UpdateSwing(h, StrikeQuality(vEff, s.arc, weight, reach, c), s.arc, vEff, inertial ? tip : s.vSmooth);
             if (!allowed || tip < c.swingOffSpeed || now - s.t >= c.swingMaxSeconds) {
                 if (c.combatDebug) LOGD("[combat] %s swing end after %.0f ms (peak %.2f m/s, virtual peak %.2f m/s, arc %.2f m)", HandName(h), (now - s.t) * 1000.0, s.peak, s.vVirtPeak, s.arc);
                 EndSwing(h); s.st = HandSM::Cooldown; s.t = now;

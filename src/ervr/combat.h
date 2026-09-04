@@ -46,6 +46,18 @@ bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool*
 // Weight the hand is carrying (EquipParamWeapon weight; both hands share it when two-handing;
 // 0 = empty/unknown). Drives the inertial arm in game_er.
 float CombatHandWeight(int hand);
+// Geometry of the weapon in the hand: grip->tip length (the tip-speed lever arm; ini WeaponReach when unknown)
+// and how far out along it the mass sits (rotational inertia about the grip goes with its square).
+float CombatHandReach(int hand);
+float CombatHandCom(int hand);
+// Cast aim: ranged spells / skills / bows aim where the CASTING HAND points. The pad worker feeds every
+// button the GAME is actually handed (final mask, VP_LT/VP_RT for the triggers; 0 while a menu owns the
+// pad) so the pressing hand becomes the aim hand for CastAimSeconds. Call once per pad update.
+void CombatNotifyPad(uint16_t gameMask, double now);
+// Which hand aims ranged effects right now: -1 = none (the head aims, as before), HandLeft/HandRight.
+// *casting = a press made it so within CastAimSeconds (the body turns to the ray, the lock target may be
+// forced, only then); a hand that merely holds a catalyst/bow aims passively. Any thread, atomics only.
+int CombatCastAimHand(bool* casting);
 // Haptic requests raised by the game-thread side (stamina empty, swing armed); worker drains them.
 // Returns a bitmask: bit0 = left hand, bit1 = right hand, bit2/3 = "fail" flavour for left/right,
 // bit4 = blocked hit (left), bit5 = deflect (left).
@@ -70,6 +82,8 @@ struct CombatStatus {
     int  fp = -1;
     const char* skill = "idle";     // skill state: idle | recording | replaying | window
     int  skillsRecorded = 0;        // ash-of-war recordings held this session
+    int  castAimHand = -1;          // hand aiming ranged effects (-1 = head)
+    bool casting = false;           // inside the press window (body turns to the ray)
 };
 CombatStatus CombatGetStatus();
 }

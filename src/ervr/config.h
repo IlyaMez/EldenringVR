@@ -256,7 +256,9 @@ struct Config {
     float swingOffSpeed = 1.5f;           // m/s tip speed below which the swing ends
     float heavySwingSpeed = 6.0f;         // m/s peak tip speed (during the arm window) that makes it a heavy attack
     float minHandSpeed = 0.8f;            // m/s controller (not tip) speed required to start (rejects wrist flicks)
-    float weaponReachRight = 0.8f, weaponReachLeft = 0.5f;   // m from controller to weapon tip (lever arm for tip speed)
+    float weaponReachRight = 0.8f, weaponReachLeft = 0.5f;   // m from controller to weapon tip (lever arm for tip speed) when the weapon category is unknown
+    std::string weaponGeometry;           // "wepType:length:comFraction,..." overrides of the per-category geometry table
+    float kineticRefReach = 0.8f;         // lever the KineticRefSpeed is defined for; quality 1 scales with weapon length / this (0 = no scaling)
     float swingArmWindow = 0.06f;         // s to observe the peak before choosing light/heavy
     float swingMaxSeconds = 0.6f;         // s hard limit for one attack instance
     float swingCooldown = 0.25f;          // s after a swing before another can start
@@ -296,6 +298,8 @@ struct Config {
     bool  kineticInertia = true;
     float inertiaAngAccel = 300.f;        // rad/s^2 at weight 0
     float inertiaSpringHz = 8.f;          // stiffness of the chase near the target (higher = tighter tracking)
+    float inertiaBrake = 3.f;             // braking (and stop-distance) acceleration as a multiple of the cap: a wrist stops a weapon more easily than it starts one
+    float inertiaComRef = 0.5f;           // m centre-of-mass distance at which weight counts fully for rotation (angular cap /= 1 + w/W * (com/ref)^2)
     bool  inertiaNoOverrun = true;        // the weapon never moves toward the hand faster than the hand (no catch-up whip)
     float inertiaMaxLag = 0.5f;           // m the hand can get ahead of the weapon before dragging it
     float inertiaMaxLagAngle = 2.0f;      // rad likewise (must stay < pi: the rotation error flips past 180 degrees)
@@ -352,6 +356,20 @@ struct Config {
     float skillRecordSeconds = 3.0f;      // how long after the game-driven press events are recorded
     float skillSwingWindow = 2.5f;        // s after an effect-skill during which the next swing uses the skill's attack row
     bool  skillChargeFp = true;           // "effect" charges the skill's FP (SwordArtsParam) and refuses without it
+    // Cast aim: ranged spells, ranged skills and bows fly where the CASTING HAND points, not where the head looks.
+    // The game aims an unlocked bullet from the player's aim view matrix (ChrIns+0x120, which [FirstPerson]
+    // WriteAim fills from the head) and the lock-on target point; the cast animation's SetBulletAimAngle event
+    // (TAE 238) clamps the vertical/lateral aim with limits and deadzones. With a casting hand ERVR fills the
+    // matrix and the target from the controller's ray and relaxes the event (the erfps2 first-person mechanism).
+    bool  castAim = true;
+    std::string castAimHand = "auto";     // auto (the hand whose attack/skill button was pressed last, else the one holding a ranged weapon, else the right) | right | left
+    float castAimSeconds = 0.5f;          // s the aim stays live after the animation's last aim event (238 SetBulletAimAngle / 2 BulletBehavior). Only those events arm it: a press never does (guard / grip-mapped presses forced the lock and the game turned the body after the hand, 2026-09-04)
+    std::string castAimAxis = "aim";      // aim (where the controller points) | handle (up the handle: the staff's own direction)
+    float castAimPitchOffsetDeg = 0.f;    // tilt added to the ray (positive = up)
+    bool  castAimTurnBody = false;        // while a cast is live the BodyYaw target follows the ray. Off: the visible body stays on your head (the game turns the physics character toward the lock target underneath, invisibly under PoseMode=vr); on, the rig and the camera anchor swung with the arm and snapped back (2026-09-04)
+    float castAimLimitDeg = 80.f;         // raise the animation's SetBulletAimAngle limits to at least this (0 = leave them); the deadzones are always zeroed
+    bool  castAimForceLock = true;        // FaceCameraMode=strafe: during the press window also force the lock-on state onto the ray's far point (the lock target is what aims an unlocked spell - erfps2's way)
+    std::string castAimWeaponTypes = "50,51,53,55,56,57,61,89,91";   // wepTypes that make a hand the passive aim hand (bows, staffs, seals, perfumes, throwing blades); their attack buttons pass the physical block
     std::wstring iniPath;                 // where Load() read from (for SaveLearned)
 
     // [Cheats]  offline convenience for testing (writes the save's PlayerGameData)

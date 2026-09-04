@@ -193,6 +193,8 @@ void Config::Load(const std::wstring& path) {
     minHandSpeed = GetF(ini, L"Combat", L"MinHandSpeed", minHandSpeed);
     weaponReachRight = GetF(ini, L"Combat", L"WeaponReachRight", weaponReachRight);
     weaponReachLeft = GetF(ini, L"Combat", L"WeaponReachLeft", weaponReachLeft);
+    weaponGeometry = GetS(ini, L"Combat", L"WeaponGeometry", weaponGeometry);
+    kineticRefReach = GetF(ini, L"Combat", L"KineticRefReach", kineticRefReach);
     swingArmWindow = GetF(ini, L"Combat", L"ArmWindow", swingArmWindow);
     swingMaxSeconds = GetF(ini, L"Combat", L"MaxSwingSeconds", swingMaxSeconds);
     swingCooldown = GetF(ini, L"Combat", L"Cooldown", swingCooldown);
@@ -231,6 +233,8 @@ void Config::Load(const std::wstring& path) {
     kineticInertia = GetB(ini, L"Combat", L"Inertia", kineticInertia);
     inertiaAngAccel = GetF(ini, L"Combat", L"InertiaAngAccel", inertiaAngAccel);
     inertiaSpringHz = GetF(ini, L"Combat", L"InertiaSpringHz", inertiaSpringHz);
+    inertiaComRef = GetF(ini, L"Combat", L"InertiaComRef", inertiaComRef);
+    inertiaBrake = GetF(ini, L"Combat", L"InertiaBrake", inertiaBrake);
     inertiaNoOverrun = GetB(ini, L"Combat", L"InertiaNoOverrun", inertiaNoOverrun);
     inertiaMaxLag = GetF(ini, L"Combat", L"InertiaMaxLag", inertiaMaxLag);
     inertiaMaxLagAngle = GetF(ini, L"Combat", L"InertiaMaxLagAngle", inertiaMaxLagAngle);
@@ -280,6 +284,15 @@ void Config::Load(const std::wstring& path) {
     skillRecordSeconds = GetF(ini, L"Combat", L"SkillRecordSeconds", skillRecordSeconds);
     skillSwingWindow = GetF(ini, L"Combat", L"SkillSwingWindow", skillSwingWindow);
     skillChargeFp = GetB(ini, L"Combat", L"SkillChargeFP", skillChargeFp);
+    castAim = GetB(ini, L"Combat", L"CastAim", castAim);
+    castAimHand = GetS(ini, L"Combat", L"CastAimHand", castAimHand);
+    castAimSeconds = GetF(ini, L"Combat", L"CastAimSeconds", castAimSeconds);
+    castAimAxis = GetS(ini, L"Combat", L"CastAimAxis", castAimAxis);
+    castAimPitchOffsetDeg = GetF(ini, L"Combat", L"CastAimPitchOffsetDeg", castAimPitchOffsetDeg);
+    castAimTurnBody = GetB(ini, L"Combat", L"CastAimTurnBody", castAimTurnBody);
+    castAimLimitDeg = GetF(ini, L"Combat", L"CastAimLimitDeg", castAimLimitDeg);
+    castAimForceLock = GetB(ini, L"Combat", L"CastAimForceLock", castAimForceLock);
+    castAimWeaponTypes = GetS(ini, L"Combat", L"CastAimWeaponTypes", castAimWeaponTypes);
 
     fpEnabled = GetB(ini, L"FirstPerson", L"Enabled", fpEnabled);
     fpEyeHeight = GetF(ini, L"FirstPerson", L"EyeHeight", fpEyeHeight);

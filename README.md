@@ -468,6 +468,41 @@ calls (slot 2 for generic events, slot 3 for behaviors), with a stable args copy
   a long buzz when FP is short; if the row is unreadable the FP the game took during the recording is used.
 * Charged (hold) skills replay their tap version; stance skills' R1/R2 follow-ups are the plain rows.
 
+## Cast aim — spells, ranged skills and bows fly where the casting hand points
+
+Unlocked, ELDEN RING aims a bullet from the player's **aim view matrix** (`ChrIns+0x120`, which `[FirstPerson]
+WriteAim` fills from your head) and the **lock-on target point**, and the cast animation's `SetBulletAimAngle`
+TAE event (238) clamps that aim with limits and deadzones sized for a camera a few degrees off the body. erfps2
+drives the same three things for its first-person camera; ERVR drives them from the **controller**:
+
+- **What arms it.** Only the game's own aim events: `SetBulletAimAngle` (238) at a cast's start and
+  `BulletBehavior` (2) at every bullet the player fires; the aim stays live `CastAimSeconds` after the last one.
+  A press never arms it — guard and grip-mapped buttons are presses too, and forcing the lock on them made the
+  game turn the body after the hand. Outside a live cast the head aims exactly as before.
+- **Which hand casts.** The hand whose attack/skill button the game was handed last, within 3 s (RB/RT = the right
+  weapon, LB = the left weapon unless it is a shield, LT = the skill; two-handed = that weapon's hand); else the
+  hand holding a ranged weapon; else the right. That is a *live* cast. Your visible body stays
+  where your head is: the game turns the physics character toward the lock target underneath, which PoseMode=vr
+  hides (`CastAimTurnBody=true` steers the rig and the camera anchor after the arm instead — it swung and snapped
+  back on every cast, so it is off). Outside a press the head aims as before: a merely held catalyst never aims (its ray as the
+  lock target made the game turn the body after the hand while walking). The `CastAimWeaponTypes` classes (staff,
+  seal, bow, crossbow, perfume bottle, throwing blade) only route buttons — a ranged class in the attacking hand
+  lets RB/RT through `BlockAttackButtons`: with a staff, the trigger casts.
+- **Where.** The aim matrix looks along the controller's ray *from the hand*, the fake lock target sits down the
+  same ray (pitch included) with the lock-on state forced, and for the player's own 238 / 700
+  (`EnableTwistModifier`) events the deadzones are zeroed and the limits raised to `CastAimLimitDeg`. The game's
+  lock-target update (erfps2's `UPDATE_LOCK_TGT`, 0x716260) rewrites the player's lock state every frame, so a
+  lock forced at the camera step is gone by the time the bullet spawns — ERVR hooks that update and re-forces the
+  state right after it, during a live cast. A real lock-on still wins: the game aims at the enemy.
+- **Knobs** (`[Combat]`): `CastAim`, `CastAimHand=auto|right|left`, `CastAimSeconds`, `CastAimAxis=aim|handle`
+  (where the controller points, or up its handle — the staff's own direction), `CastAimPitchOffsetDeg`,
+  `CastAimTurnBody`, `CastAimLimitDeg`, `CastAimWeaponTypes`, and `CastAimForceLock` — `FaceCameraMode=strafe`
+  only: force the lock-on state onto the ray's far point during a live cast (on by default; `lock` mode has the
+  state forced anyway).
+- **Log.** `[combat] cast aim: the right hand holds a ranged weapon and aims`, `cast aim: right hand aims (light
+  attack)`, with `Debug=true` the 238 rewrite (`SetBulletAimAngle limits ... -> ...`), and the heartbeat's
+  `cast aim right hand (cast live)`.
+
 ## Troubleshooting notes (learned the hard way)
 
 * **The game imports `XINPUT1_4.dll` by ordinal** (2 = `XInputGetState`, 3 = `XInputSetState`), and overlays and

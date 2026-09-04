@@ -79,6 +79,12 @@ constexpr uint32_t RVA_MmsUpdateChrCam  = 0xb02390;   // per-frame ChrCam update
 constexpr uint32_t RVA_FollowCamFollow  = 0x3b6e20;   // ChrExFollowCam::follow (erfps2 FOLLOW_CAM_FOLLOW)
 constexpr uint32_t RVA_UpdateFollowCam  = 0x3b7560;   // outer follow-cam update, fn(ChrExFollowCam*) (erfps2 UPDATE_FOLLOW_CAM)
 constexpr uint32_t RVA_UpdateChrModelPos = 0x3ca950;  // per-chr model matrix update, fn(ChrCtrl*) (erfps2 UPDATE_CHR_MODEL_POS) - late in the frame, after the upper-body anim layer
+// The game's lock-target update, fn(LockTgtMan*, float dt) (erfps2 UPDATE_LOCK_TGT, 1.16.2 table). It rewrites the
+// player's lock state from the real target list every frame, so a lock we force at the camera step is gone by the
+// time a cast animation spawns its bullet - erfps2 re-forces its first-person lock AFTER this call, and so does
+// cast aim (its ray target + lock flag are what aim an unlocked spell).
+constexpr uint32_t RVA_UpdateLockTgt = 0x716260;
+constexpr const char* AOB_UpdateLockTgt = "48 8b c4 55 56 57 41 54 41 55 41 56 41 57 48 8d a8 88 fe ff ff 48 81 ec 40 02 00 00 48 c7 45 e0 fe ff ff ff";   // its prologue (unique in 2.6.2.0)
 // Havok pose evaluation. Found with the pose scanner: the bulk pose store at +0x24e3 (rva 0x146b793) rewrites the
 // live pose AFTER all three of our write points, which is what the weapon attachments then sample - the arms stay
 // ours (the mesh consumer at 0x1652f80 reads earlier) while the weapons keep swinging with the animation.
@@ -147,6 +153,8 @@ using FnMmsUpdate = void (__fastcall*)(void*);
 using FnFollow = void (__fastcall*)(void* followCam, float dt, void* c);
 using FnUpdFollow = void (__fastcall*)(void* followCam);
 using FnUpdModelPos = void (__fastcall*)(void* chrCtrl);
+using FnUpdLockTgt = void (__fastcall*)(void* lockTgtMan, float dt);
+FnUpdLockTgt g_origUpdLockTgt = nullptr;
 using FnPoseEval = uint64_t (__fastcall*)(void*, void*, void*, void*);   // 4 int args + RAX forwarded (still an ABI guess - see fpPoseAfterHavok)
 FnMmsUpdate g_origMms = nullptr; FnFollow g_origFollow = nullptr; FnUpdFollow g_origUpdFollow = nullptr;
 FnUpdModelPos g_origUpdModelPos = nullptr; FnPoseEval g_origPoseEval = nullptr;
@@ -393,11 +401,25 @@ Quat RenderRootQ(uint8_t* chr, const Quat& fallback) {
 //               facing, verified; the model matrix rotation was never verified against the physics one)
 //   modelmatrix both from the model matrix
 //   physics     both from the physics module
+//
+// The root is YAW ONLY. The physics orientation is not always a pure yaw: locked onto a target above or below the
+// character (cast aim's ray target above all) the game pitches it toward the target while the model matrix the
+// renderer uses stays level (2026-09-04 log: root and the live head dummy fixed, the template head anchor 1 m off
+// sideways and 0.8 m down while the casting hand tilted - the camera "moved with the hand"). Every consumer here
+// (camera anchor, rig yaw, calibration) wants the facing, so the tilt is stripped before anyone sees it.
+Quat YawOnlyRoot(const Quat& q) {
+    const Vec3 f = q.Rotate({0.f, 0.f, -1.f});
+    if (f.x * f.x + f.z * f.z < 1e-4f) return q;   // facing straight up/down: no yaw to keep
+    static bool s_warned = false;
+    if (!s_warned && std::fabs(f.y) > 0.087f) { s_warned = true; LOGI("[fp] physics root is pitched %.0f deg (lock turn toward a high/low target?) - using its yaw only", Rad2Deg(std::asin(Clamp(f.y, -1.f, 1.f)))); }
+    return Quat::YawQ(std::atan2(f.x, f.z) + 3.14159265f);   // YawQ(a).Rotate(0,0,-1) = (-sin a, 0, -cos a): a = facing + pi
+}
 bool SkeletonRoot(uint8_t* chr, Vec3& pos, Quat& q) {
     const std::string& src = Cfg().fpArmRootSource;
-    if (src == "modelmatrix" && ModelMatrixRoot(chr, pos, q)) return true;
+    if (src == "modelmatrix" && ModelMatrixRoot(chr, pos, q)) { q = YawOnlyRoot(q); return true; }
     if (!PlayerRoot(chr, pos, q)) return false;
     if (src != "physics") { Vec3 mp; if (ModelMatrixPos(chr, mp)) pos = mp; }
+    q = YawOnlyRoot(q);
     return true;
 }
 
@@ -739,7 +761,10 @@ namespace posescan {
 // lagged one and combat reads its motion back through GameERWeaponMotion.
 struct InertiaState {
     bool init = false;
+    uint32_t frame = 0xFFFFFFFFu;   // rendered frame the state was last integrated for
     Vec3 pos, vel, lastTarget; Quat q, lastTargetQ; Vec3 angVel;
+    Vec3 vTf, wTf;                  // low-passed finite-difference hand velocity (fallback when the runtime gives none)
+    float dtAvg = 0.f;              // frame period, smoothed: the hook that fires first each frame varies, the sample period does not
     double t = 0;
     float arc = 0.f, tipSpeed = 0.f, handSpeed = 0.f; double stamp = 0;   // report (under g_inertiaMtx)
 };
@@ -754,69 +779,116 @@ Vec3 QuatToRotVec(const Quat& qIn) {   // axis * angle of a unit quaternion, sho
     return Vec3{n.x, n.y, n.z} * (ang / s);
 }
 
-void InertiaStep(int h, Vec3& p, Quat& q, double now) {
+void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, double now) {
     const Config& c = Cfg();
+    // BuildFrame runs from several hooks per frame, on a pool of worker threads. Serialise, and
+    // integrate once per rendered frame: a repeat call gets the pose already computed. Unsynchronised
+    // repeats saw microsecond dts, hand-velocity estimates in the thousands and (through the
+    // velocity clamps below) weapons flung at 100+ rad/s on the slightest movement (2026-09-04).
+    std::lock_guard<std::mutex> lock(g_inertiaMtx);
     InertiaState& s = g_inertia[h];
+    const uint32_t fr = g_frame;
+    if (s.init && s.frame == fr) { p = s.pos; q = s.q; return; }
+    s.frame = fr;
     const float weight = CombatHandWeight(h);
-    float dt = s.init ? (float)(now - s.t) : 0.f; s.t = now;
-    const bool goodDt = dt > 0.f && dt <= 0.1f;
-    Vec3 vT = goodDt ? (p - s.lastTarget) * (1.f / dt) : Vec3{};
-    Vec3 wT = goodDt ? QuatToRotVec((q * s.lastTargetQ.Conj()).Normalized()) * (1.f / dt) : Vec3{};
+    float dtRaw = s.init ? (float)(now - s.t) : 0.f; s.t = now;
+    const bool goodDt = dtRaw >= 0.001f && dtRaw <= 0.1f;
+    // Integrate over the smoothed frame period: the raw gap between first-calls jitters with which hook
+    // fires first, and integrating a regular pose stream over an irregular dt is itself jitter.
+    if (goodDt) s.dtAvg = s.dtAvg > 0.f ? s.dtAvg + 0.1f * (dtRaw - s.dtAvg) : dtRaw;
+    const float dt = s.dtAvg;
+    // Hand velocity: the runtime's own tracked velocities when it gives them (fused, far cleaner than a
+    // per-frame finite difference, whose noise x the spring's gain used to saturate a heavy weapon's small
+    // acceleration cap in a random direction every frame = jitter), else a low-passed finite difference.
+    Vec3 vT, wT;
+    if (goodDt) {
+        Vec3 vFd = (p - s.lastTarget) * (1.f / dtRaw), wFd = QuatToRotVec((q * s.lastTargetQ.Conj()).Normalized()) * (1.f / dtRaw);
+        const float kf = dt / (dt + 0.02f);
+        s.vTf = s.vTf + (vFd - s.vTf) * kf; s.wTf = s.wTf + (wFd - s.wTf) * kf;
+        const bool haveRt = vRt.Length() > 1e-4f || wRt.Length() > 1e-4f;
+        vT = haveRt ? vRt : s.vTf; wT = haveRt ? wRt : s.wTf;
+    }
+    // No controller moves faster than this; anything beyond is a bad sample, not a swing.
+    { float m = vT.Length(); if (m > 30.f) vT = vT * (30.f / m); m = wT.Length(); if (m > 120.f) wT = wT * (120.f / m); }
+    const Vec3 pPrev = s.lastTarget; const Quat qPrev = s.lastTargetQ;
     s.lastTarget = p; s.lastTargetQ = q;
     if (!c.kineticInertia || weight <= 0.f || !s.init || !goodDt || (p - s.pos).Length() > 1.5f) {
         // 1:1 (empty hand / disabled / first sample / snap): velocities are the controller's own.
         s.vel = vT; s.angVel = wT; s.pos = p; s.q = q; s.init = true;
     } else {
-        const float wf = 1.f + weight / (c.kineticAccelWeight > 0.1f ? c.kineticAccelWeight : 4.f);
+        const float W = c.kineticAccelWeight > 0.1f ? c.kineticAccelWeight : 4.f;
+        const float wf = 1.f + weight / W;
+        // Rotation about the grip resists with mass x (centre-of-mass distance)^2, not with mass alone:
+        // a great hammer's head a metre out fights a turn far harder than a dagger's blade of equal
+        // weight, and a shield's mass at the fist barely resists it. InertiaComRef is the distance at
+        // which weight counts fully (a greatsword-ish balance point).
+        const float comRef = c.inertiaComRef > 0.05f ? c.inertiaComRef : 0.5f, com = CombatHandCom(h) / comRef;
+        const float wfa = 1.f + (weight / W) * com * com;
         const float aMax = (c.kineticAccel > 1.f ? c.kineticAccel : 60.f) / wf;
-        const float alMax = (c.inertiaAngAccel > 1.f ? c.inertiaAngAccel : 300.f) / wf;
+        const float alMax = (c.inertiaAngAccel > 1.f ? c.inertiaAngAccel : 300.f) / wfa;
+        // Braking is allowed at InertiaBrake x the cap: stopping a swing is easier than making one.
+        const float brake = c.inertiaBrake > 1.f ? c.inertiaBrake : 1.f;
         const float w0 = 6.2831853f * (c.inertiaSpringHz > 0.5f ? c.inertiaSpringHz : 8.f);
-        const float k = w0 * w0, d = 2.f * w0;
-        // Braking is allowed at twice the cap: stopping a swing is easier than making one.
         // Drag: the hand can only get so far ahead of a weapon it is holding. Beyond that the weapon
         // is pulled along at the hand's speed (also keeps the rotation error on the short side of 180
         // degrees, where the shortest-way rotvec would otherwise flip and send the weapon the long
-        // way round).
+        // way round). Dragged, the weapon keeps up with the hand along the drag direction (at least).
+        Vec3 pRef = pPrev; Quat qRef = qPrev;   // the target the weapon's error is measured against
         {
             Vec3 g = p - s.pos; float gl = g.Length();
-            if (gl > c.inertiaMaxLag) { s.pos = p - g * (c.inertiaMaxLag / gl); s.vel = vT; }
+            if (gl > c.inertiaMaxLag) { Vec3 dir = g * (1.f / gl); s.pos = p - dir * c.inertiaMaxLag; float need = (vT - s.vel).Dot(dir); if (need > 0.f) s.vel = s.vel + dir * need; pRef = p; }
             Vec3 e = QuatToRotVec((q * s.q.Conj()).Normalized()); float el = e.Length();
-            if (el > c.inertiaMaxLagAngle) { s.q = (Quat::AxisAngle(e * (1.f / el), el - c.inertiaMaxLagAngle) * s.q).Normalized(); s.angVel = wT; }
+            if (el > c.inertiaMaxLagAngle) { Vec3 dir = e * (1.f / el); s.q = (Quat::AxisAngle(dir, el - c.inertiaMaxLagAngle) * s.q).Normalized(); float need = (wT - s.angVel).Dot(dir); if (need > 0.f) s.angVel = s.angVel + dir * need; qRef = q; }
         }
-        Vec3 a = (p - s.pos) * k + (vT - s.vel) * d;
-        { float m = a.Length(), lim = a.Dot(s.vel) < 0 ? 2.f * aMax : aMax; if (m > lim) a = a * (lim / m); }
-        Vec3 velN = s.vel + a * dt;
-        Vec3 al = QuatToRotVec((q * s.q.Conj()).Normalized()) * k + (wT - s.angVel) * d;
-        { float m = al.Length(), lim = al.Dot(s.angVel) < 0 ? 2.f * alMax : alMax; if (m > lim) al = al * (lim / m); }
-        Vec3 angN = s.angVel + al * dt;
+        // Critically damped spring, stepped in closed form in the hand's frame: the weapon is carried with
+        // the hand's motion over the frame and the spring works on the error alone (so a steadily moving
+        // hand tracks with no lag). The explicit step used before dithered about the target at frame
+        // rate with a stiff spring (w0*dt ~ 0.7), which on a heavy weapon saturated its small caps in a
+        // random direction every frame - the jitter. The caps apply to the acceleration the step implies;
+        // a capped or clamped step falls back to plain integration of the limited velocity.
+        const float xx = w0 * dt, ex = 1.f / (1.f + xx + 0.48f * xx * xx + 0.235f * xx * xx * xx);
+        auto spring = [&](const Vec3& e, const Vec3& ev, Vec3& e2, Vec3& ev2) {
+            Vec3 temp = (ev + e * w0) * dt;
+            ev2 = (ev - temp * w0) * ex; e2 = (e + temp) * ex;
+        };
+        Vec3 e2, ev2; spring(s.pos - pRef, s.vel - vT, e2, ev2);
+        Vec3 velN = vT + ev2; bool exactL = true;
+        { Vec3 a = (velN - s.vel) * (1.f / dt); float m = a.Length(), lim = a.Dot(s.vel) < 0 ? brake * aMax : aMax; if (m > lim) { velN = s.vel + a * (lim / m * dt); exactL = false; } }
+        Vec3 ea2, eav2; spring(QuatToRotVec((s.q * qRef.Conj()).Normalized()), s.angVel - wT, ea2, eav2);
+        Vec3 angN = wT + eav2; bool exactA = true;
+        { Vec3 a = (angN - s.angVel) * (1.f / dt); float m = a.Length(), lim = a.Dot(s.angVel) < 0 ? brake * alMax : alMax; if (m > lim) { angN = s.angVel + a * (lim / m * dt); exactA = false; } }
         // The capped spring on its own overshoots: braking is capped too, so a lagging weapon keeps
         // closing on the hand at full speed and whips 30-45 degrees past where the hand stopped (a
         // mid-weight weapon even out-runs the hand by ~30% catching up). Two clamps on the velocity
-        // component toward the hand fix that: (1) approach no faster than 2x-cap braking can still
-        // stop within the gap (no overshoot: the lagging weapon follows through to the hand and stops
-        // there); (2) InertiaNoOverrun: never faster than the hand itself is moving that way, plus a
-        // small catch-up allowance so a resting hand's weapon still settles onto it.
-        auto clamp = [&](Vec3& vN, const Vec3& vOld, const Vec3& vHand, const Vec3& gap, float brake, float allow) {
-            float gl = gap.Length(); if (gl < 1e-5f) return;
+        // component toward the hand fix that: (1) approach no faster than braking can still stop within
+        // the gap (no overshoot: the lagging weapon follows through to the hand and stops there);
+        // (2) InertiaNoOverrun: never faster than the hand itself is moving that way, plus a small
+        // catch-up allowance so a resting hand's weapon still settles onto it.
+        // Both are one-sided brakes on the weapon's own approach: a hand coming back toward the weapon
+        // asks nothing of it (hand floored at 0 - a negative cap used to fling the weapon backwards),
+        // and the cut is itself acceleration-limited (braking, never teleporting a velocity).
+        auto clamp = [&](Vec3& vN, const Vec3& vOld, const Vec3& vHand, const Vec3& gap, float brk, float allow) -> bool {
+            float gl = gap.Length(); if (gl < 1e-5f) return false;
             Vec3 dir = gap * (1.f / gl);
-            float along = vN.Dot(dir), hand = vHand.Dot(dir);
-            float cap = hand + 0.9f * std::sqrt(2.f * brake * gl);
+            float along = vN.Dot(dir), hand = vHand.Dot(dir); if (hand < 0.f) hand = 0.f;
+            float cap = hand + 0.9f * std::sqrt(2.f * brk * gl);
             if (c.inertiaNoOverrun) { float run = (hand > vOld.Dot(dir) ? hand : vOld.Dot(dir)) + allow; if (run < cap) cap = run; }
-            if (along > cap) vN = vN - dir * (along - cap);
+            float cut = along - cap; if (cut <= 0.f) return false;
+            if (cut > brk * dt) cut = brk * dt;
+            vN = vN - dir * cut; return true;
         };
-        clamp(velN, s.vel, vT, p - s.pos, 2.f * aMax, 0.5f);
-        clamp(angN, s.angVel, wT, QuatToRotVec((q * s.q.Conj()).Normalized()), 2.f * alMax, 2.f);
-        s.vel = velN; s.pos = s.pos + s.vel * dt;
+        if (clamp(velN, s.vel, vT, p - s.pos, brake * aMax, 0.5f)) exactL = false;
+        if (clamp(angN, s.angVel, wT, QuatToRotVec((q * s.q.Conj()).Normalized()), brake * alMax, 2.f)) exactA = false;
+        s.vel = velN; s.pos = exactL ? p + e2 : s.pos + s.vel * dt;
         s.angVel = angN;
-        float wm = s.angVel.Length();
-        if (wm > 1e-6f) s.q = (Quat::AxisAngle(s.angVel * (1.f / wm), wm * dt) * s.q).Normalized();
+        if (exactA) { float el2 = ea2.Length(); s.q = el2 > 1e-6f ? (Quat::AxisAngle(ea2 * (1.f / el2), el2) * q).Normalized() : q; }
+        else { float wm = s.angVel.Length(); if (wm > 1e-6f) s.q = (Quat::AxisAngle(s.angVel * (1.f / wm), wm * dt) * s.q).Normalized(); }
         p = s.pos; q = s.q;
     }
     // Motion report: the weapon tip = hand + forward (game +Z) * reach.
-    const float reach = h == HandRight ? c.weaponReachRight : c.weaponReachLeft;
+    const float reach = CombatHandReach(h);
     Vec3 tipV = s.vel + s.angVel.Cross(s.q.Rotate({0, 0, 1}) * reach);
     const float tip = tipV.Length();
-    std::lock_guard<std::mutex> g(g_inertiaMtx);
     if (goodDt) { if (tip >= c.swingOffSpeed) s.arc += tip * dt; else s.arc = 0.f; }
     s.tipSpeed = tip; s.handSpeed = s.vel.Length(); s.stamp = now;
 }
@@ -838,6 +910,37 @@ struct FrameInfo {
     float bodyYaw = 0;   // absolute yaw the body is driven toward: facing, torso twist, elbow poles
     Vec3  handP[2]; Quat handQ[2]; bool handValid[2]{};
 };
+
+// ---------------------------------------------------------------- cast aim
+// The ray a casting hand aims along, in the game world: origin = the controller (placed exactly as the arm
+// solver places the hand, so it matches the rendered weapon), direction = the controller's pointing axis
+// (CastAimAxis=aim) or up its handle (=handle, the staff's own direction), tilted by CastAimPitchOffsetDeg.
+bool CastAimRay(const FrameInfo& f, int h, Vec3& origin, Vec3& dir) {
+    const Config& c = Cfg();
+    if (h < 0 || h > 1 || !f.handValid[h]) return false;
+    const Quat baseQ = Quat::YawQ(f.baseYaw);
+    float handRotX = c.handRotOffX;
+    DebugKeysHandRotX(&handRotX);
+    const Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
+    const Quat cq = (baseQ * f.handQ[h] * calib).Normalized();
+    const Vec3 cf = cq.Rotate({0, 0, 1}), cu = cq.Rotate({0, 1, 0});   // controller forward / up (game frame)
+    Vec3 d = c.castAimAxis == "handle" ? cu : cf;
+    if (c.castAimPitchOffsetDeg != 0.f) {
+        const Vec3 axis = d.Cross(Vec3{0, 1, 0});   // rotating about (dir x up) by a positive angle tilts the ray UP
+        if (axis.Length() > 1e-3f) d = Quat::AxisAngle(axis, Deg2Rad(c.castAimPitchOffsetDeg)).Rotate(d);
+    }
+    Vec3 p = f.anchor + baseQ.Rotate(f.handP[h] * c.handScale) - cf * c.handBackOffset;
+    if (c.handOrigin == "head") p = p + (f.eye - f.anchor);   // hands are head-relative: re-add where the view actually is
+    origin = p; dir = d.Normalized();
+    return dir.Length() > 0.5f;
+}
+// Camera-style basis (right, up) around a forward vector, same handedness as CamBasis.
+void AimBasis(const Vec3& fwd, float fallbackYaw, Vec3& right, Vec3& up) {
+    right = Vec3{0, 1, 0}.Cross(fwd);
+    if (right.Length() < 1e-3f) right = {std::cos(fallbackYaw), 0.f, -std::sin(fallbackYaw)};   // straight up/down: keep the body's right
+    right = right.Normalized();
+    up = fwd.Cross(right).Normalized();
+}
 
 // ---------------------------------------------------------------- play-space origin
 // The runtime hands us head/hand positions relative to *its* origin (wherever you were standing when the
@@ -1041,20 +1144,14 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
             f.headYaw = std::atan2(hf.x - hf.y * hu.x, hf.z - hf.y * hu.z);
         }
         g_headYaw.store(f.headYaw); g_headYawValid.store(true);
-        // Body: chase the head yaw (default) so shoulders/torso follow your real body; locked on, the game aims it.
-        float want;
-        if (!g_bodyYawInit) g_bodyStickYaw.store(f.baseYaw);   // start facing the view, not world yaw 0
-        if (f.lockedOn || c.bodyYawSource == "camera") want = f.baseYaw;
-        else if (c.bodyYawSource == "head") want = WrapPi(f.baseYaw + f.headYaw);
-        else want = g_bodyStickYaw.load();                       // stick: absolute, right stick turns it
-        f.bodyYaw = UpdateBodyYaw(want, NowSec(), f.lockedOn || c.bodyYawSource == "camera");
         for (int h = 0; h < 2; ++h) {
             const Pose& hand = tr.hand[h];
             f.handValid[h] = hand.valid && in.controllerConnected[h];
             if (!f.handValid[h]) continue;
             Vec3 p = ToGame(hand.pos); Quat q = ToGame(hand.rot);
             // Weight: the hand the arm solver gets is the inertial one, filtered in drift-free play space.
-            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, NowSec()); p = pPlay + psOrigin; }
+            // Runtime velocities go through the same VR->game mapping: vectors flip z, axial (angular) vectors flip x,y.
+            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, ToGame(hand.linVel), Vec3{-hand.angVel.x, -hand.angVel.y, hand.angVel.z}, NowSec()); p = pPlay + psOrigin; }
             // All three origins end up drift-free: "head" is head-relative by construction (the head offset is
             // added back at the target), the other two are measured from our own play-space origin.
             if (c.handOrigin == "head") p = p - hp;
@@ -1062,6 +1159,19 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
             else p = p - psOrigin;
             f.handP[h] = p; f.handQ[h] = q;
         }
+        // Body: chase the head yaw (default) so shoulders/torso follow your real body; locked on, the game aims it.
+        // A live cast (CastAimTurnBody) turns it toward where the casting hand points instead - the game's own
+        // turn-to-target, done by us because the physics facing is pinned to BodyYaw.
+        float want; bool instant = f.lockedOn || c.bodyYawSource == "camera";
+        if (!g_bodyYawInit) g_bodyStickYaw.store(f.baseYaw);   // start facing the view, not world yaw 0
+        if (instant) want = f.baseYaw;
+        else if (c.bodyYawSource == "head") want = WrapPi(f.baseYaw + f.headYaw);
+        else want = g_bodyStickYaw.load();                       // stick: absolute, right stick turns it
+        if (c.castAim && c.castAimTurnBody && !f.lockedOn) {
+            bool casting = false; const int ah = CombatCastAimHand(&casting); Vec3 o, d;
+            if (casting && CastAimRay(f, ah, o, d) && d.x * d.x + d.z * d.z > 0.05f) { want = std::atan2(d.x, d.z); instant = false; }
+        }
+        f.bodyYaw = UpdateBodyYaw(want, NowSec(), instant);
     }
     if (!(vr && tr.head.valid)) { f.eye = f.anchor; g_headYawValid.store(false); }
     f.valid = true;
@@ -1077,7 +1187,11 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
 // baseYaw - so any lateral error between the game's camera position and ours feeds straight back into our
 // facing. At the old 10 m the loop had enough gain that simply strafing (the game's follow cam lags behind
 // you) rotated you a little further every frame; at fpLockTargetDistance the same lag is a rounding error.
-void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw) {
+//
+// Cast aim: with a casting hand (aimO/aimD = its ray) the fake target sits down THAT ray - pitch included, so
+// an unlocked bullet aimed at the target flies where the hand points - and, in strafe mode with
+// CastAimForceLock, the lock-on state is forced for the press window (`casting`) like erfps2 does.
+void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw, const Vec3* aimO, const Vec3* aimD, bool casting) {
     const Config& c = Cfg();
     if (!c.fpFaceCamera || c.fpFaceCameraMode == "off") return;
     // Facing/lock-state choke point: while the world is dying, do not pin a dying body's
@@ -1086,13 +1200,23 @@ void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw) {
     int64_t enemy = -1; RD(player + off::PI_LockedEnemy, enemy);
     bool realLock = enemy != -1 && enemy != 0;
     if (uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl)) WR(ctrl + off::Ctrl_IsUnlocked, (uint8_t)0);
+    const float d = std::fmax(1.f, c.fpLockTargetDistance);
+    // The ray steers the target only while a cast is LIVE: in lock mode the game turns the character toward the
+    // target while moving, and a target that follows a seal held at your side spun the body around (2026-09-04).
+    const bool handAim = aimO && aimD && casting;
+    Vec3 tgt;
+    if (handAim) tgt = *aimO + *aimD * d;
+    else { Vec3 flat{std::sin(bodyYaw), 0.f, std::cos(bodyYaw)}; tgt = root + Vec3{0.f, c.fpEyeHeight, 0.f} + flat * d; }
+    const float t4[4] = {tgt.x, tgt.y, tgt.z, 1.f};
     if (c.fpFaceCameraMode == "strafe") {
         // Strafe movement WITHOUT the game's lock-on state. Forcing Chr_IsLockedOn=1 (the old "lock" mode)
         // engages the game's lock-on *camera* - a camera writer we do not hook - and that camera orbits the
         // character while strafing and swallows our stick turns. Ctrl_IsUnlocked=0 alone keeps the movement in
         // strafe animations; the rig facing is ours anyway (BodyRotate / PoseMode=vr).
         if (!realLock) {
-            WR(player + off::Chr_IsLockedOn, (uint8_t)0);   // clear a flag a previous "lock" mode may have left
+            const bool forceLock = handAim && casting && c.castAimForceLock;
+            WR(player + off::Chr_IsLockedOn, (uint8_t)(forceLock ? 1 : 0));   // clear a flag a previous "lock" mode may have left (or force it for the cast)
+            if (handAim) SafeWrite(player + off::Chr_LockOnTarget, t4, 16);   // the ray's far point: only consumed while locked, harmless otherwise
             // Pin the physics facing to BodyYaw. The game decides forward-run vs strafe from the angle between
             // the move direction and this facing: without the pin, physically turning your head while walking
             // (Forward=head rotates the stick) reads as a sideways stick and you side-step at strafe speed
@@ -1111,11 +1235,15 @@ void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw) {
     }
     WR(player + off::Chr_IsLockedOn, (uint8_t)1);
     if (realLock) return;
-    float d = std::fmax(1.f, c.fpLockTargetDistance);
-    Vec3 flat{std::sin(bodyYaw), 0.f, std::cos(bodyYaw)};
-    Vec3 tgt = root + Vec3{0.f, c.fpEyeHeight, 0.f} + flat * d;
-    float t4[4] = {tgt.x, tgt.y, tgt.z, 1.f};
     SafeWrite(player + off::Chr_LockOnTarget, t4, 16);
+}
+// The re-assert sites (model-pos hook, Havok body): same facing, same cast-aim ray as the camera step, so the
+// lock target and flag never flip between a hand ray and the flat point within one frame.
+void ReassertFaceCamera(uint8_t* player, const FrameInfo& f) {
+    const Config& c = Cfg();
+    Vec3 aimO, aimD; bool casting = false, handAim = false;
+    if (c.castAim && !f.lockedOn) { const int ah = CombatCastAimHand(&casting); handAim = ah >= 0 && CastAimRay(f, ah, aimO, aimD); }
+    ApplyFaceCamera(player, f.root, f.bodyYaw, handAim ? &aimO : nullptr, handAim ? &aimD : nullptr, handAim && casting);
 }
 
 // One eye per game frame, latched once so that the several UpdateCamera calls a frame makes
@@ -1327,11 +1455,20 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
       memcpy(g_lastCamMtx, m, sizeof(m)); g_haveCamMtx.store(true, std::memory_order_relaxed); }
     if (uint8_t* cc = ChrCam()) WriteCamMatrix(cc + off::Cam_Matrix, r, u, fw, pos);
     if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
-    ApplyFaceCamera(player, f.root, f.bodyYaw);
+    // Cast aim: with a casting hand the ray the game aims unlocked bullets from is the controller's, not the
+    // head's - the fake lock target goes down it and the aim view matrix looks along it from the hand.
+    Vec3 aimO, aimD; bool casting = false, handAim = false;
+    if (c.castAim && !f.lockedOn) { const int ah = CombatCastAimHand(&casting); handAim = ah >= 0 && CastAimRay(f, ah, aimO, aimD); }
+    ApplyFaceCamera(player, f.root, f.bodyYaw, handAim ? &aimO : nullptr, handAim ? &aimD : nullptr, handAim && casting);
     if (c.fpWriteAim) {
-        Quat q = Quat::YawQ(f.baseYaw) * f.headQ;
-        Vec3 ar = q.Rotate({1, 0, 0}), au = q.Rotate({0, 1, 0}), af = q.Rotate({0, 0, 1});
-        WriteCamMatrix(player + off::Chr_AimViewMtx, ar, au, af, f.eye);   // nobody adds to this one: use the real eye
+        if (handAim) {
+            Vec3 ar, au; AimBasis(aimD, f.bodyYaw, ar, au);
+            WriteCamMatrix(player + off::Chr_AimViewMtx, ar, au, aimD, aimO);
+        } else {
+            Quat q = Quat::YawQ(f.baseYaw) * f.headQ;
+            Vec3 ar = q.Rotate({1, 0, 0}), au = q.Rotate({0, 1, 0}), af = q.Rotate({0, 0, 1});
+            WriteCamMatrix(player + off::Chr_AimViewMtx, ar, au, af, f.eye);   // nobody adds to this one: use the real eye
+        }
     }
     // Tell the render thread what this frame actually is. The FOV is READ BACK rather than
     // assumed: whatever the game (or the override above) left in Cam_Fov is what the image
@@ -2007,6 +2144,17 @@ void __fastcall Hook_UpdateFollowCam(void* fc) {
     g_origUpdFollow(fc);
     if (Cfg().fpOwnChrCam) ReassertCamera();
 }
+// After the game's lock-target update: re-force the cast-aim lock state (flag + ray target) it just rewrote.
+// Only while a cast is live - outside one the lock mode's flat target is re-asserted by the other hooks as before.
+void __fastcall Hook_UpdateLockTgt(void* man, float dt) {
+    g_origUpdLockTgt(man, dt);
+    if (!Cfg().castAim) return;
+    bool casting = false;
+    if (CombatCastAimHand(&casting) < 0 || !casting) return;
+    uint8_t* player = MainPlayer(); if (!player) return;
+    FrameInfo f; if (!BuildFrame(player, f)) return;
+    ReassertFaceCamera(player, f);
+}
 // Replay our camera after the game's own camera finalizer. Cheap by design: no frame rebuild, no bone solve -
 // just the matrix we already computed, written back into every camera object we know of.
 void ReassertCameraMatrix() {
@@ -2105,7 +2253,7 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
     // logic later in the frame (it only runs while moving), and then the matrix - the rotation the renderer
     // skins the rig with - carries the game's facing while the pose was solved in ours: the whole rig renders
     // rotated by the difference, but only while moving. Re-pinning here makes the rebuild read our facing.
-    if (!post && Cfg().fpFaceCameraMode == "strafe") ApplyFaceCamera(player, f.root, f.bodyYaw);
+    if (!post && Cfg().fpFaceCameraMode == "strafe") ReassertFaceCamera(player, f);
     // Rebuilt matrix in hand: force its facing to the yaw the pose below is solved in (see EnforceRenderFacing).
     if (post) EnforceRenderFacing(ctrl, f);
     UpdateArms(player, f, 2);
@@ -2289,7 +2437,7 @@ void HkBody() {
     FrameInfo f; if (!BuildFrame(player, f)) return;
     // Re-assert the strafe flags here too: the camera hook runs once, at one point in the frame, and the game
     // is free to put the character back into free-turn before it reads them.
-    ApplyFaceCamera(player, f.root, f.bodyYaw);
+    ReassertFaceCamera(player, f);
     // Full-frame pass 2 re-runs the behavior/pose machinery at dt~0: re-applying the ARMS
     // is wanted (pass 2's render must show the VR pose too), but movement and combat are
     // once-per-SIM-frame actions and must not double-fire.
@@ -2554,6 +2702,8 @@ bool GameERInit() {
     if (ufol && MH_CreateHook(ufol, (void*)&Hook_UpdateFollowCam, (void**)&g_origUpdFollow) == MH_OK && MH_EnableHook(ufol) == MH_OK) LOGI("[game] follow-cam outer update hooked @ %p", (void*)ufol); else LOGW("[game] follow-cam outer update hook unavailable");
     uint8_t* umod = g_status.versionOk ? g_base + RVA_UpdateChrModelPos : nullptr;
     if (umod && MH_CreateHook(umod, (void*)&Hook_UpdateChrModelPos, (void**)&g_origUpdModelPos) == MH_OK && MH_EnableHook(umod) == MH_OK) LOGI("[game] chr model-pos hooked @ %p (final pose write point)", (void*)umod); else LOGW("[game] chr model-pos hook unavailable");
+    uint8_t* ulock = g_status.versionOk ? g_base + RVA_UpdateLockTgt : AobScan(AOB_UpdateLockTgt);
+    if (ulock && MH_CreateHook(ulock, (void*)&Hook_UpdateLockTgt, (void**)&g_origUpdLockTgt) == MH_OK && MH_EnableHook(ulock) == MH_OK) LOGI("[game] lock-target update hooked @ %p (cast aim re-forces its lock after it)", (void*)ulock); else LOGW("[game] lock-target update hook unavailable: cast aim cannot hold the lock the game rewrites");
     uint8_t* cfin = (g_status.versionOk && Cfg().fpCameraFinalWrite) ? g_base + RVA_CamFinalize : nullptr;
     if (cfin && MH_CreateHook(cfin, (void*)&Hook_CamFinalize, (void**)&g_origCamFinalize) == MH_OK && MH_EnableHook(cfin) == MH_OK) LOGI("[game] camera finalizer hooked @ %p (our matrix goes back after it)", (void*)cfin); else if (Cfg().fpCameraFinalWrite) LOGW("[game] camera finalizer hook unavailable");
     uint8_t* peval = (g_status.versionOk && Cfg().fpPoseAfterHavok) ? g_base + RVA_PoseEval : nullptr;
