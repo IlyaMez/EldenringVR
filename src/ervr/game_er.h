@@ -84,6 +84,8 @@ int GameERPlayerLevel();
 // WorldChrMan (null until in-game). Combat's enemy watcher reads the game's own by-distance
 // ChrIns list from it (hit / damage ground truth).
 uint8_t* GameERWorldChrMan();
+// The main player ChrIns (null between worlds). Any thread; every read through it must be a SafeRead.
+uint8_t* GameERMainPlayer();
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

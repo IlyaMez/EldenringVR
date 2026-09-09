@@ -91,6 +91,17 @@ add_library(dinput8_proxy SHARED
   src/proxy/dinput8.def)
 set_target_properties(dinput8_proxy PROPERTIES OUTPUT_NAME "dinput8" PREFIX "")
 
+# Pure regression checks; no game process or headset required.
+option(ERVR_BUILD_REGRESSION_TESTS "Build camera, pose, and action-queue regression tests" OFF)
+if(ERVR_BUILD_REGRESSION_TESTS)
+  enable_testing()
+  foreach(_test head_anchor action_queue pose_frame)
+    add_executable(test_${_test} tools/test_${_test}.cpp)
+    target_include_directories(test_${_test} PRIVATE src/ervr)
+    add_test(NAME ${_test} COMMAND test_${_test})
+  endforeach()
+endif()
+
 # ---- packaging ------------------------------------------------------------
 set(DIST_DIR ${CMAKE_BINARY_DIR}/dist)
 add_custom_target(dist ALL

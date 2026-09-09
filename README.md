@@ -93,6 +93,7 @@ source — it takes a minute.
 
 `install.ps1` keeps an existing `ERVR.ini` and `ReShade.ini`, backs up a foreign `dxgi.dll` to `dxgi.dll.ervr-bak`,
 and refuses to overwrite another mod loader's `dinput8.dll` (it tells you where to put `ERVR.dll` instead).
+For a manual DLL update, replace only `ERVR\ERVR.dll`; copying the bundled `ERVR.ini` resets your settings.
 
 Then launch the game (offline, EAC disabled) and put the headset on. `Game\ERVR\ERVR.log` shows what happened:
 
@@ -184,7 +185,9 @@ own OpenXR session.
 * **Body pose** (`PoseMode=vr`, default) – the rig never plays a game animation. A standing pose is captured from
   the animation system once (at skeleton discovery, re-captured whenever you stand still for a second, so
   idle/crouch/sit stances still come through as discrete poses) and written over the **entire** live Havok pose on
-  every pose-hook call, yawed to the body yaw; the arm IK and spine twist go on top. Root motion is untouched:
+  every pose-hook call. Stance changes preserve the initial head-to-eye height offset and update camera height
+  immediately, so a new pose does not leave the body vertically detached. Terrain movement is never smoothed.
+  The pose is yawed to the body yaw; the arm IK and spine twist go on top. Root motion is untouched:
   rolls, attacks and running still *displace* the character (and the camera rides along 1:1), they just never pose
   the rig or whip the camera around, because the head bone the camera anchors to no longer moves relative to the
   root. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
@@ -219,6 +222,9 @@ own OpenXR session.
   taken out by the Spine twist, measured on the L/R clavicle line whose side is auto-calibrated against the root
   facing on the untouched pose (the Master bone's own axes are *not* the body's forward — aligning them spun the
   body 90 degrees).
+  The completed VR root pose is converted into the native model-matrix frame, keeping head movement and hand
+  targets consistent even while its rotation lags the physics facing. The engine retains control of the model
+  matrix and its derived movement transforms.
   `BodyFollowsHead` shifts the root bones by the (clamped, re-centred) HMD offset so shoulders stay under the
   headset when you lean or step; the physics root stays put, hands get the unclamped offset. The shift is applied
   against the animation's own translation, remembered per bone, so running twice in a frame is a no-op instead of

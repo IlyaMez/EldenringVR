@@ -46,6 +46,8 @@ bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool*
 // Weight the hand is carrying (EquipParamWeapon weight; both hands share it when two-handing;
 // 0 = empty/unknown). Drives the inertial arm in game_er.
 float CombatHandWeight(int hand);
+// The hand holding a two-handed weapon per the game's arm style, else -1 (both arms drive that weapon).
+int CombatTwoHandWeaponHand();
 // Geometry of the weapon in the hand: grip->tip length (the tip-speed lever arm; ini WeaponReach when unknown)
 // and how far out along it the mass sits (rotational inertia about the grip goes with its square).
 float CombatHandReach(int hand);
@@ -65,6 +67,14 @@ uint32_t CombatTakeHapticRequests();
 
 // Game thread, once per rendered frame with the main player ChrIns.
 void CombatGameFrame(uint8_t* player, uint32_t frame);
+// Action-request diagnostic (Combat Debug): for a short window after any press handed to the game, log the
+// player's CSChrActionRequestModule + TimeAct state once per stereo pass (pass = FramePumpCurrentPass()).
+// Any pass, game thread. Cheap when not armed.
+void CombatActionDiag(uint8_t* player, int pass, uint32_t frame);
+// Zero-step full-frame stereo: preserve the player's input buffers, including queue-mode entries,
+// unless an action was consumed or their ownership changed ([VR] Pass2KeepActionRequest). Frame-pump thread.
+void CombatPass2Begin(uint8_t* player);
+void CombatPass2End(uint8_t* player);
 
 struct CombatStatus {
     bool taeHooked = false;

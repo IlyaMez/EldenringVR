@@ -15,6 +15,7 @@
 #include "debug_keys.h"
 #include "dx12_blit.h"
 #include "game_er.h"
+#include "combat.h"
 #include "virtual_pad.h"
 #include "patches_er.h"
 #include "game_memory.h"
@@ -1499,6 +1500,10 @@ void DoSecondPass(void* self, void* a, void* b) {
     }
     LARGE_INTEGER t0, t1;
     QueryPerformanceCounter(&t0);
+    // The player's input buffer (CSChrActionRequestModule) is sim state that pass 2 re-evaluates
+    // at steps 0 and can drop; restored after the pass unless pass 2 started an animation.
+    uint8_t* const arPlayer = fullFrame ? GameERMainPlayer() : nullptr;
+    if (arPlayer) CombatPass2Begin(arPlayer);
     g_curPass.store(2, std::memory_order_release);
     g_origQueueTasks(self, a, b);
     // Pass 2 is complete: finish and push the second eye's report with the camera its
@@ -1506,6 +1511,7 @@ void DoSecondPass(void* self, void* a, void* b) {
     // while the pass tag still reads 2 and before the keep-set restore below.
     GameERFinalizePassReport();
     g_curPass.store(1, std::memory_order_release);
+    if (arPlayer) CombatPass2End(arPlayer);
     QueryPerformanceCounter(&t1);
     int engineChanged = 0;
     for (int i = 0; i < n; ++i) {

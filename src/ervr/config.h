@@ -21,7 +21,7 @@ struct Config {
     int  pollHz = 250;
 
     // [VR]  ERVR's own OpenXR session + stereo rendering (ReShade add-on supplies D3D12).
-    std::string vrStereoMode = "cinema";   // off | cinema (flat game on a head-locked quad) | debugalt | full
+    std::string vrStereoMode = "full";     // off | cinema (flat game on a head-locked quad) | debugalt | full
     float vrRenderScale = 1.0f;            // supersampling of the per-eye images, relative to delivered game pixels
     float vrWorldScale = 1.0f;             // 1.0 = metric; scales the per-eye separation
     int   vrPairRateHz = 0;                // 0 = headset refresh / 2
@@ -298,6 +298,9 @@ struct Config {
     bool  kineticInertia = true;
     float inertiaAngAccel = 300.f;        // rad/s^2 at weight 0
     float inertiaSpringHz = 8.f;          // stiffness of the chase near the target (higher = tighter tracking)
+    float inertiaTwoHandForce = 1.5f;     // two-handed: linear acceleration cap x this (two arms)
+    float inertiaTwoHandTorque = 2.f;     // two-handed: angular acceleration cap x this (a hand on the pommel)
+    bool  twoHandAim = true;              // two-handed with the free hand on the hilt: the blade runs from that hand to the weapon hand
     float inertiaBrake = 3.f;             // braking (and stop-distance) acceleration as a multiple of the cap: a wrist stops a weapon more easily than it starts one
     float inertiaComRef = 0.5f;           // m centre-of-mass distance at which weight counts fully for rotation (angular cap /= 1 + w/W * (com/ref)^2)
     bool  inertiaNoOverrun = true;        // the weapon never moves toward the hand faster than the hand (no catch-up whip)
@@ -578,6 +581,10 @@ struct Config {
     // (10:14 DL_PANIC), 8 s read as "stereo turns off on every A", 5 was the compromise.
     // Hot-reloads.
     float vrPass2SafeOnA = 0.f;
+    // Preserve scalar input buffers and bounded per-TAE queue entries across zero-step full-frame pass 2.
+    // Skip restoration after animation/equipment changes, explicit input flushes/restrictions, transitions,
+    // or changes to player/module/storage ownership. New-press history remains game-owned. Hot-reloads.
+    bool  vrPass2KeepActionRequest = true;
     // Complete each pass's eye report with the camera the renderer REALLY used (read at
     // pass end) instead of the one we wrote. The game's step re-smooths the camera after
     // our write on ~every frame (yaw ~100%, position >5 cm ~50%, measured 20:13) - an

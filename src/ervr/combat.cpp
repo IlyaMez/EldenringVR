@@ -40,6 +40,7 @@
 #include "config.h"
 #include "game_er.h"
 #include "game_memory.h"
+#include "action_queue_snapshot.h"
 #include "params_er.h"
 #include "log.h"
 #include "rtti.h"
@@ -69,6 +70,27 @@ constexpr size_t Data_MaxFp        = 0x14C;
 constexpr size_t Data_Stamina      = 0x154;
 constexpr size_t Data_MaxStamina   = 0x158;
 constexpr size_t TA_ChrTaeAnimEvent = 0x18; // CSChrTimeActModule -> CSChrTaeAnimEvent*
+// Module container slots and the action-request module (fromsoftware-rs chr_ins/module.rs, action_request.rs).
+constexpr size_t Mod_ActionFlag    = 0x08;   // CSChrActionFlagModule: +0x10 animation_action_flags (bit0 stay_state)
+constexpr size_t Mod_Event         = 0x58;   // CSChrEventModule: +0x18 request_animation_id, +0x1C idle_anim_id
+constexpr size_t Mod_ActionRequest = 0x80;   // CSChrActionRequestModule (0x140 bytes)
+constexpr size_t AR_Requests       = 0x10;   // ChrActions raw from the pad manipulator
+constexpr size_t AR_NewPresses     = 0x20;   // pressed this frame
+constexpr size_t AR_CancelReady    = 0x30;   // queued & possible cancels
+constexpr size_t AR_Queued         = 0x38;   // the input buffer: presses made while allowed
+constexpr size_t AR_Disabled       = 0x40;
+constexpr size_t AR_InputQueue     = 0x50;   // DLVector<ActionQueueEntry>
+constexpr size_t AR_CancelQueue    = 0x70;
+constexpr size_t AR_QueueTae       = 0x90;
+constexpr size_t AR_PossibleInputs = 0x98;   // what the current animation lets you queue
+constexpr size_t AR_PossibleCancels= 0xA0;   // what may interrupt it
+constexpr size_t AR_PrevPossibleIn = 0xA8;
+constexpr size_t AR_MoveFlags      = 0xFC;   // u32
+constexpr size_t AR_TaeCancels     = 0x100;  // u32, TAE-driven (transient) cancel flags
+constexpr size_t AR_Readback       = 0x110;  // four cancel/queue bitfields; preserve the new-press readback at 0x108
+constexpr size_t AR_QueueMode      = 0x138;  // u8
+constexpr size_t TA_AnimQueue      = 0x20;   // CSChrTimeActModuleAnim[10] {anim_id, play_time, play_time2, anim_length}
+constexpr size_t TA_ReadIdx        = 0xC4;   // index of the animation last played / updated
 constexpr uint32_t EV_AttackBehavior = 1;
 constexpr uint32_t EV_BulletBehavior = 2, EV_CommonBehavior = 5;   // the other slot-3 (behavior) events; everything else is slot 2
 constexpr uint32_t EV_AddSpEffectWeaponArts = 331;                 // {SpEffectID_EnoughFP, SpEffectID_NotEnoughFP, 0, 0}: an Ash of War's effect
@@ -1803,10 +1825,158 @@ void CombatNotifyButton(uint16_t mask, double now) {
 // Cast aim: which hand a game-facing press belongs to. Light/heavy = the right weapon (two-handed: the
 // two-handed weapon's hand, whichever it is); the left button = the left weapon unless it is a shield
 // (guard, not a cast); the skill button = the right weapon's skill, the left's only with an empty right hand.
+// ---------------------------------------------------------------- action-request diagnostic + pass-2 keep
+// "Most controls only work while walking" (long-standing, 2026-09-04 log): the XInput side is proven -
+// the game polls at 60 Hz and the button bits go out with the stick idle - and the same LB press casts
+// on one idle frame and does nothing on another. What is left is the game's own action pipeline:
+// pad -> CSChrActionRequestModule (new press / input buffer / TAE cancel windows) -> HKS. Under full-frame
+// stereo that module updates TWICE per sim frame (pass 2 re-runs ChrIns_PreBehavior at steps 0), so a press
+// buffered in pass 1 can be re-evaluated in pass 2 against cancel windows the zero-length TAE step never
+// re-opened, and be gone before the next real frame. Two tools, both game thread:
+//  * CombatActionDiag: for ~0.35 s after any press handed to the game, log the module + TimeAct state once
+//    per pass; a baseline line whenever the animation / allowed-input masks change. (Combat Debug)
+//  * CombatPass2Begin/End: preserve buffer fields and bounded queue contents across zero-step pass 2
+//    unless it consumed an action or changed the player/modules/storage. [VR] Pass2KeepActionRequest.
+// The 2026-09-09 log uses queue mode (qm 1) throughout: its actual per-TAE input/cancel
+// vectors must survive too. Restoring only the scalar fields never logged a change.
+namespace {
+std::atomic<double>   g_adiagUntil{0.0};
+std::atomic<uint32_t> g_adiagRise{0};
+struct ARSnap {
+    uint8_t* player = nullptr; uint8_t* mods = nullptr; uint8_t* areq = nullptr; uint8_t* ta = nullptr;
+    uint8_t* ev = nullptr; uint8_t* chrAsm = nullptr;
+    uint64_t req = 0, newp = 0, ready = 0, queued = 0, dis = 0, in = 0, can = 0, prevIn = 0;
+    uint64_t readback[4]{};
+    ActionQueueSnapshot inputQueue, cancelQueue;
+    int32_t queueTae = -1; uint32_t equipment[3]{};
+    uint32_t mv = 0, tae = 0; uint8_t qmode = 0;
+    int32_t anim = -1; uint32_t readIdx = 0; float t = 0.f, len = 0.f;
+    int32_t reqAnim = -1, idleAnim = -1; uint32_t stay = 0;
+    bool ok = false, animOk = false, eventOk = false, equipmentOk = false;
+};
+ARSnap ReadAR(uint8_t* player) {
+    ARSnap s;
+    if (!player) return s;
+    uint8_t* mods = Deref(player + Chr_Modules); if (!mods) return s;
+    s.player = player; s.mods = mods;
+    s.areq = Deref(mods + Mod_ActionRequest); s.ta = Deref(mods + Mod_TimeAct);
+    if (!s.areq || Deref(s.areq + 8) != player || Deref(s.areq + 0x48) != s.areq) return s;
+    s.ok = SafeRead(s.areq + AR_Requests, &s.req, 8) && SafeRead(s.areq + AR_NewPresses, &s.newp, 8) &&
+           SafeRead(s.areq + AR_CancelReady, &s.ready, 8) && SafeRead(s.areq + AR_Queued, &s.queued, 8) &&
+           SafeRead(s.areq + AR_Disabled, &s.dis, 8) && SafeRead(s.areq + AR_PossibleInputs, &s.in, 8) &&
+           SafeRead(s.areq + AR_PossibleCancels, &s.can, 8) && SafeRead(s.areq + AR_PrevPossibleIn, &s.prevIn, 8) &&
+           SafeRead(s.areq + AR_MoveFlags, &s.mv, 4) && SafeRead(s.areq + AR_TaeCancels, &s.tae, 4) &&
+           SafeRead(s.areq + AR_QueueMode, &s.qmode, 1) &&
+           SafeRead(s.areq + AR_QueueTae, &s.queueTae, 4) &&
+           SafeRead(s.areq + AR_Readback, s.readback, sizeof(s.readback));
+    if (s.qmode == 1) {
+        s.inputQueue = ReadActionQueue(s.areq + AR_InputQueue, SafeRead);
+        s.cancelQueue = ReadActionQueue(s.areq + AR_CancelQueue, SafeRead);
+    }
+    if (s.ta && Deref(s.ta + 8) == player && SafeRead(s.ta + TA_ReadIdx, &s.readIdx, 4)) {
+        uint8_t* e = s.ta + TA_AnimQueue + 16 * (s.readIdx % 10);
+        s.animOk = SafeRead(e, &s.anim, 4) && SafeRead(e + 4, &s.t, 4) && SafeRead(e + 12, &s.len, 4) &&
+                   s.anim >= 0 && std::isfinite(s.t) && std::isfinite(s.len) && s.t >= 0.f && s.len > 0.f;
+    }
+    s.ev = Deref(mods + Mod_Event);
+    if (s.ev) s.eventOk = SafeRead(s.ev + 0x18, &s.reqAnim, 4) && SafeRead(s.ev + 0x1C, &s.idleAnim, 4);
+    s.chrAsm = Deref(player + Player_ChrAsm);
+    if (s.chrAsm) s.equipmentOk = SafeRead(s.chrAsm + Asm_ArmStyle, s.equipment, sizeof(s.equipment)) &&
+                                   s.equipment[0] <= 3 && s.equipment[1] <= 2 && s.equipment[2] <= 2;
+    if (uint8_t* af = Deref(mods + Mod_ActionFlag)) { uint32_t f = 0; SafeRead(af + 0x10, &f, 4); s.stay = f & 1u; }
+    return s;
+}
+ARSnap g_p2Snap;
+} // namespace
+
+void CombatActionDiag(uint8_t* player, int pass, uint32_t frame) {
+    if (!Cfg().combatDebug || !player) return;
+    const double now = NowSec();
+    const bool armed = g_adiagUntil.load() > now;
+    static uint32_t s_lastFrame[3] = {~0u, ~0u, ~0u};
+    static int32_t s_anim = -2; static uint64_t s_in = ~0ull, s_can = ~0ull; static uint8_t s_qm = 2;
+    static double s_lastBase = 0; static int s_baseBudget = 0;
+    if (pass < 0 || pass > 2) pass = 0;
+    if (s_lastFrame[pass] == frame) return;   // the Havok hook fires several times per pass
+    s_lastFrame[pass] = frame;
+    if (!armed) {
+        if (pass == 2) return;
+        ARSnap s = ReadAR(player); if (!s.ok) return;
+        if (s.anim == s_anim && s.in == s_in && s.can == s_can && s.qmode == s_qm) return;
+        if (now - s_lastBase > 1.0) { s_lastBase = now; s_baseBudget = 4; }
+        if (s_baseBudget-- <= 0) return;
+        s_anim = s.anim; s_in = s.in; s_can = s.can; s_qm = s.qmode;
+        LOGD("[combat] adiag state f%u: anim %d (%.2f/%.2f) idle %d | in %llx can %llx dis %llx tae %x mv %x qm %d stay %u",
+             frame, s.anim, s.t, s.len, s.idleAnim, (unsigned long long)s.in, (unsigned long long)s.can,
+             (unsigned long long)s.dis, s.tae, s.mv, s.qmode, s.stay);
+        return;
+    }
+    ARSnap s = ReadAR(player); if (!s.ok) return;
+    LOGD("[combat] adiag p%d f%u rise 0x%04X | req %llx new %llx q %llx ready %llx in %llx can %llx dis %llx tae %x mv %x qm %d stay %u | anim %d t %.2f/%.2f req %d idle %d | queues %zu/%zu mask %llx/%llx valid %d/%d qtae %d",
+         pass, frame, g_adiagRise.load(), (unsigned long long)s.req, (unsigned long long)s.newp, (unsigned long long)s.queued,
+         (unsigned long long)s.ready, (unsigned long long)s.in, (unsigned long long)s.can, (unsigned long long)s.dis,
+         s.tae, s.mv, s.qmode, s.stay, s.anim, s.t, s.len, s.reqAnim, s.idleAnim,
+         s.inputQueue.count, s.cancelQueue.count, (unsigned long long)ActionQueueMask(s.inputQueue),
+         (unsigned long long)ActionQueueMask(s.cancelQueue), s.inputQueue.valid, s.cancelQueue.valid, s.queueTae);
+}
+
+void CombatPass2Begin(uint8_t* player) {
+    g_p2Snap = ARSnap{};
+    if (!Cfg().vrPass2KeepActionRequest || Cfg().vrPass2Steps != 0 || !player ||
+        player != GameERMainPlayer() || GameERTransitionActive()) return;
+    g_p2Snap = ReadAR(player);
+}
+void CombatPass2End(uint8_t* player) {
+    const ARSnap b = g_p2Snap; g_p2Snap = ARSnap{};
+    if (!b.ok || !player || player != b.player || player != GameERMainPlayer() || GameERTransitionActive()) return;
+    const ARSnap a = ReadAR(player);
+    if (!a.ok || a.mods != b.mods || a.areq != b.areq || a.ta != b.ta || a.ev != b.ev ||
+        a.chrAsm != b.chrAsm || a.qmode != b.qmode || a.qmode > 1) return;
+    if (!ActionRequestRollbackAllowed(b.dis, a.dis, b.tae, a.tae)) return;
+    // The ring index advances for animation UPDATES too. Require the same animation/time
+    // instead; a restarted/advanced animation or an equipment change consumed the input.
+    if (!a.animOk || !b.animOk || a.anim != b.anim || std::fabs(a.t - b.t) > 0.0005f ||
+        !a.eventOk || !b.eventOk || a.reqAnim != b.reqAnim || a.idleAnim != b.idleAnim ||
+        !a.equipmentOk || !b.equipmentOk || std::memcmp(a.equipment, b.equipment, sizeof(a.equipment))) return;
+    if (b.qmode && (a.queueTae != b.queueTae || !CanRestoreActionQueue(b.inputQueue, a.inputQueue) ||
+                   !CanRestoreActionQueue(b.cancelQueue, a.cancelQueue))) return;
+    bool changed = false;
+    auto put = [&](size_t off, const void* v, size_t n) { changed |= SafeWrite(b.areq + off, v, n); };
+    if (b.qmode) {
+        changed |= RestoreActionQueue(b.areq + AR_InputQueue, b.inputQueue, a.inputQueue, SafeWrite);
+        changed |= RestoreActionQueue(b.areq + AR_CancelQueue, b.cancelQueue, a.cancelQueue, SafeWrite);
+    }
+    if (a.queued != b.queued) put(AR_Queued, &b.queued, 8);
+    if (a.ready  != b.ready)  put(AR_CancelReady, &b.ready, 8);
+    if (a.in     != b.in)     put(AR_PossibleInputs, &b.in, 8);
+    if (a.can    != b.can)    put(AR_PossibleCancels, &b.can, 8);
+    if (a.prevIn != b.prevIn) put(AR_PrevPossibleIn, &b.prevIn, 8);
+    const uint32_t restoredTae = (a.tae & ~ActionRequestTransientCancels) | (b.tae & ActionRequestTransientCancels);
+    if (a.tae != restoredTae) put(AR_TaeCancels, &restoredTae, 4);
+    if (std::memcmp(a.readback, b.readback, sizeof(b.readback))) put(AR_Readback, b.readback, sizeof(b.readback));
+    if (changed && Cfg().combatDebug) {
+        static double s_last = 0; static int s_budget = 0; const double now = NowSec();
+        if (now - s_last > 1.0) { s_last = now; s_budget = 3; }
+        if (s_budget-- > 0)
+            LOGD("[combat] pass2 action-request restored: q %llx->%llx ready %llx->%llx in %llx->%llx can %llx->%llx tae %x->%x (anim %d) queues %zu/%zu -> %zu/%zu",
+                 (unsigned long long)a.queued, (unsigned long long)b.queued, (unsigned long long)a.ready, (unsigned long long)b.ready,
+                 (unsigned long long)a.in, (unsigned long long)b.in, (unsigned long long)a.can, (unsigned long long)b.can, a.tae, b.tae, a.anim,
+                 a.inputQueue.count, a.cancelQueue.count, b.inputQueue.count, b.cancelQueue.count);
+    }
+}
+
+namespace {
+void NoteDiagPress(uint16_t rise, double now) {
+    if (!rise || !Cfg().combatDebug) return;
+    g_adiagRise.store(rise); g_adiagUntil.store(now + 0.35);
+}
+} // namespace
+
 void CombatNotifyPad(uint16_t mask, double now) {
     const Config& c = Cfg();
     const uint16_t rise = (uint16_t)(mask & ~g_padPrev);
     g_padPrev = mask;
+    NoteDiagPress(rise, now);
     if (!c.castAim) return;
     const uint16_t light = ParseXInputButton(c.lightAttackButton), heavy = ParseXInputButton(c.heavyAttackButton);
     const uint16_t left = ParseXInputButton(c.leftSwingButton), skill = ParseXInputButton(c.skillButton);
@@ -1907,6 +2077,7 @@ bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool*
 }
 
 float CombatHandWeight(int hand) { return hand == HandLeft || hand == HandRight ? g_wepWeight[hand].load() : 0.f; }
+int CombatTwoHandWeaponHand() { const int style = g_armStyleShared.load(); return TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : -1; }
 float CombatHandReach(int hand) {
     if (hand != HandLeft && hand != HandRight) return 0.f;
     const float r = g_wepReach[hand].load();

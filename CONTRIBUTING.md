@@ -46,6 +46,14 @@ Practical notes:
 * Say in the PR which game version and which headset you actually tested on. "Compiles" is not
   tested.
 
+Camera anchoring, pose-coordinate, and action-queue regression checks can run without the game or a headset:
+
+```powershell
+cmake -S . -B build -A x64 -DERVR_BUILD_REGRESSION_TESTS=ON
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
 ## What I will not merge
 
 Stated plainly so we can skip the debate later:

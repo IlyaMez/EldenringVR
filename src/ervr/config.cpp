@@ -111,6 +111,7 @@ void Config::Load(const std::wstring& path) {
     vrPass2WarpGraceSeconds = GetF(ini, L"VR", L"Pass2WarpGraceSeconds", vrPass2WarpGraceSeconds);
     vrPass2FinalizeReplay = GetB(ini, L"VR", L"Pass2FinalizeReplay", vrPass2FinalizeReplay);
     vrPass2SafeOnA = GetF(ini, L"VR", L"Pass2SafeOnA", vrPass2SafeOnA);
+    vrPass2KeepActionRequest = GetB(ini, L"VR", L"Pass2KeepActionRequest", vrPass2KeepActionRequest);
     vrReportFinalCamera = GetB(ini, L"VR", L"ReportFinalCamera", vrReportFinalCamera);
     vrPass2Steps     = GetI(ini, L"VR", L"Pass2Steps", vrPass2Steps);
     vrPass2EatAsserts = GetB(ini, L"VR", L"Pass2EatAsserts", vrPass2EatAsserts);
@@ -235,6 +236,10 @@ void Config::Load(const std::wstring& path) {
     inertiaSpringHz = GetF(ini, L"Combat", L"InertiaSpringHz", inertiaSpringHz);
     inertiaComRef = GetF(ini, L"Combat", L"InertiaComRef", inertiaComRef);
     inertiaBrake = GetF(ini, L"Combat", L"InertiaBrake", inertiaBrake);
+    inertiaTwoHandForce = GetF(ini, L"Combat", L"InertiaTwoHandForce", inertiaTwoHandForce);
+    inertiaTwoHandTorque = GetF(ini, L"Combat", L"InertiaTwoHandTorque", inertiaTwoHandTorque);
+    twoHandAim = GetB(ini, L"Combat", L"TwoHandAim", twoHandAim);
+    if (inertiaTwoHandForce < 0.1f) inertiaTwoHandForce = 0.1f; if (inertiaTwoHandTorque < 0.1f) inertiaTwoHandTorque = 0.1f;
     inertiaNoOverrun = GetB(ini, L"Combat", L"InertiaNoOverrun", inertiaNoOverrun);
     inertiaMaxLag = GetF(ini, L"Combat", L"InertiaMaxLag", inertiaMaxLag);
     inertiaMaxLagAngle = GetF(ini, L"Combat", L"InertiaMaxLagAngle", inertiaMaxLagAngle);

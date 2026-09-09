@@ -6,6 +6,8 @@
 // (struct layouts), FreecamMod / TGA (FieldArea -> GameRend -> CSPersCam), and the
 // classic WorldChrMan AOB. Nothing here is guessed from scratch; see README.
 #include "game_er.h"
+#include "head_anchor.h"
+#include "pose_frame.h"
 #include "game_memory.h"
 #include "config.h"
 #include "debug_keys.h"
@@ -374,28 +376,6 @@ bool ModelMatrixRoot(uint8_t* chr, Vec3& pos, Quat& q) {
     q = Quat::FromBasis(X * (1.f / lx), Y * (1.f / ly), Z * (1.f / lz));
     return true;
 }
-// Which local axis of the ChrCtrl model matrix points where the character faces. The physics module is the
-// verified reference (local -Z = facing); the model matrix basis is authored per model, and if the two disagree
-// then any vector we express in the physics frame comes out rotated when the renderer applies the model matrix -
-// which is what a body-follows-head shift stepping the wrong way looks like.
-int g_modelFacingSign = 0;   // 0 = not calibrated yet, -1 = local -Z is forward, +1 = local +Z
-void CalibrateModelFacing(uint8_t* chr) {
-    if (g_modelFacingSign) return;
-    Vec3 mp, pp; Quat mq, pq;
-    if (!ModelMatrixRoot(chr, mp, mq) || !PlayerRoot(chr, pp, pq)) return;
-    Vec3 pf = pq.Rotate({0, 0, -1}), mf = mq.Rotate({0, 0, -1});
-    float d = std::fabs(WrapPi(std::atan2(mf.x, mf.z) - std::atan2(pf.x, pf.z)));
-    g_modelFacingSign = (d < Deg2Rad(90.f)) ? -1 : 1;
-    LOGI("[fp] model matrix vs physics facing: %.0f deg apart -> model forward is local %cZ%s", Rad2Deg(d),
-         g_modelFacingSign < 0 ? '-' : '+', g_modelFacingSign > 0 ? " (shifts expressed in the physics frame would be reversed)" : "");
-}
-// The rotation the RENDERER hangs the skeleton off. World vectors must be converted into this frame before they
-// are written into root bone translations, or the rendered shift points somewhere else entirely.
-Quat RenderRootQ(uint8_t* chr, const Quat& fallback) {
-    Vec3 mp; Quat mq;
-    return ModelMatrixRoot(chr, mp, mq) ? mq : fallback;
-}
-
 // One root for the camera anchor and the bone solve, so they never drift apart.
 //   model       (default) position from the ChrCtrl model matrix, rotation from the physics module (local -Z =
 //               facing, verified; the model matrix rotation was never verified against the physics one)
@@ -493,7 +473,7 @@ std::vector<Vec3> g_rootShiftBase, g_rootShiftWritten;
 std::vector<Quat> g_rootRotBase, g_rootRotWritten;
 std::vector<uint8_t> g_rootShiftHas;
 void ResetRecenter();
-extern bool g_anchorSmInit; extern float g_headRestHeight;
+extern HeadAnchorState g_headAnchor;
 
 uint8_t* FindHkbCharacter(uint8_t* chr) {
     uint8_t* beh = Behavior(chr); if (!beh) return nullptr;
@@ -557,7 +537,7 @@ bool BuildSkeleton(uint8_t* chr) {
     g_skel = std::move(s);
     g_rootShiftBase.clear(); g_rootShiftWritten.clear(); g_rootShiftHas.clear(); g_rootRotBase.clear(); g_rootRotWritten.clear();
     ResetRecenter();   // new character / area load: start centred on wherever you are standing now
-    g_anchorSmInit = false; g_headRestHeight = -1.f;
+    g_headAnchor.Reset();
     g_poseTemplate.clear(); g_statPos = {}; g_statSince = 0; g_templLastCapture = 0;
     g_templCand.clear(); g_templCandAt = 0; g_templCheckAt = 0;
     posescan::Disarm("skeleton rebuild");   // the watched buffer may be gone
@@ -633,8 +613,7 @@ bool HeadBoneTemplateWorld(const Vec3& rootPos, const Quat& rootQ, float bodyYaw
     out = rootPos + rootQ.Rotate(p);
     return true;
 }
-Vec3 g_anchorSm{}; bool g_anchorSmInit = false; double g_anchorSmLast = 0;
-float g_headRestHeight = -1.f;   // head-bone height above the root when first seen standing still (bob reference)
+HeadAnchorState g_headAnchor;
 
 // ---------------------------------------------------------------- pose access scan (diagnostic)
 // One-shot memory watch: page-protect the live Havok pose buffer and record the RIP of every read/write for
@@ -805,8 +784,7 @@ void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, doub
         Vec3 vFd = (p - s.lastTarget) * (1.f / dtRaw), wFd = QuatToRotVec((q * s.lastTargetQ.Conj()).Normalized()) * (1.f / dtRaw);
         const float kf = dt / (dt + 0.02f);
         s.vTf = s.vTf + (vFd - s.vTf) * kf; s.wTf = s.wTf + (wFd - s.wTf) * kf;
-        const bool haveRt = vRt.Length() > 1e-4f || wRt.Length() > 1e-4f;
-        vT = haveRt ? vRt : s.vTf; wT = haveRt ? wRt : s.wTf;
+        vT = vRt.Length() > 1e-4f ? vRt : s.vTf; wT = wRt.Length() > 1e-4f ? wRt : s.wTf;
     }
     // No controller moves faster than this; anything beyond is a bad sample, not a swing.
     { float m = vT.Length(); if (m > 30.f) vT = vT * (30.f / m); m = wT.Length(); if (m > 120.f) wT = wT * (120.f / m); }
@@ -824,8 +802,11 @@ void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, doub
         // which weight counts fully (a greatsword-ish balance point).
         const float comRef = c.inertiaComRef > 0.05f ? c.inertiaComRef : 0.5f, com = CombatHandCom(h) / comRef;
         const float wfa = 1.f + (weight / W) * com * com;
-        const float aMax = (c.kineticAccel > 1.f ? c.kineticAccel : 60.f) / wf;
-        const float alMax = (c.inertiaAngAccel > 1.f ? c.inertiaAngAccel : 300.f) / wfa;
+        // Two arms on one weapon: more force, and a hand on the pommel has far more leverage over its
+        // rotation than one wrist - the reason heavy weapons are two-handed at all.
+        const bool twoArms = CombatTwoHandWeaponHand() == h;
+        const float aMax = (c.kineticAccel > 1.f ? c.kineticAccel : 60.f) / wf * (twoArms ? c.inertiaTwoHandForce : 1.f);
+        const float alMax = (c.inertiaAngAccel > 1.f ? c.inertiaAngAccel : 300.f) / wfa * (twoArms ? c.inertiaTwoHandTorque : 1.f);
         // Braking is allowed at InertiaBrake x the cap: stopping a swing is easier than making one.
         const float brake = c.inertiaBrake > 1.f ? c.inertiaBrake : 1.f;
         const float w0 = 6.2831853f * (c.inertiaSpringHz > 0.5f ? c.inertiaSpringHz : 8.f);
@@ -1046,11 +1027,9 @@ float GameCamYaw() {
 // ERVR now owns rendering, so it is unconditionally the sole owner of where the eye sits.
 // (This used to negotiate with R.E.A.L. over who applied the HMD offset.)
 
-bool BuildFrame(uint8_t* player, FrameInfo& f) {
+void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
     const Config& c = Cfg();
-    Vec3 root; Quat rootQ;
-    if (!SkeletonRoot(player, root, rootQ)) return false;
-    f.root = root; f.rootQ = rootQ;
+    const Vec3 root = f.root; const Quat rootQ = f.rootQ;
     f.anchor = root + Vec3{0.f, c.fpEyeHeight, 0.f};
     // CameraAnchor=head: the camera rides on the animation's head bone (what a first-person mod does), so the neck,
     // shoulders and arms are under the view whatever the animation does - run lean, bob, turn - instead of us
@@ -1064,28 +1043,21 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
         bool haveHb = false;
         if (c.fpPoseMode == "vr" && g_skel.chr == player && g_skel.hkb)
             haveHb = HeadBoneTemplateWorld(root, rootQ, g_bodyYaw.load(), hb);
+        const bool templatePose = haveHb;
         if (!haveHb) haveHb = HeadBoneWorld(player, root, rootQ, hb);
         if (haveHb) {
-            float hh = hb.y - root.y;
-            if (g_headRestHeight < 0.f) g_headRestHeight = hh;
-            // Smooth the head bone's offset *from the root* (the animation's part), never the root motion itself:
-            // smoothing the world position lagged the camera behind a running character by speed x time constant
-            // (15 cm at a jog - measured), which is the whole "disconnected while running" gap.
-            Vec3 off{hb.x - root.x, c.fpEyeHeight + c.fpCameraBob * (hh - g_headRestHeight), hb.z - root.z};
-            double now = NowSec();
-            if (!g_anchorSmInit) { g_anchorSm = off; g_anchorSmInit = true; g_anchorSmLast = now; }
-            else {
-                static std::atomic<uint32_t> s_anchorFrame{0xFFFFFFFFu};
-                uint32_t fr = g_frame;
-                if (s_anchorFrame.exchange(fr) != fr) {   // once per frame, not once per worker thread
-                    float dt = Clamp((float)(now - g_anchorSmLast), 0.f, 0.1f); g_anchorSmLast = now;
-                    float k = c.fpCameraAnchorSmoothing > 1e-3f ? 1.f - std::exp(-dt / c.fpCameraAnchorSmoothing) : 1.f;
-                    g_anchorSm = g_anchorSm + (off - g_anchorSm) * k;
-                }
-            }
-            f.anchor = root + g_anchorSm;
+            f.anchor = g_headAnchor.Update(root, hb, c.fpEyeHeight, c.fpCameraBob,
+                                          c.fpCameraAnchorSmoothing, templatePose, NowSec(), g_frame);
         }
     }
+}
+
+bool BuildFrame(uint8_t* player, FrameInfo& f) {
+    const Config& c = Cfg();
+    Vec3 root; Quat rootQ;
+    if (!SkeletonRoot(player, root, rootQ)) return false;
+    f.root = root; f.rootQ = rootQ;
+    BuildCameraAnchor(player, f);
 
     float fwd[4] = {0, 0, 1, 0};
     if (uint8_t* cc = ChrCam()) SafeRead(cc + off::Cam_Matrix + 32, fwd, 16);
@@ -1151,7 +1123,22 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
             Vec3 p = ToGame(hand.pos); Quat q = ToGame(hand.rot);
             // Weight: the hand the arm solver gets is the inertial one, filtered in drift-free play space.
             // Runtime velocities go through the same VR->game mapping: vectors flip z, axial (angular) vectors flip x,y.
-            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, ToGame(hand.linVel), Vec3{-hand.angVel.x, -hand.angVel.y, hand.angVel.z}, NowSec()); p = pPlay + psOrigin; }
+            Vec3 wRt{-hand.angVel.x, -hand.angVel.y, hand.angVel.z};
+            // Two-handed aim: with the free hand gripping the hilt, the blade runs from that hand to this one
+            // (a real two-handed grip steers with both), roll still from this controller: the minimal rotation
+            // that takes this controller's hilt axis onto the pommel->lead line. Skipped when the other hand
+            // is not behind this one along the hilt (grab at the guard, lost tracking): the lead controller
+            // alone then, as before, and the inertia step smooths the hand-over.
+            if (c.twoHandAim) {
+                int pin = 0, wep = 0; float along = 0.f; bool handleAxis = true;
+                const Pose& other = tr.hand[1 - h];
+                if (CombatTwoHandPin(&pin, &wep, &along, &handleAxis) && wep == h && other.valid && in.controllerConnected[1 - h]) {
+                    const Vec3 blade = handleAxis ? Vec3{0.f, 1.f, 0.f} : Vec3{0.f, 0.f, 1.f};   // game-frame local: up the handle / along the aim
+                    Vec3 cur = q.Rotate(blade), line = p - ToGame(other.pos);
+                    if (line.Dot(cur) > 0.05f) { q = (Quat::FromTo(cur, line.Normalized()) * q).Normalized(); wRt = Vec3{}; }   // velocity: from the composed target's own motion
+                }
+            }
+            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, ToGame(hand.linVel), wRt, NowSec()); p = pPlay + psOrigin; }
             // All three origins end up drift-free: "head" is head-relative by construction (the head offset is
             // added back at the target), the other two are measured from our own play-space origin.
             if (c.handOrigin == "head") p = p - hp;
@@ -1628,14 +1615,13 @@ bool CaptureTemplate(uint8_t* chr, const char* why) {
     g_poseTemplate = std::move(t);
     Vec3 rp; Quat rq;   // shoulder flip must be calibrated on the game's own (facing-aligned) pose
     if (PlayerRoot(chr, rp, rq)) { WorldPose w; WorldFromLocal(g_skel, g_poseTemplate, rp, rq, w); CalibrateShoulderFlip(rq, w); }
-    // Re-base the camera's head-rest height on the new template: keeping the old reference while the template's
-    // head bone height changed (run capture -> idle capture, slopes) left the camera vertically offset for good.
-    g_headRestHeight = -1.f;
+    // Keep the initial eye-to-head calibration. Re-basing it here pins the camera to
+    // EyeHeight while the new template moves the body up/down, leaving a permanent gap.
     LOGI("[skel] pose template captured (%s)", why);
     return true;
 }
 
-void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
+void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     const Config& c = Cfg();
     // Pose-write choke point: while the world is dying (death anim, warp, load) the game's
     // own animation (ragdoll, death anim) owns the body, and our bulk pose write is 720
@@ -1679,12 +1665,19 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
     // PoseMode=vr: the rig is the captured template, yawed to BodyYaw, every tick - the animation system can
     // write whatever it wants into the pose buffer, we replace all of it. Root motion (the character's actual
     // displacement, physics module) is untouched, so rolls and attacks still move you - they just don't pose you.
-    if (c.fpPoseMode == "vr" && (int)g_poseTemplate.size() != g_skel.boneCount) {
+    if (FramePumpCurrentPass() != 2 && c.fpPoseMode == "vr" && (int)g_poseTemplate.size() != g_skel.boneCount) {
         // Build-time capture failed (pose buffer not readable yet): retry, else vr mode would silently never start.
         double nowT = NowSec();
-        if (nowT - g_templLastCapture > 2.0) { g_templLastCapture = nowT; CaptureTemplate(player, "retry"); }
+        if (nowT - g_templLastCapture > 2.0) {
+            g_templLastCapture = nowT;
+            if (CaptureTemplate(player, "retry")) {
+                const Vec3 oldAnchor = f.anchor;
+                BuildCameraAnchor(player, f);
+                f.eye = f.eye + (f.anchor - oldAnchor);
+                eyeW = f.eye; headOff = eyeW - f.anchor;
+            }
+        }
     }
-    CalibrateModelFacing(player);   // once: does the model matrix basis agree with the physics facing?
     bool vrPose = c.fpPoseMode == "vr" && (int)g_poseTemplate.size() == g_skel.boneCount;
     bool followsHead = !vrPose && c.bodyFollowsHead && c.fpCameraAnchor != "head";   // head anchor: the camera goes to the body, not the body to the camera
     if (!vrPose && !followsHead) CalibrateShoulderFlip(rootQ, w);
@@ -1704,7 +1697,8 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
         // candidate a real stance change had just planted.
         double nowT = NowSec();
         if ((f.root - g_statPos).Length() > 0.03f) { g_statPos = f.root; g_statSince = nowT; g_templCandAt = 0; }
-        else if (poseForeign && nowT - g_statSince > 1.0 && nowT - g_templLastCapture > 3.0 && nowT - g_templCheckAt > 0.25) {
+        // A new stance belongs to the simulation pass; both eyes must render that same template.
+        else if (FramePumpCurrentPass() != 2 && poseForeign && nowT - g_statSince > 1.0 && nowT - g_templLastCapture > 3.0 && nowT - g_templCheckAt > 0.25) {
             g_templCheckAt = nowT;
             bool haveCand = g_templCandAt > 0 && (int)g_templCand.size() == g_skel.boneCount;
             float diff = 0.f, cand = 0.f;
@@ -1719,14 +1713,21 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
             else if (!haveCand || cand > 0.1f) { g_templCand = local; g_templCandAt = nowT; }   // new or still-moving pose: wait
             else if (nowT - g_templCandAt > 0.4) {
                 g_templLastCapture = nowT; g_templCandAt = 0;
-                CaptureTemplate(player, "standing still, pose settled");
+                if (CaptureTemplate(player, "standing still, pose settled")) {
+                    // BuildFrame measured the old template. Move the eye and hand anchor
+                    // together before solving the new pose and publishing this frame's camera.
+                    const Vec3 oldAnchor = f.anchor;
+                    BuildCameraAnchor(player, f);
+                    f.eye = f.eye + (f.anchor - oldAnchor);
+                    eyeW = f.eye; headOff = eyeW - f.anchor;
+                }
             }
         }
         local = g_poseTemplate;
         // Yaw the whole rig (root bones, in the model-root frame) so the body faces BodyYaw regardless of
         // where the physics character points - same math as the BodyRotate step of the animated path.
         float facing = BodyFacingYaw(rootQ, w);
-        Quat rotL = (rootQ.Conj() * Quat::YawQ(WrapPi(f.bodyYaw - facing)) * rootQ).Normalized();
+        Quat rotL = c.bodyRotateToHead ? (rootQ.Conj() * Quat::YawQ(WrapPi(f.bodyYaw - facing)) * rootQ).Normalized() : Quat{};
         for (int i = 0; i < g_skel.boneCount; ++i) {
             int p = g_skel.parents[i];
             if (!(p < 0 || p >= i)) continue;
@@ -1753,10 +1754,9 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
                 // purpose - this is a deliberate offset, not follow error.
                 off.x -= std::sin(f.bodyYaw) * c.bodyBackOffset; off.z -= std::cos(f.bodyYaw) * c.bodyBackOffset;
                 bodyOff = off;
-                // Convert into the frame the RENDERER uses, not the physics frame: root bone translations are
-                // applied by the model matrix, so a shift converted with the physics rotation comes out rotated
-                // (reversed, if the two disagree by 180) - the body stepping the wrong way.
-                Vec3 lo = RenderRootQ(player, rootQ).Conj().Rotate(off);
+                // Keep the shift in the same frame as the template and the IK solve.
+                // The finished root pose is converted to the native render frame below.
+                Vec3 lo = rootQ.Conj().Rotate(off);
                 for (int i = 0; i < g_skel.boneCount; ++i) {
                     int p = g_skel.parents[i];
                     if (!(p < 0 || p >= i)) continue;
@@ -1909,6 +1909,28 @@ void UpdateArms(uint8_t* player, const FrameInfo& f, int writePoint = 0) {
         if (h == HandLeft) SolveArm(g_skel, pose, local, w, g_skel.L_ua, g_skel.L_fa, g_skel.L_hand, tp[h], tq[h], pole);
         else               SolveArm(g_skel, pose, local, w, g_skel.R_ua, g_skel.R_fa, g_skel.R_hand, tp[h], tq[h], pole);
         any = true;
+    }
+    // Publish the entire solved root in the native model frame. Mixing a render-frame
+    // shift with physics-frame rotations reversed the lean when the frames differed.
+    // Editing the model matrix itself also changed axes the game uses for movement,
+    // and left its derived/propagated matrices disagreeing with the one we had flipped.
+    if (vrPose || followsHead) {
+        Vec3 renderPos; Quat renderQ;
+        if (ModelMatrixRoot(player, renderPos, renderQ)) {
+            for (int i = 0; i < g_skel.boneCount; ++i) {
+                const int parent = g_skel.parents[i];
+                if (!(parent < 0 || parent >= i)) continue;
+                HkQsTransform& t = local[i];
+                Vec3 translation{t.t[0], t.t[1], t.t[2]}; Quat rotation{t.q[0], t.q[1], t.q[2], t.q[3]};
+                RebasePoseRoot(rootPos, rootQ, renderPos, renderQ, translation, rotation);
+                t.t[0] = translation.x; t.t[1] = translation.y; t.t[2] = translation.z;
+                t.q[0] = rotation.x; t.q[1] = rotation.y; t.q[2] = rotation.z; t.q[3] = rotation.w;
+                SafeWrite(&pose[i], &t, sizeof(t));
+                if (followsHead) {   // next call must recognize and undo this exact output
+                    g_rootShiftWritten[i] = translation; g_rootRotWritten[i] = rotation;
+                }
+            }
+        }
     }
     g_status.armsActive = any;
     // Record what we left in the probe bone this pass, and report the fight once per 5 s.
@@ -2084,11 +2106,12 @@ bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
     if (c.fpCameraMode == "passthrough") { skipOriginal = false; return false; }
     if (c.fpCameraMode == "post" && !afterOriginal) { skipOriginal = false; return false; }   // come back after the original
     if (afterOriginal) {
-        UpdateCamera(player, f); g_lastWrittenYaw = f.baseYaw; g_haveWrittenYaw = true;
         // Final word on the pose. The camera step runs after all Havok evaluation in the frame (libER taskgroup
         // order: HavokBehavior .. HavokClothUpdate -> CameraStep -> render), so a write here beats the upper-body
         // animation layer (attacks, aim) that evaluates after the pose hook and was still showing on arms/shoulders.
         if (c.handTracking) UpdateArms(player, f, 1);
+        // UpdateArms may capture a stance and refresh f's anchor; publish that same height.
+        UpdateCamera(player, f); g_lastWrittenYaw = f.baseYaw; g_haveWrittenYaw = true;
         return true;
     }
     UpdateCamera(player, f);
@@ -2188,44 +2211,6 @@ uint64_t __fastcall Hook_CamFinalize(void* a, void* b, void* c, void* d) {
     return rv;
 }
 
-// Post-rebuild facing enforcement. The pre-hook physics pin measurably loses while moving - the probe logged
-// the rebuilt matrix 56-76 deg off BodyYaw in bursts - so the rebuild does not (always) take its rotation
-// from Phys_Orientation when the movement logic is steering. This matrix IS the rotation the renderer skins
-// the rig with, so enforce the facing on the artifact instead of chasing the unknown writer: yaw the freshly
-// rebuilt basis about world Y by the error, preserving any tilt and the position row. Runs right after the
-// original, before our pose/camera writes, so everything downstream (RenderRootQ, the camera rewrite) sees
-// the transform the frame actually renders with.
-void EnforceRenderFacing(void* ctrl, const FrameInfo& f) {
-    const Config& c = Cfg();
-    // Strafe mode only: under lock the game itself steers the character to the (fake) target, so the matrix
-    // already faces BodyYaw and this write would only matter in states (mounts, scripted turns) where forcing
-    // it is wrong. Keep the lock baseline byte-identical to pre-enforcement behavior.
-    if (c.fpFaceCameraMode != "strafe") return;
-    if (!c.fpPinBodyFacing || !c.fpFaceCamera || WorldDyingNow()) return;
-    float m[16];
-    if (!SafeRead((uint8_t*)ctrl + off::Ctrl_ModelMatrix, m, sizeof(m))) return;
-    Vec3 X{m[0], m[1], m[2]}, Y{m[4], m[5], m[6]}, Z{m[8], m[9], m[10]};
-    if (std::fabs(X.Length() - 1.f) > 0.05f || std::fabs(Y.Length() - 1.f) > 0.05f || std::fabs(Z.Length() - 1.f) > 0.05f) return;
-    float s = g_modelFacingSign > 0 ? 1.f : -1.f;   // model forward = local -Z unless calibration said otherwise
-    float facing = WrapPi(std::atan2(s * Z.x, s * Z.z) + Deg2Rad(c.bodyFacingOffsetDeg));
-    float d = WrapPi(f.bodyYaw - facing);
-    // Probe first (what the game left in the matrix, before the fix): 5 s max, logged when > 2 deg.
-    static float s_max = 0.f; static double s_at = 0;
-    if (std::fabs(d) > s_max) s_max = std::fabs(d);
-    double nw = NowSec();
-    if (nw - s_at > 5.0) {
-        s_at = nw;
-        if (s_max > Deg2Rad(2.f)) LOGI("[body] rebuilt model matrix facing was %.0f deg off BodyYaw (5 s max) - enforced back", Rad2Deg(s_max));
-        s_max = 0.f;
-    }
-    if (std::fabs(d) < Deg2Rad(0.3f)) return;
-    Quat r = Quat::YawQ(d);
-    X = r.Rotate(X); Y = r.Rotate(Y); Z = r.Rotate(Z);
-    m[0] = X.x; m[1] = X.y; m[2] = X.z;
-    m[4] = Y.x; m[5] = Y.y; m[6] = Y.z;
-    m[8] = Z.x; m[9] = Z.y; m[10] = Z.z;
-    SafeWrite((uint8_t*)ctrl + off::Ctrl_ModelMatrix, m, 48);   // basis rows only; the position row stays the game's
-}
 // Per-character model-matrix update, late in the frame. The pose probe measured the upper-body animation layer
 // (walk sway, weapon arts) evaluating every frame AFTER the camera step - this hook runs later still, so the
 // pose written here is what the renderer actually skins.
@@ -2254,8 +2239,8 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
     // skins the rig with - carries the game's facing while the pose was solved in ours: the whole rig renders
     // rotated by the difference, but only while moving. Re-pinning here makes the rebuild read our facing.
     if (!post && Cfg().fpFaceCameraMode == "strafe") ReassertFaceCamera(player, f);
-    // Rebuilt matrix in hand: force its facing to the yaw the pose below is solved in (see EnforceRenderFacing).
-    if (post) EnforceRenderFacing(ctrl, f);
+    // Keep the rebuilt model matrix native. UpdateArms expresses its solved pose in
+    // that frame, so visual facing no longer changes the game's movement axes.
     UpdateArms(player, f, 2);
     // Camera last, from the model matrix that was just rebuilt - the very transform the rig renders with. The
     // camera step runs earlier in the frame, so a camera written there sits on a root that is up to a frame of
@@ -2268,7 +2253,9 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
     // renders one eye per frame, and lateral motion is exactly where that shows).
     if (post) {
         Vec3 hw;
-        if (HeadBoneWorld(player, f.root, f.rootQ, hw)) {
+        Vec3 renderPos = f.root; Quat renderQ = f.rootQ;
+        ModelMatrixRoot(player, renderPos, renderQ);
+        if (HeadBoneWorld(player, renderPos, renderQ, hw)) {
             Vec3 d = hw - g_lastWrittenPos;
             float cy = std::cos(f.baseYaw), sy = std::sin(f.baseYaw);
             float lat = d.x * cy - d.z * sy, fwd = d.x * sy + d.z * cy;
@@ -2452,7 +2439,12 @@ void HkHandler(MidHookRegs*, void*) {
         __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     }
     // Physical combat: inject the AttackBehavior event once per frame after the arm pose is written.
-    if (g_status.cameraHooked && FramePumpCurrentPass() != 2) CombatGameFrame(MainPlayer(), g_frame);
+    if (g_status.cameraHooked) {
+        const int pass = FramePumpCurrentPass();
+        uint8_t* player = MainPlayer();
+        if (pass != 2) CombatGameFrame(player, g_frame);
+        CombatActionDiag(player, pass, g_frame);   // both passes: the press-vs-pass picture is the point
+    }
 }
 
 // ---------------------------------------------------------------- init
@@ -2501,6 +2493,7 @@ int GameERPlayerLevel() {
 }
 
 uint8_t* GameERWorldChrMan() { return WorldChrMan(); }
+uint8_t* GameERMainPlayer() { return MainPlayer(); }
 
 // Full stereo, pass 2: write the OTHER eye's camera into every slot the real pass wrote.
 // Called by the frame pump between the two engine passes, on the main-loop thread, while
