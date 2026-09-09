@@ -8,6 +8,8 @@
 #include "game_er.h"
 #include "head_anchor.h"
 #include "pose_frame.h"
+#include "body_pose.h"
+#include "two_hand_aim.h"
 #include "game_memory.h"
 #include "config.h"
 #include "debug_keys.h"
@@ -439,6 +441,7 @@ struct Skeleton {
     int boneCount = 0;
     std::vector<std::string> names;
     std::vector<int16_t> parents;
+    std::vector<uint8_t> fingers;
     HkQsTransform* refPose = nullptr;
     std::vector<HkQsTransform> refPoseCopy;
     int L_ua = -1, L_fa = -1, L_hand = -1, R_ua = -1, R_fa = -1, R_hand = -1;
@@ -498,13 +501,15 @@ bool BuildSkeleton(uint8_t* chr) {
     int16_t* parents = (int16_t*)Deref(hka + off::Hka_ParentIdx);
     s.refPose = (HkQsTransform*)Deref(hka + off::Hka_RefPose);
     if (!layout || !parents || !s.refPose) return false;
-    s.names.resize(s.boneCount); s.parents.resize(s.boneCount); s.refPoseCopy.resize(s.boneCount);
+    s.names.resize(s.boneCount); s.parents.resize(s.boneCount); s.refPoseCopy.resize(s.boneCount); s.fingers.resize(s.boneCount);
     if (!SafeRead(s.refPose, s.refPoseCopy.data(), sizeof(HkQsTransform) * s.boneCount)) return false;
     for (int i = 0; i < s.boneCount; ++i) {
         char* nm = nullptr; RD(layout + i * 2, nm);
         char buf[64]{}; if (nm) SafeRead(nm, buf, 63);
         s.names[i] = buf;
         RD(parents + i, s.parents[i]);
+        s.fingers[i] = IsFingerBone(s.names[i]) ||
+            (s.parents[i] >= 0 && s.parents[i] < i && s.fingers[s.parents[i]]);
     }
     const Config& c = Cfg();
     s.L_ua = s.Find(c.boneLUpperArm); s.L_fa = s.Find(c.boneLForearm); s.L_hand = s.Find(c.boneLHand);
@@ -745,6 +750,7 @@ struct InertiaState {
     Vec3 vTf, wTf;                  // low-passed finite-difference hand velocity (fallback when the runtime gives none)
     float dtAvg = 0.f;              // frame period, smoothed: the hook that fires first each frame varies, the sample period does not
     double t = 0;
+    TwoHandAimState twoHandAim;
     float arc = 0.f, tipSpeed = 0.f, handSpeed = 0.f; double stamp = 0;   // report (under g_inertiaMtx)
 };
 InertiaState g_inertia[2];
@@ -758,7 +764,8 @@ Vec3 QuatToRotVec(const Quat& qIn) {   // axis * angle of a unit quaternion, sho
     return Vec3{n.x, n.y, n.z} * (ang / s);
 }
 
-void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, double now) {
+void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, double now,
+                 bool twoHandAim, const Vec3& handLine) {
     const Config& c = Cfg();
     // BuildFrame runs from several hooks per frame, on a pool of worker threads. Serialise, and
     // integrate once per rendered frame: a repeat call gets the pose already computed. Unsynchronised
@@ -772,6 +779,9 @@ void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, doub
     const float weight = CombatHandWeight(h);
     float dtRaw = s.init ? (float)(now - s.t) : 0.f; s.t = now;
     const bool goodDt = dtRaw >= 0.001f && dtRaw <= 0.1f;
+    // Compose the two-controller target inside the same once-per-frame lock as
+    // inertia. Repeated pose hooks and the second eye must see the same steering.
+    q = s.twoHandAim.Update(q, handLine, twoHandAim, goodDt ? dtRaw : 0.f);
     // Integrate over the smoothed frame period: the raw gap between first-calls jitters with which hook
     // fires first, and integrating a regular pose stream over an irregular dt is itself jitter.
     if (goodDt) s.dtAvg = s.dtAvg > 0.f ? s.dtAvg + 0.1f * (dtRaw - s.dtAvg) : dtRaw;
@@ -784,7 +794,8 @@ void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, doub
         Vec3 vFd = (p - s.lastTarget) * (1.f / dtRaw), wFd = QuatToRotVec((q * s.lastTargetQ.Conj()).Normalized()) * (1.f / dtRaw);
         const float kf = dt / (dt + 0.02f);
         s.vTf = s.vTf + (vFd - s.vTf) * kf; s.wTf = s.wTf + (wFd - s.wTf) * kf;
-        vT = vRt.Length() > 1e-4f ? vRt : s.vTf; wT = wRt.Length() > 1e-4f ? wRt : s.wTf;
+        vT = vRt.Length() > 1e-4f ? vRt : s.vTf;
+        wT = !s.twoHandAim.Active() && wRt.Length() > 1e-4f ? wRt : s.wTf;
     }
     // No controller moves faster than this; anything beyond is a bad sample, not a swing.
     { float m = vT.Length(); if (m > 30.f) vT = vT * (30.f / m); m = wT.Length(); if (m > 120.f) wT = wT * (120.f / m); }
@@ -1124,21 +1135,15 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
             // Weight: the hand the arm solver gets is the inertial one, filtered in drift-free play space.
             // Runtime velocities go through the same VR->game mapping: vectors flip z, axial (angular) vectors flip x,y.
             Vec3 wRt{-hand.angVel.x, -hand.angVel.y, hand.angVel.z};
-            // Two-handed aim: with the free hand gripping the hilt, the blade runs from that hand to this one
-            // (a real two-handed grip steers with both), roll still from this controller: the minimal rotation
-            // that takes this controller's hilt axis onto the pommel->lead line. Skipped when the other hand
-            // is not behind this one along the hilt (grab at the guard, lost tracking): the lead controller
-            // alone then, as before, and the inertia step smooths the hand-over.
+            bool twoHandAim = false; Vec3 handLine;
             if (c.twoHandAim) {
                 int pin = 0, wep = 0; float along = 0.f; bool handleAxis = true;
                 const Pose& other = tr.hand[1 - h];
                 if (CombatTwoHandPin(&pin, &wep, &along, &handleAxis) && wep == h && other.valid && in.controllerConnected[1 - h]) {
-                    const Vec3 blade = handleAxis ? Vec3{0.f, 1.f, 0.f} : Vec3{0.f, 0.f, 1.f};   // game-frame local: up the handle / along the aim
-                    Vec3 cur = q.Rotate(blade), line = p - ToGame(other.pos);
-                    if (line.Dot(cur) > 0.05f) { q = (Quat::FromTo(cur, line.Normalized()) * q).Normalized(); wRt = Vec3{}; }   // velocity: from the composed target's own motion
+                    twoHandAim = true; handLine = p - ToGame(other.pos);
                 }
             }
-            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, ToGame(hand.linVel), wRt, NowSec()); p = pPlay + psOrigin; }
+            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, ToGame(hand.linVel), wRt, NowSec(), twoHandAim, handLine); p = pPlay + psOrigin; }
             // All three origins end up drift-free: "head" is head-relative by construction (the head offset is
             // added back at the target), the other two are measured from our own play-space origin.
             if (c.handOrigin == "head") p = p - hp;
@@ -1703,7 +1708,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             bool haveCand = g_templCandAt > 0 && (int)g_templCand.size() == g_skel.boneCount;
             float diff = 0.f, cand = 0.f;
             for (int i = 0; i < g_skel.boneCount; ++i) {
-                if (OursBone(i)) continue;
+                if (OursBone(i) || g_skel.fingers[i]) continue;
                 for (int k = 0; k < 4; ++k) {
                     diff += std::fabs(local[i].q[k] - g_poseTemplate[i].q[k]);
                     if (haveCand) cand += std::fabs(local[i].q[k] - g_templCand[i].q[k]);
@@ -1723,7 +1728,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
                 }
             }
         }
-        local = g_poseTemplate;
+        ApplyBodyPoseTemplate<HkQsTransform>(local, g_poseTemplate, g_skel.fingers);
         // Yaw the whole rig (root bones, in the model-root frame) so the body faces BodyYaw regardless of
         // where the physics character points - same math as the BodyRotate step of the animated path.
         float facing = BodyFacingYaw(rootQ, w);

@@ -300,7 +300,7 @@ struct Config {
     float inertiaSpringHz = 8.f;          // stiffness of the chase near the target (higher = tighter tracking)
     float inertiaTwoHandForce = 1.5f;     // two-handed: linear acceleration cap x this (two arms)
     float inertiaTwoHandTorque = 2.f;     // two-handed: angular acceleration cap x this (a hand on the pommel)
-    bool  twoHandAim = true;              // two-handed with the free hand on the hilt: the blade runs from that hand to the weapon hand
+    bool  twoHandAim = true;              // both controllers steer relative to their separation at grab time, with smooth steering/release
     float inertiaBrake = 3.f;             // braking (and stop-distance) acceleration as a multiple of the cap: a wrist stops a weapon more easily than it starts one
     float inertiaComRef = 0.5f;           // m centre-of-mass distance at which weight counts fully for rotation (angular cap /= 1 + w/W * (com/ref)^2)
     bool  inertiaNoOverrun = true;        // the weapon never moves toward the hand faster than the hand (no catch-up whip)

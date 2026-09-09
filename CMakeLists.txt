@@ -92,14 +92,15 @@ add_library(dinput8_proxy SHARED
 set_target_properties(dinput8_proxy PROPERTIES OUTPUT_NAME "dinput8" PREFIX "")
 
 # Pure regression checks; no game process or headset required.
-option(ERVR_BUILD_REGRESSION_TESTS "Build camera, pose, and action-queue regression tests" OFF)
+option(ERVR_BUILD_REGRESSION_TESTS "Build camera, pose, input, and action-queue regression tests" OFF)
 if(ERVR_BUILD_REGRESSION_TESTS)
   enable_testing()
-  foreach(_test head_anchor action_queue pose_frame)
+  foreach(_test head_anchor action_queue pose_frame two_hand_aim body_pose virtual_pad)
     add_executable(test_${_test} tools/test_${_test}.cpp)
     target_include_directories(test_${_test} PRIVATE src/ervr)
     add_test(NAME ${_test} COMMAND test_${_test})
   endforeach()
+  target_sources(test_virtual_pad PRIVATE src/ervr/virtual_pad.cpp src/ervr/gestures.cpp src/ervr/config.cpp)
 endif()
 
 # ---- packaging ------------------------------------------------------------

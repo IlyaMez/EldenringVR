@@ -319,14 +319,16 @@ void VirtualPadUpdate(double now) {
         if (c.rightStick == "camera") GameERAddCameraYaw(Deg2Rad(delta));
         else GameERAddBodyYaw(Deg2Rad(delta));   // body only: the view stays where it is
         if (!mb.lockedOn) rx = 0.f;   // locked on the right stick still switches targets; otherwise it is ours
-        ry = 0.f;                     // pitch comes from the headset
+        // ERVR consumes X for yaw only. Keep Y available for map zoom even when
+        // the map leaves both menu flags and the gameplay FOV unchanged. The
+        // first-person camera derives pitch from the HMD, not this stick axis.
     } else if (c.snapTurn && !anyMenu) {
         // Snap turn without yaw ownership: convert right-stick X into short full-deflection pulses.
         if (std::fabs(rx) > 0.7f) {
             if (!g_snapActive || now - g_lastSnap >= c.snapTurnRepeatSeconds) { g_lastSnap = now; g_snapActive = true; }
             rx = (now - g_lastSnap) < c.snapTurnPulseSeconds ? (rx > 0 ? 1.f : -1.f) : 0.f;
         } else { g_snapActive = false; rx = 0.f; }
-    } else {
+    } else if (!anyMenu) {
         rx *= c.rightStickSensitivity; ry *= c.rightStickSensitivity;
     }
     if (mb.active && c.moveRelativeToCamera && !anyMenu) {

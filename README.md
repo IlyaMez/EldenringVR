@@ -184,13 +184,14 @@ own OpenXR session.
   move the view, walking around the room is absorbed.
 * **Body pose** (`PoseMode=vr`, default) – the rig never plays a game animation. A standing pose is captured from
   the animation system once (at skeleton discovery, re-captured whenever you stand still for a second, so
-  idle/crouch/sit stances still come through as discrete poses) and written over the **entire** live Havok pose on
+  idle/crouch/sit stances still come through as discrete poses) and written over the live Havok body pose on
   every pose-hook call. Stance changes preserve the initial head-to-eye height offset and update camera height
   immediately, so a new pose does not leave the body vertically detached. Terrain movement is never smoothed.
   The pose is yawed to the body yaw; the arm IK and spine twist go on top. Root motion is untouched:
   rolls, attacks and running still *displace* the character (and the camera rides along 1:1), they just never pose
   the rig or whip the camera around, because the head bone the camera anchors to no longer moves relative to the
-  root. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
+  root. Finger joints retain the game's current equipment grip instead of freezing an occasional open-hand
+  animation until the next stance capture. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
 * **Body facing** (`FaceCamera` + `FaceCameraMode`) – keeps movement in strafe mode so the arms can always reach.
   `strafe` (default with `PoseMode=vr`) only sets the ChrCtrl "strafing" flag and leaves the game's lock-on state
   alone. The old way (`lock`) forced `Chr_IsLockedOn` onto a fake far-away point every frame — which engages the
