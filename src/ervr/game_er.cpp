@@ -9,6 +9,8 @@
 #include "head_anchor.h"
 #include "pose_frame.h"
 #include "body_pose.h"
+#include "movement_facing.h"
+#include "ride_state.h"
 #include "two_hand_aim.h"
 #include "game_memory.h"
 #include "config.h"
@@ -888,6 +890,7 @@ void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, doub
 struct FrameInfo {
     bool valid = false;
     bool lockedOn = false; // a real enemy is locked on
+    bool riding = false;  // mounting/riding/dismounting: native seated body and physics
     Vec3 root; Quat rootQ; // character root the whole frame is built on (model matrix, physics fallback)
     Vec3 anchor;         // eye anchor in game world (no HMD offset)
     float baseYaw = 0;   // game camera yaw the HMD is relative to
@@ -1025,7 +1028,7 @@ float UpdateBodyYaw(float target, double now, bool instant) {
     g_bodyYaw.store(cur);
     return cur;
 }
-std::atomic<bool>  g_moveActive{false}, g_moveLocked{false};
+std::atomic<bool>  g_moveActive{false}, g_moveLocked{false}, g_moveRiding{false};
 bool g_camYawInit = false;
 
 float GameCamYaw() {
@@ -1047,18 +1050,18 @@ void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
     // dragging the skeleton back under a root-anchored camera every tick and losing that fight on some frames.
     // Horizontal: the head bone (low-passed by CameraAnchorSmoothing). Vertical: EyeHeight above the root plus
     // CameraBob of the head bone's own vertical excursion (0 = no bob at all).
-    if (c.fpCameraAnchor == "head") {
+    if (f.riding || c.fpCameraAnchor == "head") {
         Vec3 hb;
         // PoseMode=vr: measure on the template (see HeadBoneTemplateWorld) so the anchor is independent of the
         // shift we are about to apply; otherwise fall back to the live pose.
         bool haveHb = false;
-        if (c.fpPoseMode == "vr" && g_skel.chr == player && g_skel.hkb)
+        if (!f.riding && c.fpPoseMode == "vr" && g_skel.chr == player && g_skel.hkb)
             haveHb = HeadBoneTemplateWorld(root, rootQ, g_bodyYaw.load(), hb);
         const bool templatePose = haveHb;
         if (!haveHb) haveHb = HeadBoneWorld(player, root, rootQ, hb);
         if (haveHb) {
             f.anchor = g_headAnchor.Update(root, hb, c.fpEyeHeight, c.fpCameraBob,
-                                          c.fpCameraAnchorSmoothing, templatePose, NowSec(), g_frame);
+                                          c.fpCameraAnchorSmoothing, templatePose, NowSec(), g_frame, f.riding);
         }
     }
 }
@@ -1066,7 +1069,18 @@ void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
 bool BuildFrame(uint8_t* player, FrameInfo& f) {
     const Config& c = Cfg();
     Vec3 root; Quat rootQ;
-    if (!SkeletonRoot(player, root, rootQ)) return false;
+    const RideState ride = ReadRideState(player, SafeRead);
+    f.riding = ride.NativeBody();
+    static std::atomic<int> s_rideMode{-1};
+    const int rideMode = !ride.valid ? 2 : (ride.active ? 1 : 0);
+    if (s_rideMode.exchange(rideMode) != rideMode)
+        LOGI("[ride] %s", rideMode == 2 ? "state unavailable; preserving native body/facing" :
+             (rideMode == 1 ? "mount/riding/dismount: live rider head, native seated body/facing" : "on foot: configured VR body/facing restored"));
+    if (f.riding) {
+        // The attached rider's rendered transform can differ from its physics
+        // position AND rotation. Use it for both the live head and the arm IK.
+        if (!ModelMatrixRoot(player, root, rootQ) && !PlayerRoot(player, root, rootQ)) return false;
+    } else if (!SkeletonRoot(player, root, rootQ)) return false;
     f.root = root; f.rootQ = rootQ;
     BuildCameraAnchor(player, f);
 
@@ -1101,11 +1115,12 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
     }
     g_chrYaw.store(f.chrYaw);
     g_moveLocked.store(f.lockedOn);
+    g_moveRiding.store(f.riding);
     g_moveActive.store(true);
 
     VRTracking tr; VRInputState in; bool vr;
     LatchVRForCycle(tr, in, vr);
-    f.bodyYaw = f.baseYaw;
+    f.bodyYaw = f.riding ? f.chrYaw : f.baseYaw;
     if (vr && tr.head.valid) {
         Quat hq = ToGame(tr.head.rot); Vec3 hp = ToGame(tr.head.pos);
         // Pivot stick turns about the head: baseYaw already contains the new yaw, so shift the play-space origin
@@ -1154,12 +1169,13 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
         // Body: chase the head yaw (default) so shoulders/torso follow your real body; locked on, the game aims it.
         // A live cast (CastAimTurnBody) turns it toward where the casting hand points instead - the game's own
         // turn-to-target, done by us because the physics facing is pinned to BodyYaw.
-        float want; bool instant = f.lockedOn || c.bodyYawSource == "camera";
+        float want; bool instant = f.riding || f.lockedOn || c.bodyYawSource == "camera";
         if (!g_bodyYawInit) g_bodyStickYaw.store(f.baseYaw);   // start facing the view, not world yaw 0
-        if (instant) want = f.baseYaw;
+        if (f.riding) want = f.chrYaw;
+        else if (instant) want = f.baseYaw;
         else if (c.bodyYawSource == "head") want = WrapPi(f.baseYaw + f.headYaw);
         else want = g_bodyStickYaw.load();                       // stick: absolute, right stick turns it
-        if (c.castAim && c.castAimTurnBody && !f.lockedOn) {
+        if (!f.riding && c.castAim && c.castAimTurnBody && !f.lockedOn) {
             bool casting = false; const int ah = CombatCastAimHand(&casting); Vec3 o, d;
             if (casting && CastAimRay(f, ah, o, d) && d.x * d.x + d.z * d.z > 0.05f) { want = std::atan2(d.x, d.z); instant = false; }
         }
@@ -1168,6 +1184,37 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
     if (!(vr && tr.head.valid)) { f.eye = f.anchor; g_headYawValid.store(false); }
     f.valid = true;
     return true;
+}
+
+MovementFacingState ReadMovementFacing(uint8_t* player) {
+    MovementFacingState s;
+    uint8_t* mods = Deref(player + off::Chr_Modules); if (!mods) return s;
+    uint8_t* ar = Deref(mods + 0x80);   // CSChrActionRequestModule
+    uint8_t* af = Deref(mods + 0x08);   // CSChrActionFlagModule
+    if (!ar || !af || Deref(ar + 8) != player || Deref(af + 8) != player || Deref(ar + 0x48) != ar) return s;
+    uint64_t ready = 0, queued = 0;
+    uint32_t tae = 0; uint8_t queueMode = 0;
+    if (!SafeRead(ar + 0x10, &s.requests, 8) || !SafeRead(ar + 0x30, &ready, 8) ||
+        !SafeRead(ar + 0x38, &queued, 8) || !SafeRead(ar + 0xFC, &s.movement, 4) ||
+        !SafeRead(ar + 0x100, &tae, 4) || !SafeRead(ar + 0x138, &queueMode, 1) ||
+        !SafeRead(af + 0x40, &s.modifiers, 8) || queueMode > 1) return s;
+    s.requests |= ready | queued;
+    ActionQueueSnapshot cancels;
+    int32_t currentTae = -1, overrideTae = -1;
+    if (queueMode) {
+        if (!SafeRead(ar + 0x90, &currentTae, 4) || !SafeRead(ar + 0x134, &overrideTae, 4)) return s;
+        if (overrideTae >= 0) currentTae = overrideTae;
+        cancels = ReadActionQueue(ar + 0x70, SafeRead);
+        if (!cancels.valid) return s;
+    }
+    s.movementCancelable = MovementCancelOpen(tae, queueMode != 0, currentTae, cancels);
+    s.valid = true;
+    return s;
+}
+
+bool CanPinPlayerFacing(uint8_t* player) {
+    const MoveIntent mi = VirtualPadGetMove();
+    return !CombatMenuOpen() && CanPinMovementFacing(ReadMovementFacing(player), mi.valid && mi.sprint);
 }
 
 // ---------------------------------------------------------------- camera
@@ -1183,8 +1230,9 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
 // Cast aim: with a casting hand (aimO/aimD = its ray) the fake target sits down THAT ray - pitch included, so
 // an unlocked bullet aimed at the target flies where the hand points - and, in strafe mode with
 // CastAimForceLock, the lock-on state is forced for the press window (`casting`) like erfps2 does.
-void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw, const Vec3* aimO, const Vec3* aimD, bool casting) {
+void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw, const Vec3* aimO, const Vec3* aimD, bool casting, bool riding) {
     const Config& c = Cfg();
+    if (riding) return;   // Torrent owns rider facing, movement mode and lock flags
     if (!c.fpFaceCamera || c.fpFaceCameraMode == "off") return;
     // Facing/lock-state choke point: while the world is dying, do not pin a dying body's
     // physics orientation or write lock flags - the ragdoll/death anim owns the character.
@@ -1212,9 +1260,10 @@ void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw, const Vec
             // Pin the physics facing to BodyYaw. The game decides forward-run vs strafe from the angle between
             // the move direction and this facing: without the pin, physically turning your head while walking
             // (Forward=head rotates the stick) reads as a sideways stick and you side-step at strafe speed
-            // instead of just walking the new way. Strafe-mode dodges are directional (no turn-then-roll), so
-            // pinning does not break roll direction.
-            if (c.fpPinBodyFacing) {
+            // instead of just walking the new way. Dash and unlocked rolls need the game's own physics
+            // turn toward the movement stick. Do not overwrite it, including after B is released and after
+            // invulnerability ends. The rendered skeleton still follows BodyYaw independently.
+            if (c.fpPinBodyFacing && CanPinPlayerFacing(player)) {
                 if (uint8_t* ph = Physics(player)) {
                     Quat q = Quat::YawQ(WrapPi(bodyYaw + 3.14159265f));   // physics forward is local -Z
                     float r4[4] = {q.x, q.y, q.z, q.w};
@@ -1235,7 +1284,7 @@ void ReassertFaceCamera(uint8_t* player, const FrameInfo& f) {
     const Config& c = Cfg();
     Vec3 aimO, aimD; bool casting = false, handAim = false;
     if (c.castAim && !f.lockedOn) { const int ah = CombatCastAimHand(&casting); handAim = ah >= 0 && CastAimRay(f, ah, aimO, aimD); }
-    ApplyFaceCamera(player, f.root, f.bodyYaw, handAim ? &aimO : nullptr, handAim ? &aimD : nullptr, handAim && casting);
+    ApplyFaceCamera(player, f.root, f.bodyYaw, handAim ? &aimO : nullptr, handAim ? &aimD : nullptr, handAim && casting, f.riding);
 }
 
 // One eye per game frame, latched once so that the several UpdateCamera calls a frame makes
@@ -1451,7 +1500,7 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
     // head's - the fake lock target goes down it and the aim view matrix looks along it from the hand.
     Vec3 aimO, aimD; bool casting = false, handAim = false;
     if (c.castAim && !f.lockedOn) { const int ah = CombatCastAimHand(&casting); handAim = ah >= 0 && CastAimRay(f, ah, aimO, aimD); }
-    ApplyFaceCamera(player, f.root, f.bodyYaw, handAim ? &aimO : nullptr, handAim ? &aimD : nullptr, handAim && casting);
+    ApplyFaceCamera(player, f.root, f.bodyYaw, handAim ? &aimO : nullptr, handAim ? &aimD : nullptr, handAim && casting, f.riding);
     if (c.fpWriteAim) {
         if (handAim) {
             Vec3 ar, au; AimBasis(aimD, f.bodyYaw, ar, au);
@@ -1605,6 +1654,7 @@ bool OursBone(int i) {
 // Snapshot the animation's current pose as the PoseMode=vr template. Only ever called when the pose buffer
 // holds the game's own output (skeleton build, or a fresh buffer while standing still), never our writes.
 bool CaptureTemplate(uint8_t* chr, const char* why) {
+    if (ReadRideState(chr, SafeRead).NativeBody()) return false; // never save a seated pose as the walking template
     if (g_skel.boneCount <= 0 || !g_skel.hkb) return false;
     HkQsTransform* pose = g_skel.LivePose(); if (!pose) return false;
     std::vector<HkQsTransform> t(g_skel.boneCount);
@@ -1670,7 +1720,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     // PoseMode=vr: the rig is the captured template, yawed to BodyYaw, every tick - the animation system can
     // write whatever it wants into the pose buffer, we replace all of it. Root motion (the character's actual
     // displacement, physics module) is untouched, so rolls and attacks still move you - they just don't pose you.
-    if (FramePumpCurrentPass() != 2 && c.fpPoseMode == "vr" && (int)g_poseTemplate.size() != g_skel.boneCount) {
+    if (!f.riding && FramePumpCurrentPass() != 2 && c.fpPoseMode == "vr" && (int)g_poseTemplate.size() != g_skel.boneCount) {
         // Build-time capture failed (pose buffer not readable yet): retry, else vr mode would silently never start.
         double nowT = NowSec();
         if (nowT - g_templLastCapture > 2.0) {
@@ -1683,8 +1733,14 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             }
         }
     }
-    bool vrPose = c.fpPoseMode == "vr" && (int)g_poseTemplate.size() == g_skel.boneCount;
-    bool followsHead = !vrPose && c.bodyFollowsHead && c.fpCameraAnchor != "head";   // head anchor: the camera goes to the body, not the body to the camera
+    bool vrPose = !f.riding && c.fpPoseMode == "vr" && (int)g_poseTemplate.size() == g_skel.boneCount;
+    bool followsHead = !f.riding && !vrPose && c.bodyFollowsHead && c.fpCameraAnchor != "head";   // head anchor: the camera goes to the body, not the body to the camera
+    if (f.riding) {
+        // Keep the saved walking stance, but discard a pending capture from before
+        // mounting. Native roots/legs keep the rider seated; only arm IK runs below.
+        g_templCandAt = 0; g_statPos = f.root; g_statSince = NowSec();
+        for (auto& has : g_rootShiftHas) has = 0;
+    }
     if (!vrPose && !followsHead) CalibrateShoulderFlip(rootQ, w);
     if (vrPose) {
         // Stance re-capture: standing still for a second, take the animation's own pose as the new template
@@ -1857,7 +1913,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     // Torso twist: rotate the Spine bone about world Y so the shoulders face the body yaw. This is the residual
     // after BodyRotate (which only knows the root facing): whatever yaw the animation puts into the root/spine
     // bones. Clamped, so a mis-read shoulder line can never fold the torso backwards.
-    if (c.torsoFaceCamera && g_skel.torso >= 0 && g_skel.L_clav >= 0 && g_skel.R_clav >= 0 && (f.handValid[0] || f.handValid[1])) {
+    if (!f.riding && c.torsoFaceCamera && g_skel.torso >= 0 && g_skel.L_clav >= 0 && g_skel.R_clav >= 0 && (f.handValid[0] || f.handValid[1])) {
         {
             float shoulderYaw = ShoulderLineYaw(w);
             float delta = Clamp(WrapPi(f.bodyYaw - shoulderYaw), -Deg2Rad(60.f), Deg2Rad(60.f));
@@ -1939,7 +1995,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     }
     g_status.armsActive = any;
     // Record what we left in the probe bone this pass, and report the fight once per 5 s.
-    bool vrWrote = c.fpPoseMode == "vr" && (int)g_poseTemplate.size() == g_skel.boneCount;
+    bool vrWrote = vrPose;
     if (probe >= 0 && (any || vrWrote)) {
         const HkQsTransform& t = local[probe];
         g_probeQ = {t.q[0], t.q[1], t.q[2], t.q[3]}; g_probeLastPoint = writePoint;
@@ -2386,7 +2442,7 @@ void HookCameraStepImpl(void* a, void* b) {
 Vec3 g_locoPos{}; bool g_locoActive = false; double g_locoLast = 0; unsigned g_locoFrame = 0;
 void DirectLocomotion(uint8_t* player, const FrameInfo& f) {
     const Config& c = Cfg();
-    if (c.locomotion != "direct") { g_locoActive = false; return; }
+    if (f.riding || c.locomotion != "direct") { g_locoActive = false; return; }
     // Do not move or re-orient the character while the world is dying (see WorldDyingNow).
     if (WorldDyingNow()) { g_locoActive = false; return; }
     if (g_locoFrame == g_frame) return; g_locoFrame = g_frame;   // once per rendered frame
@@ -2410,6 +2466,8 @@ void DirectLocomotion(uint8_t* player, const FrameInfo& f) {
     if ((Vec3{gp.x - g_locoPos.x, 0.f, gp.z - g_locoPos.z}).Length() > 1.5f) g_locoPos = gp;
     p[0] = g_locoPos.x; p[2] = g_locoPos.z; g_locoPos.y = p[1];
     SafeWrite(ph + off::Phys_Position, p, 16);
+    // As in ApplyFaceCamera, dash/roll physics facing belongs to the game.
+    if (!CanPinPlayerFacing(player)) return;
     // face the view (physics forward is local -Z); also pin the interpolation target or the game turns it back
     Quat q = Quat::YawQ(WrapPi(f.bodyYaw + 3.14159265f));
     float r[4] = {q.x, q.y, q.z, q.w};
@@ -2904,6 +2962,7 @@ MoveBasis GameERGetMoveBasis() {
     MoveBasis m;
     m.active = g_moveActive.load() && Cfg().fpEnabled && Cfg().fpCameraYawSource != "game";
     m.lockedOn = g_moveLocked.load();
+    m.riding = g_moveActive.load() && Cfg().fpEnabled && g_moveRiding.load();
     m.camYaw = g_camYaw.load();
     m.chrYaw = g_chrYaw.load();
     m.bodyYaw = g_bodyYaw.load();

@@ -200,7 +200,7 @@ struct Config {
     float fpLockTargetDistance = 100.f;   // m: how far ahead the fake lock-on point sits (short = the game's lock-on camera drags your yaw)
     std::string fpPoseMode = "vr";        // vr = full-rig template override (no animation ever poses the body; root motion still moves it) | game = animation + IK on top
     std::string fpArmRootSource = "model";  // model = position from the ChrCtrl model matrix (the transform the renderer skins with, read fresh in the model-pos hook) + physics rotation | modelmatrix | physics
-    bool  fpPinBodyFacing = true;         // strafe mode: pin the physics facing to BodyYaw so walking toward your gaze is forward speed, not a side-step
+    bool  fpPinBodyFacing = true;         // strafe mode: pin walking facing to BodyYaw; dash/roll and non-cancelable actions retain native physics facing
     bool  fpCameraAfterModelPos = true;   // write the camera again once the rendered model matrix exists, so camera and body sit on the same transform (kills the body-slides-to-camera lag)
     bool  fpCameraFinalWrite = true;      // replay our camera matrix after the game's camera finalizer (which runs past every other write point and would otherwise render its own interpolated follow position)
     bool  fpLatchVRPerFrame = true;       // take ONE head/hand sample per render cycle and use it at every write point, so the body is posed and the camera placed from the identical head position

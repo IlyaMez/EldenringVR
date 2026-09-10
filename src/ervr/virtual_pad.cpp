@@ -117,7 +117,7 @@ void VirtualPadUpdate(double now) {
         // reads): the readers earn trust as menus open and close, and unattended runs -
         // no headset, autopilot tapping START - can verify them from the [menu] log lines.
         if (c.menuNavEnabled && GameERPlayerActive()) CombatSetMenuOpen(GameMenuOpen(now) == 1 || GameERForeignCamActive());
-        std::lock_guard<std::mutex> g(g_mtx); g_pad = pad; return;
+        std::lock_guard<std::mutex> g(g_mtx); g_pad = pad; g_move = {}; return;
     }
     pad.active = true;
     uint16_t held = 0;   // buttons held as long as the physical control is held
@@ -430,9 +430,9 @@ void VirtualPadUpdate(double now) {
         }
     }
     {
-        MoveIntent mi; mi.x = lx; mi.y = ly; mi.sprint = (pad.buttons & XINPUT_GAMEPAD_B) != 0; mi.valid = !g_menuMode;
+        MoveIntent mi; mi.x = lx; mi.y = ly; mi.sprint = (pad.buttons & XINPUT_GAMEPAD_B) != 0; mi.valid = !anyMenu;
         std::lock_guard<std::mutex> g(g_mtx); g_move = mi;
-        if (c.locomotion == "direct" && !c.locoFeedStick && !g_menuMode) { pad.lx = 0; pad.ly = 0; }
+        if (c.locomotion == "direct" && !c.locoFeedStick && !mb.riding && !g_menuMode) { pad.lx = 0; pad.ly = 0; }
     }
     std::lock_guard<std::mutex> g(g_mtx);
     g_pad = pad;

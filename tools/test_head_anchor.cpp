@@ -84,11 +84,55 @@ void ConfigurationAndSkeletonReset() {
     Near(newSkeleton.y, 9.60f, "skeleton reset establishes a new eye calibration");
     Near(anchor.restHeight, 1.70f, "skeleton reset discards the previous rest height");
 }
+
+void RidingTracksTheSeatedHead() {
+    HeadAnchorState anchor;
+    anchor.Update({}, {0.f, 1.56f, 0.f}, 1.60f, 1.f, 0.06f, true, 5.0, 50);
+    // The model root is already on the saddle. Its seated head is lower relative
+    // to that root than a standing head; adding standing EyeHeight is too tall.
+    Vec3 root{4.f, 2.f, -2.f};
+    for (float bob : {0.f, 0.5f, 1.f}) {
+        for (float height : {0.82f, 0.76f, 0.92f}) {
+            root = root + Vec3{0.3f, 0.1f, -0.2f};
+            const Vec3 head = root + Vec3{0.25f, height, -0.15f};
+            const Vec3 eye = anchor.Update(root, head, 1.60f, bob, 0.06f, false, 5.001, 50, true);
+            Near(eye.x, head.x, "rider head stays attached through late horizontal updates");
+            Near(eye.z, head.z, "rider head stays attached through late depth updates");
+            Near(eye.y - head.y, 0.04f, "saddle height is counted once regardless of CameraBob");
+            Near(anchor.restHeight, 1.56f, "riding preserves standing calibration");
+        }
+    }
+    const Vec3 footRoot{1.f, 0.3f, 2.f};
+    const Vec3 footHead = footRoot + Vec3{0.f, 1.56f, 0.f};
+    const Vec3 eye = anchor.Update(footRoot, footHead, 1.60f, 1.f, 0.06f, true, 5.002, 50);
+    Near(eye.x, footHead.x, "dismount discards the saddle's horizontal offset in the same frame");
+    Near(eye.z, footHead.z, "dismount discards the saddle's depth offset in the same frame");
+    Near(eye.y - footRoot.y, 1.60f, "dismount restores standing height immediately");
+}
+
+void LoadingOnTorrentDoesNotCalibrateFromTheSaddle() {
+    HeadAnchorState anchor;
+    const Vec3 root{1.f, 3.f, 2.f}, head = root + Vec3{0.2f, 0.8f, -0.1f};
+    for (uint32_t frame : {60u, 60u, 61u, 62u}) {
+        const Vec3 eye = anchor.Update(root, head, 1.60f, 0.f, 0.06f, false, 6.0, frame, true);
+        Near(eye.y, head.y, "loading mounted starts at the live head without a standing offset");
+        Near(anchor.restHeight, -1.f, "mounted startup leaves standing calibration unset");
+    }
+    const Vec3 standing = anchor.Update({}, {0.f, 1.56f, 0.f}, 1.60f, 1.f, 0.06f, true, 6.1, 63);
+    Near(standing.y, 1.60f, "first dismount establishes normal eye height");
+    Near(anchor.restHeight, 1.56f, "first dismount calibrates from the standing head");
+    anchor.Update(root, head, 1.60f, 1.f, 0.06f, false, 6.2, 64, true);
+    anchor.Reset();
+    const Vec3 reset = anchor.Update(root, head, 1.60f, 1.f, 0.06f, false, 6.3, 64, true);
+    Near(reset.y, head.y, "mounted skeleton rebuild discards old calibration");
+}
 } // namespace
 
 int main() {
     TerrainAndStanceStayAttached();
     SmoothingRetainsItsPurpose();
     ConfigurationAndSkeletonReset();
+    RidingTracksTheSeatedHead();
+    LoadingOnTorrentDoesNotCalibrateFromTheSaddle();
     std::puts("Head anchor regression checks passed.");
 }

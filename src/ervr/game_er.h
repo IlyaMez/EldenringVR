@@ -97,6 +97,7 @@ void GameERAddBodyYaw(float radians);     // RightStick=body: turn the character
 struct MoveBasis {
     bool  active = false;    // first person is running and we have a player
     bool  lockedOn = false;  // a real enemy is locked on (the game owns the yaw then)
+    bool  riding = false;    // native mount movement needs the game stick even with direct locomotion configured
     float camYaw = 0;        // where the view points
     float chrYaw = 0;        // where the character actually faces (lags camYaw while it turns)
     float bodyYaw = 0;       // where ERVR is turning the body toward (head yaw by default)

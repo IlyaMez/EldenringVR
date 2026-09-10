@@ -7,6 +7,7 @@
 #include "log.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 
 namespace {
 ervr::VRInputState input;
@@ -85,5 +86,55 @@ int main() {
     input.thumb[HandRight][1] = 1; input.thumb[HandRight][0] = 0;
     before = yaw; pad = Poll();
     Check(pad.sThumbRY == 32767 && before == yaw, "recognized map input must not inherit gameplay camera sensitivity");
-    std::puts("Virtual pad/map zoom regression checks passed.");
+    Check(!VirtualPadGetMove().valid, "map input must not become a gameplay dodge/sprint intent");
+
+    // Dash/roll must receive the same movement vector as walking, through every
+    // forward reference and lock-on state. Changing physical body facing must
+    // not feed back into the movement vector when native roll turning takes over.
+    foreignCam = false; input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    c.moveRelativeToCamera = false; c.swapSticks = false;
+    for (const char* forward : {"head", "camera", "body"}) {
+        c.moveForward = forward;
+        for (bool locked : {false, true}) {
+            basis.lockedOn = locked; basis.headValid = true;
+            basis.camYaw = 0.4f; basis.headYaw = 0.7f; basis.viewYaw = 1.1f; basis.bodyYaw = -0.6f;
+            for (int dir = 0; dir < 8; ++dir) {
+                const float angle = dir * 3.14159265f / 4.f;
+                input.thumb[HandLeft][0] = std::sin(angle); input.thumb[HandLeft][1] = std::cos(angle);
+                input.buttons = 0;
+                const auto walk = Poll();
+                input.buttons = VRB_B;
+                basis.chrYaw += 1.2f;
+                const auto dash = Poll();
+                Check(dash.sThumbLX == walk.sThumbLX && dash.sThumbLY == walk.sThumbLY &&
+                      (dash.wButtons & XINPUT_GAMEPAD_B), "dash must follow the walking joystick direction");
+                Check(VirtualPadGetMove().valid && VirtualPadGetMove().sprint, "held B must release the physics pin");
+                input.buttons = 0;
+                const auto roll = Poll();
+                Check(roll.sThumbLX == walk.sThumbLX && roll.sThumbLY == walk.sThumbLY &&
+                      !(roll.wButtons & XINPUT_GAMEPAD_B), "roll release must retain the directional joystick");
+            }
+        }
+    }
+    // Direct movement yields to Torrent. Suppressing the virtual stick as well
+    // would leave the mount unable to move, even though its native pose is correct.
+    basis.lockedOn = false; basis.camYaw = basis.headYaw = basis.viewYaw = 0.f;
+    c.moveForward = "head"; c.locomotion = "direct"; c.locoFeedStick = false;
+    input.thumb[HandLeft][0] = 0.f; input.thumb[HandLeft][1] = 1.f;
+    for (bool riding : {false, true, true, false}) {
+        basis.riding = riding;
+        const auto move = Poll();
+        Check(move.sThumbLY == (riding ? 32767 : 0),
+              "Torrent receives native movement input; dismount restores direct-mode stick suppression");
+        Check(VirtualPadGetMove().valid && VirtualPadGetMove().y > 0.99f,
+              "processed movement intent is preserved across mount transitions");
+    }
+    basis.riding = true; basis.active = false;
+    Check(Poll().sThumbLY == 32767, "mounted input also passes through with game-owned camera yaw");
+    basis.active = true; basis.riding = false; c.locomotion = "game";
+    input.buttons = VRB_B; Poll();
+    input.controllerConnected[0] = input.controllerConnected[1] = false;
+    VirtualPadUpdate(now += 0.02);
+    Check(!VirtualPadGetMove().valid && !VirtualPadGetMove().sprint, "disconnect must clear stale held dash intent");
+    std::puts("Virtual pad/map zoom and directional dash/roll regression checks passed.");
 }

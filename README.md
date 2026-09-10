@@ -182,7 +182,7 @@ own OpenXR session.
   the same amount, and a `BodyFollowsHead` shift pinned against its clamp. ERVR keeps its own origin that follows
   your head with a `RecenterSeconds` time constant and a `RecenterMaxRadius` hard limit: leaning and ducking still
   move the view, walking around the room is absorbed.
-* **Body pose** (`PoseMode=vr`, default) – the rig never plays a game animation. A standing pose is captured from
+* **Body pose** (`PoseMode=vr`, default) – on foot, the rig never plays a game animation. A standing pose is captured from
   the animation system once (at skeleton discovery, re-captured whenever you stand still for a second, so
   idle/crouch/sit stances still come through as discrete poses) and written over the live Havok body pose on
   every pose-hook call. Stance changes preserve the initial head-to-eye height offset and update camera height
@@ -192,6 +192,12 @@ own OpenXR session.
   the rig or whip the camera around, because the head bone the camera anchors to no longer moves relative to the
   root. Finger joints retain the game's current equipment grip instead of freezing an occasional open-hand
   animation until the next stance capture. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
+* **Torrent** – mounting, riding and dismounting use the game's seated body and facing, with controller arm IK.
+  The camera follows the live rider head using the rendered model transform, including late updates in the same
+  frame. This applies with either camera anchor and ignores bob suppression while riding, so standing eye height
+  is not added above the saddle. The walking template is preserved and restored after dismounting; loading a
+  save already on Torrent does not capture the seated pose as a walking stance. Body shifting, spine twist,
+  facing pins and direct locomotion stand down throughout the ride. Head tracking remains active.
 * **Body facing** (`FaceCamera` + `FaceCameraMode`) – keeps movement in strafe mode so the arms can always reach.
   `strafe` (default with `PoseMode=vr`) only sets the ChrCtrl "strafing" flag and leaves the game's lock-on state
   alone. The old way (`lock`) forced `Chr_IsLockedOn` onto a fake far-away point every frame — which engages the
@@ -243,6 +249,8 @@ own OpenXR session.
   rotate the move stick if you want forward to be something other than the view yaw. `CameraYawSource=game`
   is the old read-it-back mode. The character itself is still driven through the game (stick, strafe flags,
   its own animation/collision/root motion) — nothing of the locomotion is re-implemented.
+  Dash and roll follow the movement joystick, using the same `Forward` reference as walking. The physics-facing
+  pin yields to the game's turn for the action and its recovery; the visible VR body still follows `BodyYaw`.
 * **Locomotion** – `[Locomotion] Mode=game` (default): the game moves the character from the virtual stick.
   `Mode=direct` (experimental, opt-in): ERVR integrates the horizontal position itself from the processed stick in
   the view frame (`RunSpeed`/`SprintSpeed`, sprint = B held), keeps the game's height, and turns the physics
