@@ -830,153 +830,57 @@ namespace posescan {
 }
 
 // ---------------------------------------------------------------- VR -> game frame
-// ---------------------------------------------------------------- inertial arm
-// The rendered hand chases the controller through a critically damped spring (with velocity
-// feed-forward, so a steadily moving light hand tracks with no lag) whose acceleration is capped
-// by the carried weight (CombatHandWeight): linear cap KineticAccel/(1+w/W), angular cap
-// InertiaAngAccel/(1+w/W). Empty hands track 1:1. Runs on the game thread, once per frame
-// cycle, in the play-space frame the arm solver is fed, so the weapon the game sweeps IS the
-// lagged one and combat reads its motion back through GameERWeaponMotion.
+// ---------------------------------------------------------------- weapon handling
+// One pose per rendered frame, shared by repeated hooks and both eyes. The main
+// grip stays on the tracked controller; weight is angular resistance about it.
 struct InertiaState {
     bool init = false;
-    uint32_t frame = 0xFFFFFFFFu;   // rendered frame the state was last integrated for
-    Vec3 pos, vel, lastTarget; Quat q, lastTargetQ; Vec3 angVel;
-    Vec3 vTf, wTf;                  // low-passed finite-difference hand velocity (fallback when the runtime gives none)
-    float dtAvg = 0.f;              // frame period, smoothed: the hook that fires first each frame varies, the sample period does not
+    uint32_t frame = 0xFFFFFFFFu;
+    Vec3 pos; Quat q;
     double t = 0;
     TwoHandAimState twoHandAim;
-    float arc = 0.f, tipSpeed = 0.f, handSpeed = 0.f; double stamp = 0;   // report (under g_inertiaMtx)
+    float arc = 0.f, tipSpeed = 0.f, handSpeed = 0.f;
+    double stamp = 0;
 };
 InertiaState g_inertia[2];
 std::mutex g_inertiaMtx;
 
-Vec3 QuatToRotVec(const Quat& qIn) {   // axis * angle of a unit quaternion, shortest way round
-    Quat n = qIn; if (n.w < 0) { n.x = -n.x; n.y = -n.y; n.z = -n.z; n.w = -n.w; }
-    float s = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
-    if (s < 1e-6f) return {};
-    float ang = 2.f * std::atan2(s, n.w);
-    return Vec3{n.x, n.y, n.z} * (ang / s);
-}
-
-void InertiaStep(int h, Vec3& p, Quat& q, const Vec3& vRt, const Vec3& wRt, double now,
-                 bool twoHandAim, const Vec3& handLine) {
+void InertiaStep(int h, Vec3& p, Quat& q, double now,
+                 bool twoHandAim, const Vec3& handLine, Vec3 shaftAxis) {
     const Config& c = Cfg();
-    // BuildFrame runs from several hooks per frame, on a pool of worker threads. Serialise, and
-    // integrate once per rendered frame: a repeat call gets the pose already computed. Unsynchronised
-    // repeats saw microsecond dts, hand-velocity estimates in the thousands and (through the
-    // velocity clamps below) weapons flung at 100+ rad/s on the slightest movement (2026-09-04).
     std::lock_guard<std::mutex> lock(g_inertiaMtx);
     InertiaState& s = g_inertia[h];
     const uint32_t fr = g_frame;
     if (s.init && s.frame == fr) { p = s.pos; q = s.q; return; }
     s.frame = fr;
-    const float weight = CombatHandWeight(h);
-    float dtRaw = s.init ? (float)(now - s.t) : 0.f; s.t = now;
-    const bool goodDt = dtRaw >= 0.001f && dtRaw <= 0.1f;
-    // Compose the two-controller target inside the same once-per-frame lock as
-    // inertia. Repeated pose hooks and the second eye must see the same steering.
-    q = s.twoHandAim.Update(q, handLine, twoHandAim, goodDt ? dtRaw : 0.f);
-    // Integrate over the smoothed frame period: the raw gap between first-calls jitters with which hook
-    // fires first, and integrating a regular pose stream over an irregular dt is itself jitter.
-    if (goodDt) s.dtAvg = s.dtAvg > 0.f ? s.dtAvg + 0.1f * (dtRaw - s.dtAvg) : dtRaw;
-    const float dt = s.dtAvg;
-    // Hand velocity: the runtime's own tracked velocities when it gives them (fused, far cleaner than a
-    // per-frame finite difference, whose noise x the spring's gain used to saturate a heavy weapon's small
-    // acceleration cap in a random direction every frame = jitter), else a low-passed finite difference.
-    Vec3 vT, wT;
-    if (goodDt) {
-        Vec3 vFd = (p - s.lastTarget) * (1.f / dtRaw), wFd = QuatToRotVec((q * s.lastTargetQ.Conj()).Normalized()) * (1.f / dtRaw);
-        const float kf = dt / (dt + 0.02f);
-        s.vTf = s.vTf + (vFd - s.vTf) * kf; s.wTf = s.wTf + (wFd - s.wTf) * kf;
-        vT = vRt.Length() > 1e-4f ? vRt : s.vTf;
-        wT = !s.twoHandAim.Active() && wRt.Length() > 1e-4f ? wRt : s.wTf;
-    }
-    // No controller moves faster than this; anything beyond is a bad sample, not a swing.
-    { float m = vT.Length(); if (m > 30.f) vT = vT * (30.f / m); m = wT.Length(); if (m > 120.f) wT = wT * (120.f / m); }
-    const Vec3 pPrev = s.lastTarget; const Quat qPrev = s.lastTargetQ;
-    s.lastTarget = p; s.lastTargetQ = q;
-    if (!c.kineticInertia || weight <= 0.f || !s.init || !goodDt || (p - s.pos).Length() > 1.5f) {
-        // 1:1 (empty hand / disabled / first sample / snap): velocities are the controller's own.
-        s.vel = vT; s.angVel = wT; s.pos = p; s.q = q; s.init = true;
-    } else {
-        const float W = c.kineticAccelWeight > 0.1f ? c.kineticAccelWeight : 4.f;
-        const float wf = 1.f + weight / W;
-        // Rotation about the grip resists with mass x (centre-of-mass distance)^2, not with mass alone:
-        // a great hammer's head a metre out fights a turn far harder than a dagger's blade of equal
-        // weight, and a shield's mass at the fist barely resists it. InertiaComRef is the distance at
-        // which weight counts fully (a greatsword-ish balance point).
-        const float comRef = c.inertiaComRef > 0.05f ? c.inertiaComRef : 0.5f, com = CombatHandCom(h) / comRef;
-        const float wfa = 1.f + (weight / W) * com * com;
-        // Two arms on one weapon: more force, and a hand on the pommel has far more leverage over its
-        // rotation than one wrist - the reason heavy weapons are two-handed at all.
-        const bool twoArms = CombatTwoHandWeaponHand() == h;
-        const float aMax = (c.kineticAccel > 1.f ? c.kineticAccel : 60.f) / wf * (twoArms ? c.inertiaTwoHandForce : 1.f);
-        const float alMax = (c.inertiaAngAccel > 1.f ? c.inertiaAngAccel : 300.f) / wfa * (twoArms ? c.inertiaTwoHandTorque : 1.f);
-        // Braking is allowed at InertiaBrake x the cap: stopping a swing is easier than making one.
-        const float brake = c.inertiaBrake > 1.f ? c.inertiaBrake : 1.f;
-        const float w0 = 6.2831853f * (c.inertiaSpringHz > 0.5f ? c.inertiaSpringHz : 8.f);
-        // Drag: the hand can only get so far ahead of a weapon it is holding. Beyond that the weapon
-        // is pulled along at the hand's speed (also keeps the rotation error on the short side of 180
-        // degrees, where the shortest-way rotvec would otherwise flip and send the weapon the long
-        // way round). Dragged, the weapon keeps up with the hand along the drag direction (at least).
-        Vec3 pRef = pPrev; Quat qRef = qPrev;   // the target the weapon's error is measured against
-        {
-            Vec3 g = p - s.pos; float gl = g.Length();
-            if (gl > c.inertiaMaxLag) { Vec3 dir = g * (1.f / gl); s.pos = p - dir * c.inertiaMaxLag; float need = (vT - s.vel).Dot(dir); if (need > 0.f) s.vel = s.vel + dir * need; pRef = p; }
-            Vec3 e = QuatToRotVec((q * s.q.Conj()).Normalized()); float el = e.Length();
-            if (el > c.inertiaMaxLagAngle) { Vec3 dir = e * (1.f / el); s.q = (Quat::AxisAngle(dir, el - c.inertiaMaxLagAngle) * s.q).Normalized(); float need = (wT - s.angVel).Dot(dir); if (need > 0.f) s.angVel = s.angVel + dir * need; qRef = q; }
-        }
-        // Critically damped spring, stepped in closed form in the hand's frame: the weapon is carried with
-        // the hand's motion over the frame and the spring works on the error alone (so a steadily moving
-        // hand tracks with no lag). The explicit step used before dithered about the target at frame
-        // rate with a stiff spring (w0*dt ~ 0.7), which on a heavy weapon saturated its small caps in a
-        // random direction every frame - the jitter. The caps apply to the acceleration the step implies;
-        // a capped or clamped step falls back to plain integration of the limited velocity.
-        const float xx = w0 * dt, ex = 1.f / (1.f + xx + 0.48f * xx * xx + 0.235f * xx * xx * xx);
-        auto spring = [&](const Vec3& e, const Vec3& ev, Vec3& e2, Vec3& ev2) {
-            Vec3 temp = (ev + e * w0) * dt;
-            ev2 = (ev - temp * w0) * ex; e2 = (e + temp) * ex;
-        };
-        Vec3 e2, ev2; spring(s.pos - pRef, s.vel - vT, e2, ev2);
-        Vec3 velN = vT + ev2; bool exactL = true;
-        { Vec3 a = (velN - s.vel) * (1.f / dt); float m = a.Length(), lim = a.Dot(s.vel) < 0 ? brake * aMax : aMax; if (m > lim) { velN = s.vel + a * (lim / m * dt); exactL = false; } }
-        Vec3 ea2, eav2; spring(QuatToRotVec((s.q * qRef.Conj()).Normalized()), s.angVel - wT, ea2, eav2);
-        Vec3 angN = wT + eav2; bool exactA = true;
-        { Vec3 a = (angN - s.angVel) * (1.f / dt); float m = a.Length(), lim = a.Dot(s.angVel) < 0 ? brake * alMax : alMax; if (m > lim) { angN = s.angVel + a * (lim / m * dt); exactA = false; } }
-        // The capped spring on its own overshoots: braking is capped too, so a lagging weapon keeps
-        // closing on the hand at full speed and whips 30-45 degrees past where the hand stopped (a
-        // mid-weight weapon even out-runs the hand by ~30% catching up). Two clamps on the velocity
-        // component toward the hand fix that: (1) approach no faster than braking can still stop within
-        // the gap (no overshoot: the lagging weapon follows through to the hand and stops there);
-        // (2) InertiaNoOverrun: never faster than the hand itself is moving that way, plus a small
-        // catch-up allowance so a resting hand's weapon still settles onto it.
-        // Both are one-sided brakes on the weapon's own approach: a hand coming back toward the weapon
-        // asks nothing of it (hand floored at 0 - a negative cap used to fling the weapon backwards),
-        // and the cut is itself acceleration-limited (braking, never teleporting a velocity).
-        auto clamp = [&](Vec3& vN, const Vec3& vOld, const Vec3& vHand, const Vec3& gap, float brk, float allow) -> bool {
-            float gl = gap.Length(); if (gl < 1e-5f) return false;
-            Vec3 dir = gap * (1.f / gl);
-            float along = vN.Dot(dir), hand = vHand.Dot(dir); if (hand < 0.f) hand = 0.f;
-            float cap = hand + 0.9f * std::sqrt(2.f * brk * gl);
-            if (c.inertiaNoOverrun) { float run = (hand > vOld.Dot(dir) ? hand : vOld.Dot(dir)) + allow; if (run < cap) cap = run; }
-            float cut = along - cap; if (cut <= 0.f) return false;
-            if (cut > brk * dt) cut = brk * dt;
-            vN = vN - dir * cut; return true;
-        };
-        if (clamp(velN, s.vel, vT, p - s.pos, brake * aMax, 0.5f)) exactL = false;
-        if (clamp(angN, s.angVel, wT, QuatToRotVec((q * s.q.Conj()).Normalized()), brake * alMax, 2.f)) exactA = false;
-        s.vel = velN; s.pos = exactL ? p + e2 : s.pos + s.vel * dt;
-        s.angVel = angN;
-        if (exactA) { float el2 = ea2.Length(); s.q = el2 > 1e-6f ? (Quat::AxisAngle(ea2 * (1.f / el2), el2) * q).Normalized() : q; }
-        else { float wm = s.angVel.Length(); if (wm > 1e-6f) s.q = (Quat::AxisAngle(s.angVel * (1.f / wm), wm * dt) * s.q).Normalized(); }
-        p = s.pos; q = s.q;
-    }
-    // Motion report: the weapon tip = hand + forward (game +Z) * reach.
+    const float dt = s.init ? (float)(now - s.t) : 0.f;
+    const bool goodDt = dt >= 0.001f && dt <= 0.1f && (p - s.pos).Length() <= 1.5f;
+    s.t = now;
+    const Quat wrist = q;
+    q = s.twoHandAim.Update(q, handLine, twoHandAim, goodDt ? dt : 0.f, shaftAxis);
     const float reach = CombatHandReach(h);
-    Vec3 tipV = s.vel + s.angVel.Cross(s.q.Rotate({0, 0, 1}) * reach);
-    const float tip = tipV.Length();
-    if (goodDt) { if (tip >= c.swingOffSpeed) s.arc += tip * dt; else s.arc = 0.f; }
-    s.tipSpeed = tip; s.handSpeed = s.vel.Length(); s.stamp = now;
+    const Vec3 previousTip = s.pos * c.handScale + s.q.Rotate(shaftAxis) * reach;
+    if (c.kineticInertia && goodDt) {
+        const bool twoArms = CombatTwoHandWeaponHand() == h;
+        q = StepWeaponOrientation(s.q, q, shaftAxis, dt, CombatHandWeight(h), reach,
+                                  CombatHandCom(h), c.kineticAccelWeight, c.inertiaComRef,
+                                  c.inertiaSpringHz, c.inertiaAngAccel,
+                                  twoArms ? c.inertiaTwoHandTorque : 1.f,
+                                  c.inertiaBrake, c.inertiaMaxLagAngle);
+    }
+    // Composing two bending corrections can introduce a twist even if each
+    // individually has none. Keep the final rendered edge tied to the wrist.
+    q = PreserveWeaponWristTwist(q, wrist, shaftAxis);
+    // Use the displacement actually rendered, including positional two-hand
+    // steering. An internal spring velocity (or raw controller forward) did not
+    // describe the visible blade after lag clamps and could miss real contacts.
+    const Vec3 tip = p * c.handScale + q.Rotate(shaftAxis) * reach;
+    s.tipSpeed = goodDt ? (tip - previousTip).Length() / dt : 0.f;
+    s.handSpeed = goodDt ? (p - s.pos).Length() * c.handScale / dt : 0.f;
+    const float offSpeed = c.kineticEnabled && c.kineticContinuous ? c.contactOffSpeed : c.swingOffSpeed;
+    if (goodDt && s.tipSpeed >= offSpeed) s.arc += s.tipSpeed * dt;
+    else s.arc = 0.f;
+    s.pos = p; s.q = q; s.init = true; s.stamp = now;
 }
 
 struct FrameInfo {
@@ -1255,9 +1159,10 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
             f.handValid[h] = hand.valid && in.controllerConnected[h];
             if (!f.handValid[h]) continue;
             Vec3 p = ToGame(hand.pos); Quat q = ToGame(hand.rot);
-            // Weight: the hand the arm solver gets is the inertial one, filtered in drift-free play space.
-            // Runtime velocities go through the same VR->game mapping: vectors flip z, axial (angular) vectors flip x,y.
-            Vec3 wRt{-hand.angVel.x, -hand.angVel.y, hand.angVel.z};
+            float handRotX = c.handRotOffX;
+            DebugKeysHandRotX(&handRotX);
+            const Quat calibration = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
+            const Vec3 shaftAxis = WeaponShaftAxis(calibration, c.twoHandAxis != "forward");
             bool twoHandAim = false; Vec3 handLine;
             if (c.twoHandAim) {
                 int pin = 0, wep = 0; float along = 0.f; bool handleAxis = true;
@@ -1266,7 +1171,7 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
                     twoHandAim = true; handLine = p - ToGame(other.pos);
                 }
             }
-            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, ToGame(hand.linVel), wRt, NowSec(), twoHandAim, handLine); p = pPlay + psOrigin; }
+            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, NowSec(), twoHandAim, handLine, shaftAxis); p = pPlay + psOrigin; }
             // All three origins end up drift-free: "head" is head-relative by construction (the head offset is
             // added back at the target), the other two are measured from our own play-space origin.
             if (c.handOrigin == "head") p = p - hp;

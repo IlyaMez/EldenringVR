@@ -74,8 +74,8 @@ bool GameERDebugPitchCamera(float pitchDeg);
 uint8_t* GameERCamWatchTarget(uint32_t* outLen);
 
 // ---- inertial arm -------------------------------------------------------------------
-// Motion of the weapon the game actually renders/sweeps (the hand chases the controller through
-// a weight-driven, force-limited spring). tipSpeed/handSpeed in m/s, arc = tip path since the tip
+// Motion of the weapon pose, with the grip tracked directly and weight resisting bending.
+// tipSpeed/handSpeed in m/s, arc = tip path since the tip
 // last came to rest. False when the arm is not being driven or the sample is stale.
 bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc);
 // The save's character level (PlayerGameData +0x68), -1 if unavailable. Logged with combat so an

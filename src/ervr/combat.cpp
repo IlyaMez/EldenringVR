@@ -41,6 +41,9 @@
 #include "game_er.h"
 #include "game_memory.h"
 #include "action_queue_snapshot.h"
+#include "weapon_motion.h"
+#include "weapon_contact.h"
+#include "debug_keys.h"
 #include "params_er.h"
 #include "log.h"
 #include "rtti.h"
@@ -199,9 +202,7 @@ static_assert(sizeof(TwistModifierArgs) == 0x34, "EnableTwistModifier args layou
 // so the relaxed copies live in statics, never on the hook's stack. Events run on the game thread, serially.
 BulletAimAngleArgs g_aimArgsCopy{}; TwistModifierArgs g_twistArgsCopy{};
 
-struct SwingCmd {                 // worker -> game thread
-    bool active = false;
-    bool first = false;           // deliver is_first_execution on the next frame
+struct SwingCmd : WeaponContactLifetime { // worker -> game thread
     int  slot = SlotLight;
     double start = 0;
     uint32_t id = 0;
@@ -1539,8 +1540,17 @@ void GameFrameBody(uint8_t* player) {
                 else LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) VANILLA DAMAGE (no attack row to scale) drain %d stamina %d/%d | %s", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, drain, stam, maxStam, nearBuf);
             }
         } else s_time[h] = (float)(NowSec() - k.start);
+        // Continuous contacts follow motion until it stops (or the hit budget
+        // retires them). Keep the native event window ahead of that motion too;
+        // the gated model's timeout must not make a long windup go inert mid-cut.
+        if (c.kineticEnabled && c.kineticContinuous)
+            args.to = s_time[h] + (c.swingMaxSeconds > 0.f ? c.swingMaxSeconds : 0.6f);
         args.isFirstExecution = k.first ? 1 : 0;
         g_origExec(ev, &args);
+        {
+            std::lock_guard<std::mutex> g(g_mtx);
+            if (g_cmd[h].id == k.id) g_cmd[h].FinishFrame();
+        }
         InterlockedIncrement(&g_injected);
         if (c.combatDebug && k.first) LOGD("[combat] injected %s attack (judgeId %d index %d source %u) stamina %d", SlotName(k.slot), ab.judgeId, ab.attackIndex, ab.source, stam);
         // Whether the GAME charged the behavior's stamina on top of ours: the delta a frame later
@@ -1567,10 +1577,16 @@ void GameFrameBody(uint8_t* player) {
 }
 
 // ---------------------------------------------------------------- swing detection (worker thread)
+Vec3 WeaponAxisVR() {
+    const Config& c = Cfg();
+    float pitch = c.handRotOffX; DebugKeysHandRotX(&pitch);
+    const Quat calibration = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(pitch), Deg2Rad(c.handRotOffZ));
+    const Vec3 gameAxis = WeaponShaftAxis(calibration, c.twoHandAxis != "forward");
+    return {gameAxis.x, gameAxis.y, -gameAxis.z};
+}
 float TipSpeed(const Pose& p, float reach, float* handSpeed) {
-    Vec3 fwd = p.rot.Rotate({0.f, 0.f, -1.f});
-    Vec3 tip = p.linVel + p.angVel.Cross(fwd * reach);
-    if (handSpeed) *handSpeed = p.linVel.Length();
+    Vec3 tip = WeaponTipVelocity(p.linVel * Cfg().handScale, p.angVel, p.rot, WeaponAxisVR(), reach);
+    if (handSpeed) *handSpeed = p.linVel.Length() * Cfg().handScale;
     return tip.Length();
 }
 // Kinetic-energy shaped quality: (v/ref)^2, capped, times the arc factor (a strike that wound up
@@ -1604,7 +1620,7 @@ float StepVirtualSpeed(float vVirt, float tipSpeed, float weight, float dt, cons
 void StartSwing(int h, int slot, double now, float quality, float arc, float tip) {
     std::lock_guard<std::mutex> g(g_mtx);
     SwingCmd& k = g_cmd[h];
-    k.active = true; k.first = true; k.slot = slot; k.start = now; k.id = g_sm[h].nextId++; k.staminaFail = false;
+    k.Begin(); k.slot = slot; k.start = now; k.id = g_sm[h].nextId++; k.staminaFail = false;
     k.quality = k.qualityCommit = quality; k.arc = arc; k.tipSpeed = tip; k.tipLive = tip;
 }
 void UpdateSwing(int h, float quality, float arc, float tip, float tipLive) {
@@ -1613,7 +1629,10 @@ void UpdateSwing(int h, float quality, float arc, float tip, float tipLive) {
     if (!k.active) return;
     k.quality = quality; k.arc = arc; k.tipSpeed = tip; k.tipLive = tipLive;
 }
-void EndSwing(int h) { std::lock_guard<std::mutex> g(g_mtx); g_cmd[h].active = false; g_cmd[h].first = false; }
+void EndSwing(int h, bool cancel = false) {
+    std::lock_guard<std::mutex> g(g_mtx);
+    g_cmd[h].End(cancel);
+}
 
 // The grab (worker): put the free hand on the hilt - within TwoHandGrabRadius of the weapon axis,
 // TwoHandGrabMin..TwoHandGrabMax m toward the pommel - and SQUEEZE its grip. That is the whole
@@ -1627,13 +1646,13 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
     const Config& c = Cfg();
     TwoHandState s; { std::lock_guard<std::mutex> g(g_mtx); s = g_two; }
     if (c.twoHandMode != "grab") { if (s.want || s.inZone) { std::lock_guard<std::mutex> g(g_mtx); g_two = TwoHandState{}; } return; }
-    // The hilt axis, pointing from the weapon hand's controller TOWARD THE POMMEL (where the second hand
-    // goes): down the controller's handle (-Y) by default, or back along its aim axis (+Z).
+    // Use the same calibrated shaft as the rendered pin, steering, and tip
+    // measurement; the negative direction points toward the pommel.
     const bool handleAxis = c.twoHandAxis != "forward";
     auto geometry = [&](int w, float* along, float* perp) {
         const Pose& wp = tr.hand[w]; const Pose& fp = tr.hand[1 - w];
         if (!wp.valid || !fp.valid || !in.controllerConnected[w] || !in.controllerConnected[1 - w]) return false;
-        Vec3 d = fp.pos - wp.pos; Vec3 ax = wp.rot.Rotate(handleAxis ? Vec3{0.f, -1.f, 0.f} : Vec3{0.f, 0.f, 1.f});
+        Vec3 d = fp.pos - wp.pos; Vec3 ax = -wp.rot.Rotate(WeaponAxisVR());
         *along = d.Dot(ax); *perp = (d - ax * *along).Length();
         return true;
     };
@@ -2110,8 +2129,13 @@ uint16_t CombatHeldButtons() {
 
 void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
     const Config& c = Cfg();
+    const bool continuous = c.kineticEnabled && c.kineticContinuous;
     if (!CombatHandlesSwings()) {
-        for (int h = 0; h < 2; ++h) { if (g_sm[h].st != HandSM::Idle) EndSwing(h); g_sm[h].st = HandSM::Idle; g_sm[h].tipValid = false; g_sm[h].arc = 0; }
+        for (int h = 0; h < 2; ++h) {
+            EndSwing(h, true);
+            const uint32_t next = g_sm[h].nextId;
+            g_sm[h] = HandSM{}; g_sm[h].nextId = next;
+        }
         std::lock_guard<std::mutex> g(g_mtx); g_block = BlockState{}; g_two = TwoHandState{};
         return;
     }
@@ -2129,7 +2153,17 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         const Pose& p = tr.hand[h];
         bool grip = in.handTrigger[h] >= c.gripThreshold;   // analog in VRInputState; VRB_*Grip is never set by the backend
         bool allowed = p.valid && in.controllerConnected[h] && h != freeHand && (h == HandRight || (c.combatLeftHand && !leftShield)) && (!c.gestureRequiresGrip || grip);
+        if (!allowed) {
+            // Also cancel an undelivered short contact while already cooling
+            // down; tracking loss or taking the support grip must never replay it.
+            EndSwing(h, true);
+            const uint32_t next = s.nextId;
+            s = HandSM{}; s.nextId = next;
+            continue;
+        }
         const float reach = CombatHandReach(h);
+        const float onSpeed = continuous ? c.contactOnSpeed : c.swingOnSpeed;
+        const float offSpeed = continuous ? c.contactOffSpeed : c.swingOffSpeed;
         float handSpd = 0.f;
         float tip = allowed ? TipSpeed(p, reach, &handSpd) : 0.f;
         const float weight = g_wepWeight[h].load();
@@ -2138,14 +2172,14 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         // controller by its weight; its motion is the truth for speed and arc, so damage follows
         // what you see hit. The worker-side virtual-speed model is the fallback without it.
         float wmTip = 0.f, wmHand = 0.f, wmArc = 0.f;
-        const bool inertial = c.kineticInertia && allowed && GameERWeaponMotion(h, &wmTip, &wmHand, &wmArc);
+        const bool inertial = allowed && GameERWeaponMotion(h, &wmTip, &wmHand, &wmArc);
         if (inertial) { tip = wmTip; handSpd = wmHand; s.arc = wmArc; s.tipValid = false; }
         else if (p.valid) {
             // Arc: tip path length since the tip last came to rest (captures the windup before the
             // on-threshold).
-            Vec3 tipPos = p.pos + p.rot.Rotate({0.f, 0.f, -1.f}) * reach;
-            if (s.tipValid && tip >= c.swingOffSpeed) s.arc += (tipPos - s.lastTip).Length();
-            else if (tip < c.swingOffSpeed) s.arc = 0.f;
+            Vec3 tipPos = p.pos * c.handScale + p.rot.Rotate(WeaponAxisVR()) * reach;
+            if (s.tipValid && tip >= offSpeed) s.arc += (tipPos - s.lastTip).Length();
+            else if (tip < offSpeed) s.arc = 0.f;
             s.lastTip = tipPos; s.tipValid = true;
         } else { s.tipValid = false; s.arc = 0.f; }
         s.vSmooth = s.vSmooth * 0.6f + tip * 0.4f;
@@ -2155,21 +2189,24 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             s.vVirt = inertial ? s.vSmooth : StepVirtualSpeed(s.vVirt, tip, weight, dt, c);
             if (s.st == HandSM::Idle) s.vVirtPeak = s.vVirt; else if (s.vVirt > s.vVirtPeak) s.vVirtPeak = s.vVirt;
         }
-        bool fail = false;
-        { std::lock_guard<std::mutex> g(g_mtx); if (g_cmd[h].staminaFail) { g_cmd[h].staminaFail = false; fail = true; } }
+        bool fail = false, pending = false;
+        {
+            std::lock_guard<std::mutex> g(g_mtx);
+            if (g_cmd[h].staminaFail) { g_cmd[h].staminaFail = false; fail = true; }
+            pending = g_cmd[h].active && g_cmd[h].first;
+        }
         if (fail && s.st == HandSM::Swinging) { s.st = HandSM::Cooldown; s.t = now; }
         switch (s.st) {
         case HandSM::Idle:
-            if (allowed && tip >= c.swingOnSpeed && handSpd >= c.minHandSpeed && s.prevTip < c.swingOnSpeed) { s.st = HandSM::Armed; s.t = now; s.peak = tip; }
-            break;
+            if (pending || !WeaponContactStarts(allowed, continuous, tip, handSpd, onSpeed, c.minHandSpeed)) break;
+            s.st = HandSM::Armed; s.t = now; s.peak = tip;
+            [[fallthrough]];
         case HandSM::Armed: {
             if (tip > s.peak) s.peak = tip;
             bool decel = tip < s.prevTip && tip < s.peak * 0.85f;
-            if (!allowed || tip < c.swingOffSpeed) { s.st = HandSM::Idle; break; }
-            // Heavier weapons take longer to commit: the hitbox goes live only once the virtual
-            // weapon has had time to get moving (a real ultra greatsword R1 has ~0.5 s of startup).
-            const float armWindow = c.kineticEnabled ? c.swingArmWindow + weight * c.kineticArmPerWeight : c.swingArmWindow;
-            if (now - s.t >= armWindow || (decel && !c.kineticEnabled)) {
+            if (!allowed || tip < offSpeed) { s.st = HandSM::Idle; break; }
+            if (WeaponContactReady(continuous, inertial, c.kineticEnabled, now - s.t,
+                                   c.swingArmWindow, weight, c.kineticArmPerWeight, decel)) {
                 const float vq = c.kineticEnabled ? s.vVirtPeak : s.peak;
                 const float q = StrikeQuality(vq, s.arc, weight, reach, c);
                 int slot;
@@ -2187,6 +2224,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                     }
                 }
                 StartSwing(h, slot, now, q, s.arc, vq); s.st = HandSM::Swinging; s.t = now;
+                UpdateSwing(h, q, s.arc, vq, tip);
                 g_haptic.fetch_or(1u << h);
                 if (c.combatDebug) LOGD("[combat] %s swing start: %s (tip %.2f m/s, controller tip %.2f m/s, virtual %.2f m/s, hand %.2f m/s, arc %.2f/%.2f m, weight %.1f, reach %.2f m, quality %.2f)", HandName(h), SlotName(slot), s.peak, rawTip, s.vVirtPeak, handSpd, s.arc, ArcRefFor(weight, c), weight, reach, q);
             }
@@ -2197,14 +2235,14 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             // landing late in the arc is not punished for the natural deceleration.
             float vEff = c.kineticEnabled ? (s.vVirt > 0.7f * s.vVirtPeak ? s.vVirt : 0.7f * s.vVirtPeak)
                                           : (s.vSmooth > 0.7f * s.peak ? s.vSmooth : 0.7f * s.peak);
-            UpdateSwing(h, StrikeQuality(vEff, s.arc, weight, reach, c), s.arc, vEff, inertial ? tip : s.vSmooth);
-            if (!allowed || tip < c.swingOffSpeed || now - s.t >= c.swingMaxSeconds) {
+            if (!WeaponContactContinues(continuous, tip, offSpeed, now - s.t, c.swingMaxSeconds)) {
                 if (c.combatDebug) LOGD("[combat] %s swing end after %.0f ms (peak %.2f m/s, virtual peak %.2f m/s, arc %.2f m)", HandName(h), (now - s.t) * 1000.0, s.peak, s.vVirtPeak, s.arc);
                 EndSwing(h); s.st = HandSM::Cooldown; s.t = now;
-            }
+            } else UpdateSwing(h, StrikeQuality(vEff, s.arc, weight, reach, c), s.arc, vEff, tip);
             break; }
         case HandSM::Cooldown:
-            if (now - s.t >= c.swingCooldown && tip < c.swingOnSpeed) s.st = HandSM::Idle;
+            if (tip < (continuous ? offSpeed : onSpeed) &&
+                (continuous || now - s.t >= c.swingCooldown)) s.st = HandSM::Idle;
             break;
         }
         s.prevTip = tip;

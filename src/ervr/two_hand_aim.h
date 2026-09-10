@@ -1,5 +1,5 @@
 #pragma once
-#include "vrmath.h"
+#include "weapon_motion.h"
 
 namespace ervr {
 
@@ -19,7 +19,7 @@ struct TwoHandAimState {
         return n > 1e-6f ? v * (2.f * std::atan2(n, q.w) / n) : Vec3{};
     }
 
-    Quat Update(Quat wrist, Vec3 line, bool grabbed, float dt) {
+    Quat Update(Quat wrist, Vec3 line, bool grabbed, float dt, Vec3 shaftAxis = {0, 1, 0}) {
         wrist = wrist.Normalized();
         if (!(dt > 0.f && dt <= 0.1f)) { held = false; correction = {}; }
         const float length = line.Length();
@@ -36,7 +36,12 @@ struct TwoHandAimState {
             // Near an antipodal line the shortest rotation has no stable axis.
             // Hold through it instead of choosing an arbitrary 180-degree flip.
             if (gripLine.Dot(direction) > -0.95f) {
-                Vec3 rv = RotationVector(Quat::FromTo(gripLine, direction));
+                Quat steer = Quat::FromTo(gripLine, direction);
+                // Hand positions define bending, never edge/shaft twist. The
+                // lateral controller offset used to contribute a roll correction
+                // that fought the main wrist. Remove it in the actual shaft frame.
+                steer = (steer * WeaponTwist(steer, shaftAxis).Conj()).Normalized();
+                Vec3 rv = RotationVector(steer);
                 const float angle = rv.Length();
                 if (angle > 1e-6f)
                     target = Quat::AxisAngle(rv, Clamp(angle, 0.f, Deg2Rad(80.f)));
@@ -53,6 +58,7 @@ struct TwoHandAimState {
                 correction = (Quat::AxisAngle(delta, step) * correction).Normalized();
             } else correction = target;
         }
+        correction = (correction * WeaponTwist(correction, shaftAxis).Conj()).Normalized();
         return (wrist * correction).Normalized();
     }
 

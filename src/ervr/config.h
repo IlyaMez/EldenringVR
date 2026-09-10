@@ -260,7 +260,7 @@ struct Config {
     std::string weaponGeometry;           // "wepType:length:comFraction,..." overrides of the per-category geometry table
     float kineticRefReach = 0.8f;         // lever the KineticRefSpeed is defined for; quality 1 scales with weapon length / this (0 = no scaling)
     float swingArmWindow = 0.06f;         // s to observe the peak before choosing light/heavy
-    float swingMaxSeconds = 0.6f;         // s hard limit for one attack instance
+    float swingMaxSeconds = 0.6f;         // s hard limit for a gated attack; continuous event-window lookahead
     float swingCooldown = 0.25f;          // s after a swing before another can start
     bool  combatLeftHand = true;          // left-hand swings attack with the left weapon (source = left)
     bool  combatRequireStamina = true;
@@ -283,6 +283,8 @@ struct Config {
     // Continuous model (2026-08-25, user's call): every frame of contact is a hit, each sized by the tip's
     // speed right now - 0 at rest, KineticContinuousMult of a vanilla hit at KineticRefSpeed.
     bool  kineticContinuous = true;
+    float contactOnSpeed = 0.8f;         // m/s: continuous contacts open immediately, including wrist-driven arcs
+    float contactOffSpeed = 0.25f;       // m/s: contact hysteresis; a resting blade does not attack
     float kineticContinuousMult = 0.2f;
     std::string kineticStaminaMode = "off";   // off (bar out of the loop, game's on-hit charge refunded) | game | full
     float kineticHitPause = 0.25f;        // gated model only: s the attack pauses after a landed hit (0 = the strike ends on its first hit)
@@ -290,23 +292,19 @@ struct Config {
     float kineticMinMult = 0.25f;         // damage multiplier at quality 0 (chip)
     float kineticMaxMult = 1.2f;          // multiplier at quality 1.5 (cap)
     float kineticHeavyQuality = 0.85f;    // quality (with >=80% of a full arc) that selects the heavy attack row
-    float kineticAccel = 60.f;            // m/s^2 the (virtual or inertial) weapon can gain at weight 0
+    float kineticAccel = 60.f;            // m/s^2 for the virtual-speed fallback when rendered motion is unavailable
     float kineticAccelWeight = 2.f;       // weight at which that acceleration halves (UGS ~23 -> 1/12; was 4, doubled 2026-08-24 on request)
-    // Inertial arm: the rendered hand/weapon chases the controller through a force-limited spring
-    // (linear cap = KineticAccel/(1+weight/KineticAccelWeight), angular cap likewise from InertiaAngAccel),
-    // so a heavy weapon visibly cannot be flicked and the hit sweep follows the weapon you see.
+    // The main grip tracks position directly. Weight and mass distribution resist
+    // bending about the grip, with a monotone response and no spring overshoot.
     bool  kineticInertia = true;
     float inertiaAngAccel = 300.f;        // rad/s^2 at weight 0
     float inertiaSpringHz = 8.f;          // stiffness of the chase near the target (higher = tighter tracking)
-    float inertiaTwoHandForce = 1.5f;     // two-handed: linear acceleration cap x this (two arms)
     float inertiaTwoHandTorque = 2.f;     // two-handed: angular acceleration cap x this (a hand on the pommel)
-    bool  twoHandAim = true;              // both controllers steer relative to their separation at grab time, with smooth steering/release
+    bool  twoHandAim = true;              // support position steers bending; main wrist owns shaft twist
     float inertiaBrake = 3.f;             // braking (and stop-distance) acceleration as a multiple of the cap: a wrist stops a weapon more easily than it starts one
     float inertiaComRef = 0.5f;           // m centre-of-mass distance at which weight counts fully for rotation (angular cap /= 1 + w/W * (com/ref)^2)
-    bool  inertiaNoOverrun = true;        // the weapon never moves toward the hand faster than the hand (no catch-up whip)
-    float inertiaMaxLag = 0.5f;           // m the hand can get ahead of the weapon before dragging it
-    float inertiaMaxLagAngle = 2.0f;      // rad likewise (must stay < pi: the rotation error flips past 180 degrees)
-    float kineticArmPerWeight = 0.012f;   // s of extra commit delay per weight unit (startup grows with weight)
+    float inertiaMaxLagAngle = 0.6f;      // rad max bending lag at the grip (hard safety cap 45 degrees)
+    float kineticArmPerWeight = 0.012f;   // extra startup only for gated combat without rendered weapon motion
     float kineticStaminaScale = 1.0f;     // x the game's own BehaviorParam stamina cost per strike (x 0.5..1 by quality)
     float kineticStaminaPerStrike = 8.f;  // fallback flat drain when the behavior row is unknown, x(1 + weight/12)
     float kineticFatigueStart = 0.35f;    // stamina fraction below which strikes weaken

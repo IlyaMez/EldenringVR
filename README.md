@@ -433,11 +433,18 @@ Implementation (`src/ervr/combat.cpp`):
   swing still presses RB/RT/LB, and the first `AttackBehavior` the game fires for the player within a second of that
   press is captured verbatim (all six fields) as the light/heavy/left template. `auto` then switches to physical.
   Values are logged (`[combat] learned ...`) so they can be pinned in the ini (`LightJudgeId=` etc.).
-* Swing detection (worker thread, 250 Hz): weapon **tip** speed = |v + ω × (forward · reach)|. `Idle -> Armed`
-  when tip ≥ `SwingOnSpeed` and hand speed ≥ `MinHandSpeed` (rejects wrist flicks); after `ArmWindow` the peak
-  picks light vs heavy (`HeavySwingSpeed`), `Swinging` while tip ≥ `SwingOffSpeed` (max `MaxSwingSeconds`), then
-  `Cooldown`. Left hand swings use `Source=2` (left weapon). No stamina (`ChrDataModule+0x154`) → swing rejected
-  with a long haptic buzz. One attack instance per swing, so the game's own hit list prevents multi-hits.
+* Contact detection (worker thread, 250 Hz) uses the rendered tip displacement along the calibrated weapon
+  shaft, including two-hand steering. The fallback uses controller velocity plus angular velocity crossed
+  with the same shaft lever. With `KineticContinuous=true`, contacts start immediately at `ContactOnSpeed`
+  (0.8 m/s) and end below `ContactOffSpeed` (0.25 m/s); wrist-driven arcs count, and short contacts survive
+  until a game frame can process them. Damage still scales with speed, and the existing damage budget
+  bounds each swing. Enemy and world contacts use the game's own attack capsules; this does not add
+  rigid-body wall blocking to the weapon. The gated model uses `SwingOnSpeed`, `MinHandSpeed`, `ArmWindow`
+  for light/heavy selection, and `Cooldown`. Rendered inertia does not add another weight-based startup delay.
+* Weight keeps the main grip at the controller and resists bending the shaft around it. Head-heavy weapons
+  resist more than balanced ones, two hands provide more torque, and settling does not spring past the target.
+  Shaft twist stays under the main wrist's control. `InertiaMaxLagAngle` defaults to 0.6 radians (about 34 degrees),
+  with a 45-degree hard cap for older INIs. The old translational spring settings are ignored.
 * Not done yet: directional thrust vs slash, charged (hold) skills.
 
 ## Two-handing by grabbing the weapon, and the Ash of War without its animation
@@ -460,10 +467,12 @@ three times 0.9 s apart, then logged once and left alone until the wish changes 
 put you in. While two-handed:
 
 * the free hand's arm **rides the weapon shaft** where it took hold (`TwoHandPinHand`): its target is the weapon
-  hand's (inertial, lagging) controller plus the grab distance along the weapon axis, so the hand stays on the
+  hand's tracked grip plus the grab distance along the rendered weapon axis, so the hand stays on the
   haft while the greatsword catches up. `TwoHandPinOrient=true` keeps the free hand's wrist angle relative
   to the weapon when the grab registers, then turns it with the weapon. Release and re-grab to choose a
   new angle, or set it to `false` to follow that controller's live orientation;
+* `TwoHandAim=true` lets the supporting position bend the weapon while the main wrist controls its twist
+  around the shaft. Taking hold preserves the initial alignment, and release blends back to wrist aim;
 * the free hand never swings on its own, and its grip button is the grab — not the skill (LT) it is mapped to;
 * swings use the **two-handed attack rows**. They differ from the one-handed ones (`SlotLight2H`/`SlotHeavy2H`):
   with `Mode=auto` + `Learn=true` the first two-handed light / heavy swing presses the button once so the game plays

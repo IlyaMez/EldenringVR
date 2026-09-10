@@ -1,5 +1,6 @@
 ﻿#include "config.h"
 #include "log.h"
+#include "vrmath.h"
 #include <windows.h>
 #include <xinput.h>
 #include <cctype>
@@ -232,18 +233,16 @@ void Config::Load(const std::wstring& path) {
     kineticAccel = GetF(ini, L"Combat", L"KineticAccel", kineticAccel);
     kineticAccelWeight = GetF(ini, L"Combat", L"KineticAccelWeight", kineticAccelWeight);
     kineticInertia = GetB(ini, L"Combat", L"Inertia", kineticInertia);
+    contactOnSpeed = Clamp(GetF(ini, L"Combat", L"ContactOnSpeed", contactOnSpeed), 0.1f, 10.f);
+    contactOffSpeed = Clamp(GetF(ini, L"Combat", L"ContactOffSpeed", contactOffSpeed), 0.05f, contactOnSpeed * 0.9f);
     inertiaAngAccel = GetF(ini, L"Combat", L"InertiaAngAccel", inertiaAngAccel);
     inertiaSpringHz = GetF(ini, L"Combat", L"InertiaSpringHz", inertiaSpringHz);
     inertiaComRef = GetF(ini, L"Combat", L"InertiaComRef", inertiaComRef);
     inertiaBrake = GetF(ini, L"Combat", L"InertiaBrake", inertiaBrake);
-    inertiaTwoHandForce = GetF(ini, L"Combat", L"InertiaTwoHandForce", inertiaTwoHandForce);
     inertiaTwoHandTorque = GetF(ini, L"Combat", L"InertiaTwoHandTorque", inertiaTwoHandTorque);
     twoHandAim = GetB(ini, L"Combat", L"TwoHandAim", twoHandAim);
-    if (inertiaTwoHandForce < 0.1f) inertiaTwoHandForce = 0.1f; if (inertiaTwoHandTorque < 0.1f) inertiaTwoHandTorque = 0.1f;
-    inertiaNoOverrun = GetB(ini, L"Combat", L"InertiaNoOverrun", inertiaNoOverrun);
-    inertiaMaxLag = GetF(ini, L"Combat", L"InertiaMaxLag", inertiaMaxLag);
+    if (inertiaTwoHandTorque < 0.1f) inertiaTwoHandTorque = 0.1f;
     inertiaMaxLagAngle = GetF(ini, L"Combat", L"InertiaMaxLagAngle", inertiaMaxLagAngle);
-    if (inertiaMaxLag < 0.05f) inertiaMaxLag = 0.05f;
     if (inertiaMaxLagAngle < 0.1f) inertiaMaxLagAngle = 0.1f; if (inertiaMaxLagAngle > 2.9f) inertiaMaxLagAngle = 2.9f;
     kineticArmPerWeight = GetF(ini, L"Combat", L"KineticArmPerWeight", kineticArmPerWeight);
     kineticStaminaScale = GetF(ini, L"Combat", L"KineticStaminaScale", kineticStaminaScale);

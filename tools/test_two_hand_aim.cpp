@@ -29,7 +29,9 @@ int main() {
                 if (i > 0) Check(Error(q, prev) <= Deg2Rad(360.f) * dt + 0.001f, "steering correction must have bounded speed");
                 prev = q;
             }
-            Check(Error(prev, steer * wrist) < 0.001f, "the supporting hand must actually steer the weapon");
+            Check(Error(prev, wrist) > 0.01f, "the supporting hand must actually steer the weapon");
+            Check(Error(WeaponTwist(wrist.Conj() * prev, {0, 1, 0}), {}) < 0.0001f,
+                  "support steering must not contribute shaft twist");
             Check(Error(s.Update(wrist, {}, true, dt), prev) < 0.0001f, "overlapping controllers must not snap the weapon");
             for (int i = 0; i < 80; ++i) {
                 Quat q = s.Update(wrist, wrist.Rotate({0.12f, i % 2 ? 0.049f : 0.051f, 0.f}), true, dt);
@@ -43,6 +45,22 @@ int main() {
             }
             Check(Error(prev, wrist) < 0.0001f, "one-handed aim must settle back onto the controller");
             Check(Error(s.Update(wrist, -worldLine, true, 0.f), wrist) < 0.0001f, "a tracking gap must discard stale grab calibration");
+        }
+        // The main wrist owns twist for either grip axis, including calibration
+        // and the lateral separation needed to fit real controllers together.
+        for (Vec3 axis : {Vec3{0, 1, 0}, Vec3{0, 0, 1},
+                          WeaponShaftAxis(Quat::FromEulerYXZ(0.2f, 0.8f, -0.3f), true)}) {
+            for (float side : {-1.f, 1.f}) {
+                TwoHandAimState s;
+                const Vec3 line = axis * 0.2f + axis.Cross({1, 0, 0}).Normalized() * (side * 0.12f);
+                s.Update({}, line, true, dt, axis);
+                for (int i = 0; i < 180; ++i) {
+                    Quat wrist = Quat::AxisAngle(axis, i * 0.025f);
+                    Quat result = s.Update(wrist, line, true, dt, axis);
+                    Check(Error(WeaponTwist(result, axis), WeaponTwist(wrist, axis)) < 0.0002f,
+                          "rolling the main wrist must retain its full twist with the support position fixed");
+                }
+            }
         }
     }
     std::puts("Two-hand aim regression checks passed.");
