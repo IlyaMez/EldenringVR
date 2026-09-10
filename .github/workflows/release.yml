@@ -1,6 +1,6 @@
 name: Release
 
-# Tag a commit to cut a release:  git tag v0.3.0 && git push origin v0.3.0
+# Tag a commit to cut a release:  git tag v0.4.0 && git push origin v0.4.0
 on:
   push:
     tags: ["v*"]
@@ -43,17 +43,8 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $name = "${{ steps.version.outputs.name }}"
-          $stage = "staging/$name"
-          New-Item -ItemType Directory -Force $stage | Out-Null
-          Copy-Item -Recurse build/dist/* $stage
-          Copy-Item README.md, LICENSE, THIRD_PARTY.md $stage
-          $zip = "$name.zip"
-          Compress-Archive -Path "$stage/*" -DestinationPath $zip
-          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          "zip=$zip"  | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
-          "sha=$sha"  | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
-          Write-Host "SHA256($zip) = $sha"
+          $tag = "${{ steps.version.outputs.tag }}"
+          .\tools\package_release.ps1 -Version $tag.TrimStart("v") -OutDir .
 
       # Cryptographic proof these binaries were built by this workflow from this commit.
       # Users can verify with:  gh attestation verify ERVR-vX.Y.Z.zip --repo <owner>/<repo>
@@ -67,7 +58,7 @@ jobs:
         run: |
           (Get-Content .github/release-notes-template.md -Raw) `
             -replace '\{\{SHA256\}\}', '${{ steps.package.outputs.sha }}' `
-            -replace '\{\{ZIP\}\}',    '${{ steps.package.outputs.zip }}' `
+            -replace '\{\{ZIP\}\}',    '${{ steps.package.outputs.name }}.zip' `
             -replace '\{\{REPO\}\}',   '${{ github.repository }}' `
             | Set-Content release-notes.md -Encoding utf8
           Get-Content release-notes.md
@@ -79,6 +70,7 @@ jobs:
         run: |
           gh release create "${{ steps.version.outputs.tag }}" `
             "${{ steps.package.outputs.zip }}" `
+            "${{ steps.package.outputs.zip }}.sha256" `
             --title "ERVR ${{ steps.version.outputs.tag }}" `
             --notes-file release-notes.md `
             --verify-tag

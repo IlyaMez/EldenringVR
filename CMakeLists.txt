@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EldenRingVR VERSION 0.3.0 LANGUAGES C CXX)
+project(EldenRingVR VERSION 0.4.0 LANGUAGES C CXX RC)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "ELDEN RING is 64-bit; configure with a 64-bit toolchain (e.g. -A x64).")
@@ -48,8 +48,17 @@ foreach(_xr openxr_loader jsoncpp_object jsoncpp_static jsoncpp_lib)
   endif()
 endforeach()
 
+# ---- Version resources (file properties show the ERVR version; the packager checks it) ----
+set(ERVR_RC_NAME "ERVR")
+set(ERVR_RC_DESCRIPTION "ERVR - native VR for ELDEN RING (ReShade add-on, OpenXR)")
+configure_file(src/version.rc.in ${CMAKE_BINARY_DIR}/ERVR_version.rc @ONLY)
+set(ERVR_RC_NAME "dinput8")
+set(ERVR_RC_DESCRIPTION "ERVR proxy loader (forwards DirectInput8Create, loads ERVR/ERVR.dll)")
+configure_file(src/version.rc.in ${CMAKE_BINARY_DIR}/dinput8_version.rc @ONLY)
+
 # ---- ERVR.dll: the mod --------------------------------------------------------
 add_library(ERVR SHARED
+  ${CMAKE_BINARY_DIR}/ERVR_version.rc
   src/ervr/main.cpp
   src/ervr/log.cpp
   src/ervr/config.cpp
@@ -89,7 +98,8 @@ set_target_properties(xrprobe PROPERTIES OUTPUT_NAME "xrprobe")
 # ---- dinput8.dll: proxy loader ----------------------------------------------
 add_library(dinput8_proxy SHARED
   src/proxy/dinput8.cpp
-  src/proxy/dinput8.def)
+  src/proxy/dinput8.def
+  ${CMAKE_BINARY_DIR}/dinput8_version.rc)
 set_target_properties(dinput8_proxy PROPERTIES OUTPUT_NAME "dinput8" PREFIX "")
 
 # Pure regression checks; no game process or headset required.

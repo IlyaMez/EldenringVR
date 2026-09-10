@@ -42,7 +42,8 @@ both want to be `dxgi.dll`.
 
 ## Requirements
 
-* ELDEN RING (Steam), played **offline with EAC disabled**.
+* ELDEN RING (Steam), played **offline with EAC disabled**. Verified on exe 2.6.2.0 (patch 1.16.2) and
+  2.7.1.0 (patch 1.17.1); the log's `[game] executable version` line tells you which map was selected.
 * A PC VR headset with an OpenXR runtime: Meta Quest via Link / Air Link (Oculus runtime), Virtual Desktop (VDXR),
   or SteamVR (Index, Vive, WMR, Pico, Steam Link…). ERVR uses whichever is the system's active OpenXR runtime.
 * Nothing else. ReShade 6.8.0 (the build with add‑on support) is included in the download. R.E.A.L. VR is not
@@ -52,8 +53,8 @@ both want to be `dxgi.dll`.
 
 ## Download
 
-Grab the latest zip from [**Releases**](../../releases) and unpack it into your `ELDEN RING\Game` folder, next to
-`eldenring.exe`:
+Grab the latest zip from [**Releases**](../../releases) (the same file is published on Nexus Mods) and unpack it
+into your `ELDEN RING\Game` folder, next to `eldenring.exe`:
 
 ```
 Game\
@@ -62,6 +63,7 @@ Game\
   dinput8.dll       ERVR's proxy loader
   ERVR\ERVR.dll     the mod
   ERVR\ERVR.ini     configuration (hot-reloads)
+  ERVR\             also README.md, CHANGELOG.md, LICENSE.txt, THIRD_PARTY.md
 ```
 
 **Had R.E.A.L. VR installed?** Delete its `dxgi.dll`, `RealVR64.dll`, `openvr_api.dll`, `cudart64_12.dll` and
@@ -584,10 +586,12 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise — 
   attack bookkeeping never carries one address across strikes. With `Debug=true` a 1 Hz
   `[combat] menudiag` line dumps the action-request / damage-module state while a menu is up.
 * Physical melee has no attack animation at all: enemy AI/hitstop cues that key off the player's *attack state*
-  (not the hit) are absent, and the game may still allow rolling mid-swing. Damage numbers are the weapon's real
-  R1/R2 values regardless of how hard you swing (speed scaling is a planned hook).
-* Planned: hand‑aim presets per game version, weapon‑bone tracking (draw the weapon where your hand is via `ChrIns`
-  bone overrides), a small in‑headset status overlay.
+  (not the hit) are absent, and the game may still allow rolling mid-swing. Damage scales with swing speed
+  through the live param edits (`[Combat] Kinetic*`); the weapon's own R1/R2 rows are the reference.
+* Game version: only exe 2.6.2.0 (patch 1.16.2) and 2.7.1.0 (patch 1.17.1) have verified address maps. On any
+  other build the AOB fallbacks cover part of the feature set and the rest logs a warning and stays off.
+  Headsets other than Quest 3 (Link / Air Link / Virtual Desktop) are untested by the author.
+* Planned: a small in‑headset status overlay, directional thrust vs slash, charged (hold) skills.
 
 ## Credits & inspiration
 
@@ -640,7 +644,3 @@ Not affiliated with, endorsed by, or connected to FromSoftware, Bandai Namco, Me
 ReShade project. ELDEN RING is a trademark of its respective owners. This mod ships no game
 code or assets. Use it at your own risk, on a game you own, offline.
 
----
-
-Built by [Your Name](https://your-site.example). I also work on [Startup](https://startup.example),
-which is unrelated to any of this.

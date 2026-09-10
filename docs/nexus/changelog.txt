@@ -1,0 +1,10 @@
+0.4.0 (2026-09-10) - first public release
+
+- Own OpenXR session (Oculus / VDXR / SteamVR), true stereo with both eyes at the same simulation instant, cinema fallback for menus and cutscenes
+- HUD lifted out of the frame onto its own floating panel at headset resolution
+- First person: head-bone camera, held body pose, arms on the controllers, head hiding, Torrent riding
+- Physical melee: swings fire the game's own attack event; damage, poise, status and stamina from the game; damage scales with swing speed; weapon weight and inertia
+- Two-hand by grabbing the hilt; Ash of War as its effect without the animation; spells and bows aim along the casting hand
+- Motion controllers mapped to XInput with tap/hold layers, haptics, stick menu navigation, no gamepad required
+- Verified address maps for game exe 2.6.2.0 (1.16.2) and 2.7.1.0 (1.17.1)
+- No telemetry, no network code; builds are attested by a public GitHub Actions workflow

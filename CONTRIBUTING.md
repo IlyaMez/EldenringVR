@@ -31,7 +31,7 @@ These are out of scope and will be closed:
 Welcome, especially:
 
 * Controller bindings and quirks for hardware I don't own (Index, WMR, Pico, Vive wands).
-* Offsets and AOBs for game versions past 2.6.2.0 — with the `verify_signatures.py` output showing
+* Offsets and AOBs for game versions past 2.7.1.0 — with the `verify_signatures.py` output showing
   the pattern is unique.
 * Judge ids for stances I haven't covered (two-handing, power stance, specific weapon classes).
 

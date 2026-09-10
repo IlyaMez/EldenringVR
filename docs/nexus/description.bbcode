@@ -1,0 +1,94 @@
+[center][size=6][b]ERVR — native VR for ELDEN RING[/b][/size]
+[size=3]True stereo in any OpenXR headset. First person. Hand-tracked weapons. Physical melee with the game's own hitboxes.[/size][/center]
+
+[center][b]Version 0.4.0 — first public release[/b][/center]
+
+[quote][size=4][b]⚠ Offline play only. Easy Anti-Cheat must be disabled.[/b][/size]
+ERVR injects into eldenring.exe and writes game memory. [b]Never run it with EAC enabled or while connected to online play.[/b] Doing so risks a permanent ban and that is entirely on you. Anti-cheat and multiplayer are not supported, not on the roadmap, and never will be. Launch the game offline with EAC disabled (the bundled ReShade add-on build would not load under EAC anyway).[/quote]
+
+[size=5][b]What it is[/b][/size]
+ERVR is a free, open-source [b]native VR mod[/b]. It renders ELDEN RING into your headset from its own OpenXR session, tracks your head with 6DoF, puts you in first person with your arms on the motion controllers, and turns the weapon in your hand into the actual hitbox. It runs as a [url=https://reshade.me]ReShade[/url] add-on (ReShade is bundled in the download) and needs [b]no other mod[/b]. It does not use R.E.A.L. VR.
+
+[list]
+[*][b]True stereo[/b] (StereoMode=full): a second engine pass renders the other eye at the same simulation instant, so both eyes see the same moment. [i]cinema[/i] mode shows the flat game on a head-locked screen and is the fallback for menus and cutscenes.
+[*][b]First person[/b]: camera on the character's head bone, headset rotation on top, head hidden, body pose held under you, arms solved to the controllers. Torrent works, with a seated pose and the view anchored to the horse.
+[*][b]Physical melee[/b]: swings do not press buttons. ERVR fires the game's own attack event on your character while the controller moves, so damage, poise, status and stamina all come from the game. Damage scales with swing speed. Weapons have weight and inertia.
+[*][b]Two-hand by grabbing the hilt[/b] with your free hand. Ash of War fires as its effect without the animation. Spells, bows and ranged skills fly along the casting hand.
+[*][b]Motion controllers as the gamepad[/b]: every Touch control mapped to XInput with tap/hold layers, haptics forwarded, menu navigation by stick. No physical gamepad needed.
+[*][b]HUD on its own layer[/b]: the UI is lifted out of the game frame and shown as a floating panel at headset resolution, at the distance and size you choose.
+[*][b]Hot reload[/b]: edit ERVR\ERVR.ini while playing, changes apply within a second.
+[/list]
+
+[size=5][b]Requirements[/b][/size]
+[list]
+[*]ELDEN RING on Steam, played [b]offline with EAC disabled[/b]. Verified on exe [b]2.6.2.0[/b] (patch 1.16.2) and [b]2.7.1.0[/b] (patch 1.17.1). Other builds get a partial feature set and a warning in the log.
+[*]A PC VR headset with an OpenXR runtime: Meta Quest via Link / Air Link (Oculus runtime), Virtual Desktop (VDXR), or SteamVR (Index, Vive, WMR, Pico, Steam Link). ERVR talks to whichever runtime is set as the system's active OpenXR runtime.
+[*]A GPU that can run the game twice per frame if you want full stereo. Lower the game's resolution before blaming the headset. Cinema mode is cheap and always works.
+[*]Developed and tested on a Quest 3 with Touch Plus controllers. Other headsets depend on your reports.
+[/list]
+Nothing else. ReShade 6.8.0 with add-on support is included. R.E.A.L. VR is not used and must be removed if present.
+
+[size=5][b]Install[/b][/size]
+[list=1]
+[*][b]Had R.E.A.L. VR installed?[/b] Delete its dxgi.dll, RealVR64.dll, openvr_api.dll, cudart64_12.dll and RealVR.ini from the Game folder first. R.E.A.L. and ReShade both live in dxgi.dll and cannot coexist.
+[*]Unpack the zip into [b]ELDEN RING\Game[/b], next to eldenring.exe. You get:
+[code]Game\
+  dxgi.dll          ReShade 6.8.0 with add-on support (bundled, unmodified)
+  ReShade.ini       ReShade defaults
+  dinput8.dll       ERVR's proxy loader
+  ERVR\ERVR.dll     the mod
+  ERVR\ERVR.ini     configuration (hot-reloads)
+  ERVR\             README, CHANGELOG, licenses[/code]
+[*]Make sure your headset's OpenXR runtime is active (Meta Link / Air Link, Virtual Desktop VDXR, or SteamVR), then launch the game [b]offline with EAC disabled[/b] and put the headset on.
+[*]Check Game\ERVR\ERVR.log. It should contain both [i]Active VR backend: openxr[/i] and [i][reshade] registered as add-on[/i]. If the second line never appears, dxgi.dll is not the bundled one. Game\ReShade.log must start with [i]Initializing crosire's ReShade version '6.8.0.2155'[/i].
+[/list]
+
+[b]Already using ReShade?[/b] Keep your own ReShade.ini, but dxgi.dll must be an add-on-support build (6.8+).
+[b]Already using a dinput8.dll mod loader[/b] (Elden Mod Loader etc.)? Keep it and put ERVR.dll in its mods folder instead of installing the bundled dinput8.dll.
+[b]Updating[/b]: replace only ERVR\ERVR.dll. Copying the bundled ERVR.ini resets your settings.
+[b]Uninstall[/b]: delete dinput8.dll, dxgi.dll, ReShade.ini and the ERVR folder (restore your previous dxgi.dll if you had one).
+
+Vortex: the archive is laid out as the contents of the Game folder, so a root-level install works. Manual install is the tested path.
+
+[size=5][b]Default controls (Quest Touch)[/b][/size]
+[list]
+[*]Left stick: move. Right stick: camera (smooth or snap turn).
+[*]A / B: interact / dodge-sprint. X / Y: use item / two-hand.
+[*]Right trigger / right grip: light / heavy attack in button mode. In physical first person, attack by swinging instead. Left trigger: guard. Left grip: skill.
+[*]Right stick click: lock-on. Left stick click tap: crouch. Hold and tilt it for the quick-slot D-pad; hold it still to toggle the menu-navigation override. Open menus switch the left stick to D-pad navigation automatically.
+[*]Menu button tap / hold: menu / map.
+[*][b]Swing right hand[/b]: attack, with the weapon in your hand as the hitbox. [b]Swing left hand[/b]: parry, bash or offhand attack; a shield guards by where you hold it.
+[*]Put your free hand on the hilt and squeeze its grip: two-hand. Right trigger while two-handing: Ash of War.
+[/list]
+Everything is a key in ERVR.ini. The file is heavily commented.
+
+[size=5][b]Your antivirus may flag it[/b][/size]
+ERVR.dll injects into a running game process, and dxgi.dll is ReShade's add-on build, which is unsigned by design. Both detections are generic. You do not have to take my word for it: every release is built by a public GitHub Actions workflow from the tagged commit and carries a signed provenance attestation. Verify with [i]gh attestation verify ERVR-vX.Y.Z.zip --repo IlyaMez/EldenringVR[/i]. The bundled dxgi.dll is byte-for-byte the ReShade64.dll from ReShade_Setup_6.8.0_Addon.exe; its SHA256 is in THIRD_PARTY.md so you can compare it against a fresh download from reshade.me. Or build from source; it takes a minute.
+
+[b]ERVR contains no telemetry, no analytics, no auto-updater, and no network code of any kind.[/b] It never phones home.
+
+[size=5][b]Known limitations[/b][/size]
+[list]
+[*]Full stereo roughly doubles the GPU cost and the engine's simulation step is tied to the frame loop, so a loop under the target rate slows the game. Use cinema mode or lower settings.
+[*]Physical melee has no attack animation: enemy cues that key off the player's attack state are absent, and the game may still allow rolling mid-swing.
+[*]Only exe 2.6.2.0 and 2.7.1.0 have verified address maps. A new game patch will need new offsets.
+[*]No in-headset settings menu yet. Edit ERVR.ini; it hot-reloads.
+[*]Only Quest 3 on the Oculus and Virtual Desktop paths has been tested by the author.
+[/list]
+
+[size=5][b]Bugs and support[/b][/size]
+This is a hobby project maintained when I have the time. Bugs go to the [url=https://github.com/IlyaMez/EldenringVR/issues]GitHub issue tracker[/url] using the template, [b]with LogLevel=debug set and Game\ERVR\ERVR.log attached[/b]. Reports without a log get closed. Questions and tuning help go to [url=https://github.com/IlyaMez/EldenringVR/discussions]Discussions[/url]. Posts here are read, but a GitHub issue with a log is what gets something fixed.
+
+Bindings for headsets I do not own and offsets for newer game versions are the most useful things anyone can send. See CONTRIBUTING.md in the repo.
+
+[size=5][b]Source, license, credits[/b][/size]
+Source: [url=https://github.com/IlyaMez/EldenringVR]github.com/IlyaMez/EldenringVR[/url]. GPL-3.0-or-later: use, study, modify and redistribute freely; if you distribute a modified build you must publish your source too. Nothing is or will be paywalled.
+
+[list]
+[*][url=https://reshade.me]ReShade[/url] by crosire (BSD-3-Clause), bundled unmodified as dxgi.dll.
+[*][url=https://github.com/TsudaKageyu/minhook]MinHook[/url] (BSD-2-Clause), [url=https://github.com/KhronosGroup/OpenXR-SDK]OpenXR SDK[/url] (Apache-2.0).
+[*]Research this builds on: DSAnimStudio (Meowmaritus), fromsoftware-rs and erfps2 (Dasaav), the Souls Modding wiki, uberhalit's EldenRingFpsUnlockAndMore (MIT, ported in-process for the fps cap).
+[*]Structural inspiration: Halo-MCC-VR and cyberpunk-vr-port.
+[/list]
+
+Not affiliated with, endorsed by, or connected to FromSoftware, Bandai Namco, Meta, Valve, or the ReShade project. This mod ships no game code or assets. Use it at your own risk, on a game you own, offline.

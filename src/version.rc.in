@@ -1,0 +1,35 @@
+#include <winver.h>
+
+#define ERVR_VER_MAJOR @PROJECT_VERSION_MAJOR@
+#define ERVR_VER_MINOR @PROJECT_VERSION_MINOR@
+#define ERVR_VER_PATCH @PROJECT_VERSION_PATCH@
+#define ERVR_VER_STR   "@PROJECT_VERSION@"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    ERVR_VER_MAJOR,ERVR_VER_MINOR,ERVR_VER_PATCH,0
+ PRODUCTVERSION ERVR_VER_MAJOR,ERVR_VER_MINOR,ERVR_VER_PATCH,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_DLL
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "ERVR project (GPL-3.0-or-later)"
+            VALUE "FileDescription",  "@ERVR_RC_DESCRIPTION@"
+            VALUE "FileVersion",      ERVR_VER_STR
+            VALUE "InternalName",     "@ERVR_RC_NAME@"
+            VALUE "LegalCopyright",   "GPL-3.0-or-later. Source: https://github.com/IlyaMez/EldenringVR"
+            VALUE "OriginalFilename", "@ERVR_RC_NAME@.dll"
+            VALUE "ProductName",      "ERVR - native VR for ELDEN RING"
+            VALUE "ProductVersion",   ERVR_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
