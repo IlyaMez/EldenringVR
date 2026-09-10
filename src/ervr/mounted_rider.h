@@ -80,6 +80,40 @@ public:
     }
 };
 
+// A settled rider pose lives in Torrent's physics frame. The animated rider
+// model matrix must not move the camera or reintroduce gallop sway after IK.
+// Keep this calibration separate from the standing pose and eye height.
+struct MountedSeatFrame {
+    const void* rider = nullptr;
+    const void* mount = nullptr;
+    double since = 0;
+    bool ready = false;
+    Vec3 offset{}, headLocal{};
+    Quat rotation{};
+
+    void Observe(const void* currentRider, const void* currentMount, double now, bool simulationPass) {
+        if (!simulationPass) return;
+        if (rider == currentRider && mount == currentMount) return;
+        rider = currentRider; mount = currentMount; since = now; ready = false;
+    }
+    bool Matches(const void* currentRider, const void* currentMount) const {
+        return currentMount && rider == currentRider && mount == currentMount;
+    }
+    bool CanCapture(double now, bool fresh, bool simulationPass) const {
+        return mount && !ready && fresh && simulationPass && now - since >= 0.5;
+    }
+    void Capture(Vec3 mountPos, Quat mountYaw, Vec3 riderPos, Quat riderQ, Vec3 headWorld) {
+        offset = mountYaw.Conj().Rotate(riderPos - mountPos);
+        rotation = (mountYaw.Conj() * riderQ).Normalized();
+        headLocal = riderQ.Conj().Rotate(headWorld - riderPos);
+        ready = true;
+    }
+    void Root(Vec3 mountPos, Quat mountYaw, Vec3& riderPos, Quat& riderQ) const {
+        riderPos = mountPos + mountYaw.Rotate(offset);
+        riderQ = (mountYaw * rotation).Normalized();
+    }
+};
+
 // Preserve the native pitch/roll and saddle offset when turning the pair.
 // A rotation of the rider alone leaves its legs and torso across the horse.
 inline void TurnRiderAboutMount(Vec3 mountPosition, float radians, Quat& mountRotation,

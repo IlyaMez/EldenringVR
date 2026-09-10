@@ -161,7 +161,7 @@ you your actual peak speeds so you can tune `LightAttackSpeed` / `HeavyAttackSpe
 * **Gestures** – linear velocity from the runtime; a rising edge over threshold arms a 70 ms window; the peak decides
   light vs heavy; per‑hand cooldown; synthesized buttons are held for `PressDuration`.
 
-## First person + hand-tracked weapons (v0.2, ELDEN RING 1.16.2 / exe 2.6.2.0)
+## First person + hand-tracked weapons
 
 `[FirstPerson]` in `ERVR.ini`. ERVR takes over the game camera and the arm bones and renders the result through its
 own OpenXR session.
@@ -194,16 +194,18 @@ own OpenXR session.
   animation until the next stance capture. Menus such as Sites of Grace suspend stance capture until three seconds
   after closing, preserving the saved walking pose through sitting and stand-up. The VR body and its head anchor
   keep using that pose throughout. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
-* **Torrent** – mounting, riding and dismounting use the game's seated body and facing, with controller arm IK.
-  The camera follows the live rider head using the rendered model transform, including late updates in the same
-  frame. This applies with either camera anchor and ignores bob suppression while riding, so standing eye height
-  is not added above the saddle. The walking template is preserved and restored after dismounting; loading a
-  save already on Torrent does not capture the seated pose as a walking stance. Body shifting, spine twist,
-  facing pins and direct locomotion stand down throughout the ride. Head tracking remains active.
+* **Torrent** – `PoseMode=vr` captures a separate seated pose after mounting. The rider and camera share a frame
+  anchored to Torrent's physics position and yaw; late rider animation is compensated in the rendered skeleton
+  so gallop bob and sway do not pull the body away from the view. Controller arm IK and physical leaning remain
+  active, and Torrent's own animation is unchanged. Mount/dismount transitions and `PoseMode=game` use the live
+  rider pose. Standing eye height is not added above the saddle. The walking template is preserved and restored
+  after dismounting; loading a save on Torrent never captures the seated pose as a walking stance. Spine twist,
+  player facing pins and direct locomotion stand down throughout the ride.
   Right-stick turns rotate Torrent and the seated rider together with the view, once per simulation frame;
-  physical head turns remain free look. The active horse's draw visibility and opacity are restored separately
-  from `NearDither`, preserving its shadow. These changes require a validated current rider/horse pair and
-  stand down during summon/dismount animations and mount death.
+  physical head turns remain free look. The active horse's draw visibility and opacity are requested separately
+  from `NearDither`; logs also report model position, scale and alpha for investigating missing geometry.
+  Enabled flags alone do not prove that the mesh or shadow was rendered. Horse writes require a validated
+  current rider/horse pair and stand down during summon/dismount animations and mount death.
 * **Body facing** (`FaceCamera` + `FaceCameraMode`) – keeps movement in strafe mode so the arms can always reach.
   `strafe` (default with `PoseMode=vr`) only sets the ChrCtrl "strafing" flag and leaves the game's lock-on state
   alone. The old way (`lock`) forced `Chr_IsLockedOn` onto a fake far-away point every frame — which engages the
@@ -267,7 +269,13 @@ own OpenXR session.
   elbow poles) sits on the view yaw, instantly. `head` makes it chase the headset yaw with a
   `BodyYawFollowSeconds` time constant instead (shoulders come round when you turn your real body); `stick` is
   for `CameraYawSource=ervr` + `RightStick=body`. Locked on, the game aims the body.
-* Version gate: RVAs are used only when the exe is 2.6.2.0; otherwise erfps2's AOBs are tried. AOB check script:
+* Version gate: separate RVA maps cover exe 2.6.2.0 (game 1.16.2) and 2.7.1.0 (game 1.17.1).
+  The 2.7.1.0 camera/model routines and transition sites were compared against the installed binaries;
+  headset validation is still required. Other versions use the existing AOB fallbacks and cannot register
+  frame tasks through a guessed address. Keep any renamed game launcher synchronized with Steam's game files:
+  running the old executable with 1.17's Torrent appearance assets can leave the horse missing even with its
+  visibility flags enabled. Startup logs warn when the launcher differs from the adjacent `eldenring.exe`.
+  AOB check script:
   see `tools/verify_signatures.py`.
 
 ## The HUD on its own floating quad (`[HUD]`)

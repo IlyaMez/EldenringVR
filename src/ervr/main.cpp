@@ -12,6 +12,7 @@
 #include "game_memory.h"
 #include "midhook.h"
 #include "game_er.h"
+#include "game_version.h"
 #include "combat.h"
 #include "crashlog.h"
 #include "reshade_addon.h"
@@ -66,7 +67,8 @@ LONG CALLBACK PanicVeh(EXCEPTION_POINTERS* xp) {
     if (xp->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
         return EXCEPTION_CONTINUE_SEARCH;
     auto* base = (uint8_t*)GetModuleHandleW(nullptr);
-    if ((uint8_t*)xp->ExceptionRecord->ExceptionAddress != base + kRvaDlPanicNullWrite)
+    const uint32_t panicRva = GameRva(kRvaDlPanicNullWrite);
+    if (!panicRva || (uint8_t*)xp->ExceptionRecord->ExceptionAddress != base + panicRva)
         return EXCEPTION_CONTINUE_SEARCH;
     // Pass-2 asserts are SPURIOUS by construction: the second pass replays the frame over
     // world state mid-transition (fast travel's fade-out fired two of these on 2026-08-21)
@@ -142,6 +144,7 @@ DWORD WINAPI Worker(LPVOID) {
     // loses self-heals next launch: the losing session runs fitted, exits, and this write
     // wins the (much emptier) start of the following one.
     PatchesApplyGameResolution();
+    GameVersionInit();
     AddVectoredExceptionHandler(1, PanicVeh);   // turn DL_PANIC crashes into logged stacks
     // Everything PanicVeh does not cover. Warp crashes have all ended the log mid-frame
     // with no faulting address, which is why the 2026-08-22 hunt had to proceed by

@@ -1,4 +1,5 @@
-﻿// M2 spike: map ELDEN RING's frame task system.
+﻿#include "game_version.h"
+// M2 spike: map ELDEN RING's frame task system.
 //
 // True stereo needs the scene drawn twice from two cameras at ONE simulation time. Every
 // mechanism for that goes through Dantelion2's task scheduler: the frame is a strictly
@@ -591,16 +592,15 @@ int CallRegisterTask(void* fn, void* imp, uint32_t groupIndex, void* task) {
 }
 
 ErvrFrameTask* RegisterFrameTask(const char* name, int groupIndex) {
-    if (!g_table.imp || groupIndex < 0) return nullptr;
-    // The table matched libER's map exactly (169/169 names) before we get here, which is the
-    // version gate: on any other build that check fails and this never runs.
+    if (!g_table.imp || groupIndex < 0 || !GameRva(RVA_RegisterTask)) return nullptr;
+    // Require both the verified executable map and the matching 169-group task table.
     auto* base = (uint8_t*)GetModuleHandleW(nullptr);
     auto* t = new ErvrFrameTask();
     t->vft = g_taskVft;
     t->name = name;
-    const int r = CallRegisterTask(base + RVA_RegisterTask, g_table.imp, (uint32_t)groupIndex, t);
+    const int r = CallRegisterTask(base + GameRva(RVA_RegisterTask), g_table.imp, (uint32_t)groupIndex, t);
     if (r < 0) {
-        LOGE("[m2] register_task(\"%s\", %d) FAULTED - RVA 0xeb1fe0 wrong for this build?", name, groupIndex);
+        LOGE("[m2] register_task(\"%s\", %d) FAULTED - verified task registration failed", name, groupIndex);
         return nullptr;   // t leaks; the engine may already hold it
     }
     LOGI("[m2] register_task(\"%s\", index %d) returned; waiting for first call", name, groupIndex);

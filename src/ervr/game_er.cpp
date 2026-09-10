@@ -6,6 +6,7 @@
 // (struct layouts), FreecamMod / TGA (FieldArea -> GameRend -> CSPersCam), and the
 // classic WorldChrMan AOB. Nothing here is guessed from scratch; see README.
 #include "game_er.h"
+#include "game_version.h"
 #include "head_anchor.h"
 #include "pose_frame.h"
 #include "body_pose.h"
@@ -431,6 +432,8 @@ void ApplyHeadVisibility(uint8_t* player, bool hideHead, bool hideSheathed) {
     }
     if (uint8_t* res = Deref(player + off::PI_AsmModelRes)) {
         uint8_t b;
+        // 1.17's ChrAsmModelRes masks moved by eight bytes (erfps2 1.17 layout).
+        if (CurrentGameBuild() == GameBuild::V271) res += 8;
         if (RD(res + 0x58, b)) WR(res + 0x58, (uint8_t)((b & ~8) | (hideHead ? 8 : 0)));
         if (RD(res + 0x49, b)) WR(res + 0x49, (uint8_t)((b & ~8) | (hideHead ? 8 : 0)));
         if (RD(res + 0x50, b)) WR(res + 0x50, (uint8_t)((b & ~32) | (hideHead ? 32 : 0)));
@@ -479,8 +482,17 @@ void ApplyTorrentVisibility(uint8_t* mount) {
     const double now = NowSec();
     if (now - s_last > 5.0) {
         s_last = now;
-        LOGI("[ride] Torrent %p draw: frustum %02X render %02X display %08X opacity %.3f/%.3f base %.3f -> visible",
+        LOGI("[ride] Torrent %p requested draw state: frustum %02X render %02X display %08X opacity %.3f/%.3f base %.3f (does not confirm a rendered mesh)",
              mount, before.frustum, before.render, before.display, before.opacity, before.previousOpacity, before.baseOpacity);
+        uint8_t* ctrl = Deref(mount + off::Chr_ChrCtrl);
+        float matrix[16]{}, alpha[3]{}; Vec3 physicsPos; Quat physicsQ;
+        if (ctrl && SafeRead(ctrl + off::Ctrl_ModelMatrix, matrix, sizeof(matrix)) && PlayerRoot(mount, physicsPos, physicsQ)) {
+            SafeRead(mount + 0x240, alpha, sizeof(alpha));
+            LOGI("[ride] Torrent model pos %.3f %.3f %.3f, physics %.3f %.3f %.3f, scale %.3f %.3f %.3f, tint %.3f camouflage %.3f",
+                 matrix[12], matrix[13], matrix[14], physicsPos.x, physicsPos.y, physicsPos.z,
+                 Vec3{matrix[0], matrix[1], matrix[2]}.Length(), Vec3{matrix[4], matrix[5], matrix[6]}.Length(),
+                 Vec3{matrix[8], matrix[9], matrix[10]}.Length(), alpha[0], alpha[2]);
+        }
     }
 }
 
@@ -542,6 +554,8 @@ Skeleton g_skel;
 // still for a second, so idle/crouch stances come through as discrete poses.
 // Grace/menu poses must never replace this walking template.
 std::vector<HkQsTransform> g_poseTemplate;
+std::vector<HkQsTransform> g_seatedTemplate;
+MountedSeatFrame g_seatedFrame;
 BodyPoseCaptureGuard g_poseCaptureGuard;
 Vec3 g_statPos{}; double g_statSince = 0; double g_templLastCapture = 0;
 // Stance re-capture settle guard: candidate snapshot of a pose that differs from the template, only promoted to
@@ -622,6 +636,7 @@ bool BuildSkeleton(uint8_t* chr) {
     g_rootShiftBase.clear(); g_rootShiftWritten.clear(); g_rootShiftHas.clear(); g_rootRotBase.clear(); g_rootRotWritten.clear();
     ResetRecenter();   // new character / area load: start centred on wherever you are standing now
     g_headAnchor.Reset();
+    g_seatedFrame = {}; g_seatedTemplate.clear();
     g_poseTemplate.clear(); g_statPos = {}; g_statSince = 0; g_templLastCapture = 0;
     g_templCand.clear(); g_templCandAt = 0; g_templCheckAt = 0;
     posescan::Disarm("skeleton rebuild");   // the watched buffer may be gone
@@ -1134,6 +1149,10 @@ void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
         // PoseMode=vr: measure on the template (see HeadBoneTemplateWorld) so the anchor is independent of the
         // shift we are about to apply; otherwise fall back to the live pose.
         bool haveHb = false;
+        if (c.fpPoseMode == "vr" && g_seatedFrame.ready && g_seatedFrame.Matches(player, f.mount)) {
+            hb = root + rootQ.Rotate(g_seatedFrame.headLocal);
+            haveHb = true;
+        }
         if (!f.riding && c.fpPoseMode == "vr" && g_skel.chr == player && g_skel.hkb)
             haveHb = HeadBoneTemplateWorld(root, rootQ, g_bodyYaw.load(), hb);
         const bool templatePose = haveHb;
@@ -1154,16 +1173,21 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
     g_poseCaptureGuard.Update(poseOwner, CombatMenuActive(), NowSec(), FramePumpCurrentPass() != 2);
     f.capturePose = !f.riding && g_poseCaptureGuard.CanCapture(poseOwner);
     f.mount = ride.valid && ride.active ? CurrentTorrent(player) : nullptr;
+    g_seatedFrame.Observe(player, f.mount, NowSec(), FramePumpCurrentPass() != 2);
     if (FramePumpCurrentPass() != 2) g_mountedTurns.SetMount(f.mount);
     static std::atomic<int> s_rideMode{-1};
     const int rideMode = !ride.valid ? 2 : (ride.active ? 1 : 0);
     if (s_rideMode.exchange(rideMode) != rideMode)
         LOGI("[ride] %s", rideMode == 2 ? "state unavailable; preserving native body/facing" :
-             (rideMode == 1 ? "mount/riding/dismount: live rider head, native seated body/facing" : "on foot: configured VR body/facing restored"));
+             (rideMode == 1 ? "mount/riding/dismount: waiting for settled seated pose; native pair facing" : "on foot: configured VR body/facing restored"));
     if (f.riding) {
         // The attached rider's rendered transform can differ from its physics
         // position AND rotation. Use it for both the live head and the arm IK.
         if (!ModelMatrixRoot(player, root, rootQ) && !PlayerRoot(player, root, rootQ)) return false;
+        Vec3 mountPos; Quat mountQ;
+        if (c.fpPoseMode == "vr" && g_seatedFrame.ready && g_seatedFrame.Matches(player, f.mount) &&
+            PlayerRoot(f.mount, mountPos, mountQ))
+            g_seatedFrame.Root(mountPos, YawOnlyRoot(mountQ), root, rootQ);
     } else if (!SkeletonRoot(player, root, rootQ)) return false;
     f.root = root; f.rootQ = rootQ;
     BuildCameraAnchor(player, f);
@@ -1818,16 +1842,53 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             }
         }
     }
+    if (c.fpPoseMode == "vr" && g_seatedFrame.Matches(player, f.mount) &&
+        g_seatedFrame.CanCapture(NowSec(), poseForeign, FramePumpCurrentPass() != 2) && g_skel.head >= 0) {
+        Vec3 mountPos; Quat mountQ;
+        bool sane = true;
+        for (const auto& t : local) {
+            for (float v : t.t) sane = sane && std::isfinite(v);
+            for (float v : t.q) sane = sane && std::isfinite(v);
+            for (float v : t.s) sane = sane && std::isfinite(v);
+        }
+        if (sane && PlayerRoot(f.mount, mountPos, mountQ) && (rootPos - mountPos).Length() < 5.f) {
+            g_seatedTemplate = local;
+            g_seatedFrame.Capture(mountPos, YawOnlyRoot(mountQ), rootPos, rootQ, w.pos[g_skel.head]);
+            LOGI("[ride] seated VR pose captured: body and head anchor follow Torrent's physics frame");
+        }
+    }
+    const bool seatedPose = c.fpPoseMode == "vr" && g_seatedFrame.ready &&
+        g_seatedFrame.Matches(player, f.mount) && (int)g_seatedTemplate.size() == g_skel.boneCount;
     bool vrPose = !f.riding && c.fpPoseMode == "vr" && (int)g_poseTemplate.size() == g_skel.boneCount;
     bool followsHead = !f.riding && !vrPose && c.bodyFollowsHead && c.fpCameraAnchor != "head";   // head anchor: the camera goes to the body, not the body to the camera
     if (f.riding) {
-        // Keep the saved walking stance, but discard a pending capture from before
-        // mounting. Native roots/legs keep the rider seated; only arm IK runs below.
+        // Keep the saved walking stance, but discard a pending capture from before mounting.
         g_templCandAt = 0; g_statPos = f.root; g_statSince = NowSec();
         for (auto& has : g_rootShiftHas) has = 0;
     }
-    if (!vrPose && !followsHead) CalibrateShoulderFlip(rootQ, w);
-    if (vrPose) {
+    if (!vrPose && !seatedPose && !followsHead) CalibrateShoulderFlip(rootQ, w);
+    if (seatedPose) {
+        ApplyBodyPoseTemplate<HkQsTransform>(local, g_seatedTemplate, g_skel.fingers);
+        if (c.bodyFollowsHead) {
+            bodyOff = baseQ.Rotate(f.headRel);
+            const float horiz = std::sqrt(bodyOff.x * bodyOff.x + bodyOff.z * bodyOff.z);
+            if (horiz > c.bodyFollowMaxHorizontal && horiz > 1e-4f) {
+                const float k = c.bodyFollowMaxHorizontal / horiz; bodyOff.x *= k; bodyOff.z *= k;
+            }
+            bodyOff.y = Clamp(bodyOff.y, -c.bodyFollowMaxDown, c.bodyFollowMaxUp);
+            bodyOff.x -= std::sin(f.bodyYaw) * c.bodyBackOffset;
+            bodyOff.z -= std::cos(f.bodyYaw) * c.bodyBackOffset;
+            const Vec3 lo = rootQ.Conj().Rotate(bodyOff);
+            for (int i = 0; i < g_skel.boneCount; ++i) {
+                if (g_skel.parents[i] >= 0 && g_skel.parents[i] < i) continue;
+                local[i].t[0] += lo.x; local[i].t[1] += lo.y; local[i].t[2] += lo.z;
+            }
+        }
+        // Only the rider is stabilized. Torrent's own bones keep their native animation.
+        SafeWrite(pose, local.data(), sizeof(HkQsTransform) * g_skel.boneCount);
+        WorldFromLocal(g_skel, local, rootPos, rootQ, w);
+    }
+    else if (vrPose) {
         // Stance re-capture: standing still for a second, take the animation's own pose as the new template
         // (idle after a run capture, crouch). "The animation's own" = the buffer differs from the
         // template on bones we never write; comparing bones we do write (roots, torso, arms) would see our own
@@ -2067,7 +2128,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     // shift with physics-frame rotations reversed the lean when the frames differed.
     // Editing the model matrix itself also changed axes the game uses for movement,
     // and left its derived/propagated matrices disagreeing with the one we had flipped.
-    if (vrPose || followsHead) {
+    if (vrPose || seatedPose || followsHead) {
         Vec3 renderPos; Quat renderQ;
         if (ModelMatrixRoot(player, renderPos, renderQ)) {
             for (int i = 0; i < g_skel.boneCount; ++i) {
@@ -2087,7 +2148,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     }
     g_status.armsActive = any;
     // Record what we left in the probe bone this pass, and report the fight once per 5 s.
-    bool vrWrote = vrPose;
+    bool vrWrote = vrPose || seatedPose;
     if (probe >= 0 && (any || vrWrote)) {
         const HkQsTransform& t = local[probe];
         g_probeQ = {t.q[0], t.q[1], t.q[2], t.q[3]}; g_probeLastPoint = writePoint;
@@ -2614,16 +2675,6 @@ void HkHandler(MidHookRegs*, void*) {
 }
 
 // ---------------------------------------------------------------- init
-bool VersionIs(const wchar_t* want) {
-    wchar_t path[MAX_PATH]; GetModuleFileNameW(nullptr, path, MAX_PATH);
-    DWORD h; DWORD sz = GetFileVersionInfoSizeW(path, &h); if (!sz) return false;
-    std::vector<uint8_t> buf(sz); if (!GetFileVersionInfoW(path, 0, sz, buf.data())) return false;
-    VS_FIXEDFILEINFO* ffi; UINT len; if (!VerQueryValueW(buf.data(), L"\\", (void**)&ffi, &len)) return false;
-    wchar_t v[64]; swprintf_s(v, L"%u.%u.%u.%u", HIWORD(ffi->dwFileVersionMS), LOWORD(ffi->dwFileVersionMS), HIWORD(ffi->dwFileVersionLS), LOWORD(ffi->dwFileVersionLS));
-    LOGI("[game] eldenring.exe version %S (want %S)", v, want);
-    return wcscmp(v, want) == 0;
-}
-
 // erfps2 binary-mapper patterns: '$' marks a rel32 whose target is the function.
 uint8_t* ResolveCallTarget(const char* pattern, const char* name) {
     std::string pat(pattern); size_t dollar = pat.find('$');
@@ -2813,7 +2864,7 @@ uint8_t* GameERCamWatchTarget(uint32_t* outLen) {
 
 bool GameERInit() {
     g_base = (uint8_t*)GetModuleHandleW(nullptr);
-    g_status.versionOk = VersionIs(L"2.6.2.0");
+    g_status.versionOk = CurrentGameBuild() != GameBuild::Unknown;
     posescan::Install();
 
     // Globals via classic AOBs.
@@ -2835,7 +2886,7 @@ bool GameERInit() {
 
     // Functions: RVA when the version matches, else erfps2's AOBs.
     uint8_t* camStep = nullptr; uint8_t* getDmy = nullptr;
-    if (g_status.versionOk) { camStep = g_base + RVA_CameraStepUpdate; getDmy = g_base + RVA_GetDmyPos; }
+    if (g_status.versionOk) { camStep = g_base + GameRva(RVA_CameraStepUpdate); getDmy = g_base + GameRva(RVA_GetDmyPos); }
     if (!camStep) camStep = ResolveCallTarget("48 8d 05 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 8d 05 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? 48 8d 05 $", "CameraStepUpdate");
     if (!getDmy)  getDmy  = ResolveCallTarget("48 8d 44 24 40 48 89 44 24 28 41 8b 00 89 44 24 40 4c 8d 44 24 40 49 8b ca e8 $", "GetDmyPos");
     g_getDmyPos = (FnGetDmyPos)getDmy;
@@ -2849,27 +2900,27 @@ bool GameERInit() {
     // Camera wall recovery: a global bool the follow cam consults to push the camera out of geometry. The game
     // refreshes it every frame, so the hooks above clear it per frame while first person runs (erfps2 pattern:
     // "0F B6 43 0D 88 05 <rel32>" = the instruction pair that refreshes it).
-    if (g_status.versionOk) g_camWallRecovery = g_base + RVA_CamWallRecovery;
+    if (g_status.versionOk) g_camWallRecovery = g_base + GameRva(RVA_CamWallRecovery);
     else if (uint8_t* hit = AobScan("0F B6 43 0D 88 05 ?? ?? ?? ?? 0F B6 43 10")) g_camWallRecovery = ResolveRipRelative(hit + 4, 2, 6);
     LOGI("[game] cam wall-recovery flag @ %p", (void*)g_camWallRecovery);
 
-    uint8_t* mms = g_status.versionOk ? g_base + RVA_MmsUpdateChrCam : ResolveCallTarget("48 8b cb e8 $ f3 0f 10 4f 08 48 8b cb e8 ?? ?? ?? ?? f3 0f 10 4f 08 48 8b cb e8 ?? ?? ?? ?? 48 8b cb e8", "MmsUpdateChrCam");
-    uint8_t* fol = g_status.versionOk ? g_base + RVA_FollowCamFollow : ResolveCallTarget("4d 8b c6 41 0f 28 cf 48 8b ce e8 $ 0f b6 86 10 03 00 00", "FollowCamFollow");
+    uint8_t* mms = g_status.versionOk ? g_base + GameRva(RVA_MmsUpdateChrCam) : ResolveCallTarget("48 8b cb e8 $ f3 0f 10 4f 08 48 8b cb e8 ?? ?? ?? ?? f3 0f 10 4f 08 48 8b cb e8 ?? ?? ?? ?? 48 8b cb e8", "MmsUpdateChrCam");
+    uint8_t* fol = g_status.versionOk ? g_base + GameRva(RVA_FollowCamFollow) : ResolveCallTarget("4d 8b c6 41 0f 28 cf 48 8b ce e8 $ 0f b6 86 10 03 00 00", "FollowCamFollow");
     if (mms && MH_CreateHook(mms, (void*)&Hook_MmsUpdateChrCam, (void**)&g_origMms) == MH_OK && MH_EnableHook(mms) == MH_OK) LOGI("[game] chr-cam update hooked @ %p", (void*)mms); else LOGW("[game] chr-cam update hook unavailable");
     if (fol && MH_CreateHook(fol, (void*)&Hook_FollowCamFollow, (void**)&g_origFollow) == MH_OK && MH_EnableHook(fol) == MH_OK) LOGI("[game] follow-cam hooked @ %p", (void*)fol); else LOGW("[game] follow-cam hook unavailable");
-    uint8_t* ufol = g_status.versionOk ? g_base + RVA_UpdateFollowCam : nullptr;
+    uint8_t* ufol = g_status.versionOk ? g_base + GameRva(RVA_UpdateFollowCam) : nullptr;
     if (ufol && MH_CreateHook(ufol, (void*)&Hook_UpdateFollowCam, (void**)&g_origUpdFollow) == MH_OK && MH_EnableHook(ufol) == MH_OK) LOGI("[game] follow-cam outer update hooked @ %p", (void*)ufol); else LOGW("[game] follow-cam outer update hook unavailable");
-    uint8_t* umod = g_status.versionOk ? g_base + RVA_UpdateChrModelPos : nullptr;
+    uint8_t* umod = g_status.versionOk ? g_base + GameRva(RVA_UpdateChrModelPos) : nullptr;
     if (umod && MH_CreateHook(umod, (void*)&Hook_UpdateChrModelPos, (void**)&g_origUpdModelPos) == MH_OK && MH_EnableHook(umod) == MH_OK) LOGI("[game] chr model-pos hooked @ %p (final pose write point)", (void*)umod); else LOGW("[game] chr model-pos hook unavailable");
-    uint8_t* ulock = g_status.versionOk ? g_base + RVA_UpdateLockTgt : AobScan(AOB_UpdateLockTgt);
+    uint8_t* ulock = g_status.versionOk ? g_base + GameRva(RVA_UpdateLockTgt) : AobScan(AOB_UpdateLockTgt);
     if (ulock && MH_CreateHook(ulock, (void*)&Hook_UpdateLockTgt, (void**)&g_origUpdLockTgt) == MH_OK && MH_EnableHook(ulock) == MH_OK) LOGI("[game] lock-target update hooked @ %p (cast aim re-forces its lock after it)", (void*)ulock); else LOGW("[game] lock-target update hook unavailable: cast aim cannot hold the lock the game rewrites");
-    uint8_t* cfin = (g_status.versionOk && Cfg().fpCameraFinalWrite) ? g_base + RVA_CamFinalize : nullptr;
+    uint8_t* cfin = (g_status.versionOk && Cfg().fpCameraFinalWrite) ? g_base + GameRva(RVA_CamFinalize) : nullptr;
     if (cfin && MH_CreateHook(cfin, (void*)&Hook_CamFinalize, (void**)&g_origCamFinalize) == MH_OK && MH_EnableHook(cfin) == MH_OK) LOGI("[game] camera finalizer hooked @ %p (our matrix goes back after it)", (void*)cfin); else if (Cfg().fpCameraFinalWrite) LOGW("[game] camera finalizer hook unavailable");
-    uint8_t* peval = (g_status.versionOk && Cfg().fpPoseAfterHavok) ? g_base + RVA_PoseEval : nullptr;
+    uint8_t* peval = (g_status.versionOk && Cfg().fpPoseAfterHavok) ? g_base + GameRva(RVA_PoseEval) : nullptr;
     if (peval && MH_CreateHook(peval, (void*)&Hook_PoseEval, (void**)&g_origPoseEval) == MH_OK && MH_EnableHook(peval) == MH_OK) LOGI("[game] havok pose eval hooked @ %p (post-animation pose reassert)", (void*)peval); else if (Cfg().fpPoseAfterHavok) LOGW("[game] havok pose eval hook unavailable");
 
     // Near-camera dither lookup: RVA on 2.6.2.0, else the function's own bytes (the hit IS the function).
-    uint8_t* udit = g_status.versionOk ? g_base + RVA_UsesDithering
+    uint8_t* udit = g_status.versionOk ? g_base + GameRva(RVA_UsesDithering)
                   : AobScan("48 8B 81 60 10 00 00 48 8B 89 68 10 00 00 48 3B C1 74 0E 44 39 00 74 0C 48 83 C0 18 48 3B C1 75 F2 32 C0 C3");
     if (udit && MH_CreateHook(udit, (void*)&Hook_UsesDithering, (void**)&g_origUsesDithering) == MH_OK && MH_EnableHook(udit) == MH_OK)
         LOGI("[game] near-camera dither lookup hooked @ %p (NearDither=%.2f)", (void*)udit, Cfg().fpNearDither);
@@ -2890,7 +2941,7 @@ bool GameERInit() {
         }
         LOGI("[game] NoUpdateInterface[10] = %p, vtable hook %s", fn, g_status.skeletonHooked ? "installed" : "FAILED");
     }
-    if (Cfg().combatEnabled) CombatInit(g_base, g_status.versionOk);
+    if (Cfg().combatEnabled) CombatInit(g_base, CurrentGameBuild() == GameBuild::V262);
     return g_status.cameraHooked;
 }
 

@@ -70,6 +70,7 @@ add_library(ERVR SHARED
   src/ervr/autopilot.cpp
   src/ervr/debug_keys.cpp
   src/ervr/game_er.cpp
+  src/ervr/game_version.cpp
   src/ervr/patches_er.cpp
   src/ervr/combat.cpp
   src/ervr/params_er.cpp
@@ -95,7 +96,7 @@ set_target_properties(dinput8_proxy PROPERTIES OUTPUT_NAME "dinput8" PREFIX "")
 option(ERVR_BUILD_REGRESSION_TESTS "Build camera, pose, input, and action-queue regression tests" OFF)
 if(ERVR_BUILD_REGRESSION_TESTS)
   enable_testing()
-  foreach(_test head_anchor action_queue pose_frame two_hand_aim two_hand_grip body_pose virtual_pad movement_facing ride_state mounted_rider)
+  foreach(_test head_anchor action_queue pose_frame two_hand_aim two_hand_grip body_pose virtual_pad movement_facing ride_state mounted_rider game_version)
     add_executable(test_${_test} tools/test_${_test}.cpp)
     target_include_directories(test_${_test} PRIVATE src/ervr)
     add_test(NAME ${_test} COMMAND test_${_test})

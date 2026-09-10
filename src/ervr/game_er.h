@@ -4,7 +4,7 @@
 namespace ervr {
 
 // ELDEN RING integration: first-person camera takeover, head hiding, and
-// controller-driven arm bones. Layouts/RVAs target exe 2.6.2.0 (game 1.16.2);
+// controller-driven arm bones. RVA maps target exe 2.6.2.0 and 2.7.1.0;
 // hooks are only installed when the version matches or the AOB fallbacks hit.
 bool GameERInit();
 void GameERShutdown();
@@ -27,7 +27,7 @@ GameERStatus GameERGetStatus();
 // Cheap "are we actually in the world?" check. Unlike GameERGetStatus it resets no counters,
 // so it is safe to call from the input hook every frame.
 bool GameERPlayerActive();
-bool GameERVersionOk();   // exe is exactly 2.6.2.0 (RVA patches valid)
+bool GameERVersionOk();   // an exact executable-version RVA map is available
 bool GameERPlayerDead();        // HP <= 0: a death warp begins THIS frame
 bool GameERForeignCamActive();
 bool GameERSecondEyePending();  // second-eye stash present (gameplay frame) - menus leave a gap  // menu/cutscene camera owns the FOV (map screen = fast-travel window)

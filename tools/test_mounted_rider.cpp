@@ -1,4 +1,5 @@
 #include "mounted_rider.h"
+#include "pose_frame.h"
 #include <array>
 #include <cstring>
 #include <cstdio>
@@ -125,7 +126,45 @@ void VisibilityPreservesOtherFlags() {
     Near(visible.baseOpacity, 1.f, "base character opacity is restored as well as material dithering");
 }
 
+void SeatedBodySharesCameraFrame() {
+    int rider, horse, otherHorse;
+    MountedSeatFrame seat;
+    seat.Observe(&rider, &horse, 10, true);
+    Check(!seat.CanCapture(10.2, true, true), "mount animation must settle before saving a seated pose");
+    Check(!seat.CanCapture(11, false, true), "our previous IK output is not a fresh mounted pose");
+    Check(!seat.CanCapture(11, true, false), "second eye cannot capture a different seated pose");
+    Check(seat.CanCapture(11, true, true), "settled native seated pose can be captured");
+    const Vec3 mountP{2, 3, 4}, riderP{2.1f, 4, 4.2f}, headLocal{0, 0.85f, -0.05f};
+    const Quat mountQ = Quat::YawQ(0.6f), riderQ = mountQ * Quat::AxisAngle({1, 0, 0}, 0.04f);
+    seat.Capture(mountP, mountQ, riderP, riderQ, riderP + riderQ.Rotate(headLocal));
+    Near((seat.headLocal - headLocal).Length(), 0, "seat capture preserves head height without adding standing eye height");
+    for (float yaw : {0.f, 0.7f, -1.5f, 3.14159265f}) {
+        const Vec3 moved{7, 5, -3}; const Quat turn = Quat::YawQ(yaw);
+        Vec3 stableP; Quat stableQ; seat.Root(moved, turn * mountQ, stableP, stableQ);
+        const Vec3 expected = moved + turn.Rotate(riderP - mountP);
+        Near((stableP - expected).Length(), 0, "horse movement and turns carry the same saddle offset");
+        const Vec3 cameraHead = stableP + stableQ.Rotate(headLocal);
+        // Simulate the renderer's later gallop bob/pitch, then rebase the fixed
+        // seated pose into it. The head must still land at the camera anchor.
+        for (float bob : {-0.2f, 0.f, 0.2f}) {
+            const Vec3 renderP = stableP + Vec3{0.08f, bob, -0.12f};
+            const Quat renderQ = stableQ * Quat::AxisAngle({1, 0, 0}, bob);
+            Vec3 t{}; Quat q{};
+            RebasePoseRoot(stableP, stableQ, renderP, renderQ, t, q);
+            const Vec3 drawnHead = renderP + renderQ.Rotate(t + q.Rotate(headLocal));
+            Near((drawnHead - cameraHead).Length(), 0, "late rider animation cannot move the body away from the camera");
+        }
+    }
+    seat.Observe(&rider, nullptr, 12, false);
+    Check(seat.ready, "second eye preserves the current calibration");
+    seat.Observe(&rider, nullptr, 12, true);
+    Check(!seat.ready && !seat.Matches(&rider, &horse), "dismount releases seated pose");
+    seat.Observe(&rider, &otherHorse, 13, true);
+    Check(!seat.ready && !seat.Matches(&rider, &horse), "a replacement mount requires a new seat capture");
+}
+
 int main() {
     OnlyCurrentLivingPairIsSelected(); TurnsStayWithTheMountedPair(); VisibilityPreservesOtherFlags();
+    SeatedBodySharesCameraFrame();
     std::puts("Mounted rider resolution, turning and visibility checks passed.");
 }

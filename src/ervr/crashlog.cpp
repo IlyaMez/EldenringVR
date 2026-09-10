@@ -1,3 +1,4 @@
+#include "game_version.h"
 #include "crashlog.h"
 #include "frame_probe.h"
 #include "log.h"
@@ -134,20 +135,20 @@ LONG CALLBACK Veh(EXCEPTION_POINTERS* xp) {
     // install-time memcmp read ciphertext and disarmed the fix (15:15 run). At the moment
     // of the fault the bytes ARE the executing code - compare then.
     if (code == EXCEPTION_ACCESS_VIOLATION &&
-        (uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + kRvaTransitionNullCall) {
+        (uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + GameRva(kRvaTransitionNullCall)) {
         // Every condition below was verifiably TRUE in the 16:43 crash dump, yet the eat
         // did not happen - so when it fails again, say exactly which check refused.
         const bool rcx0 = xp->ContextRecord->Rcx == 0;
-        const int cmp = CodeBytesMatch(g_base + kRvaTransitionNullCall, kNullCallBytes, sizeof(kNullCallBytes)) ? 0 : 1;
+        const int cmp = CodeBytesMatch(g_base + GameRva(kRvaTransitionNullCall), kNullCallBytes, sizeof(kNullCallBytes)) ? 0 : 1;
         if (!rcx0 || cmp != 0)
             LOGE("[crash] null-call site hit but NOT eaten: rcx=%llx cmp=%d base=%p addr=%p",
                  (unsigned long long)xp->ContextRecord->Rcx, cmp, (void*)g_base,
                  xp->ExceptionRecord->ExceptionAddress);
     }
     if (code == EXCEPTION_ACCESS_VIOLATION &&
-        (uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + kRvaTransitionNullCall &&
+        (uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + GameRva(kRvaTransitionNullCall) &&
         xp->ContextRecord->Rcx == 0 &&
-        (CodeBytesMatch(g_base + kRvaTransitionNullCall, kNullCallBytes, sizeof(kNullCallBytes)) ||
+        (CodeBytesMatch(g_base + GameRva(kRvaTransitionNullCall), kNullCallBytes, sizeof(kNullCallBytes)) ||
          GameERVersionOk())) {
         const long n = g_nullCallEats.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= 32)
@@ -158,8 +159,8 @@ LONG CALLBACK Veh(EXCEPTION_POINTERS* xp) {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (code == EXCEPTION_ACCESS_VIOLATION &&
-        (uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + kRvaTransitionMovss &&
-        (CodeBytesMatch(g_base + kRvaTransitionMovss, kMovssBytes, sizeof(kMovssBytes)) ||
+        (uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + GameRva(kRvaTransitionMovss) &&
+        (CodeBytesMatch(g_base + GameRva(kRvaTransitionMovss), kMovssBytes, sizeof(kMovssBytes)) ||
          GameERVersionOk())) {
         const long n = g_nullCallEats.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= 32)
@@ -174,7 +175,7 @@ LONG CALLBACK Veh(EXCEPTION_POINTERS* xp) {
         g_selfTestSeen.fetch_add(1, std::memory_order_relaxed);
         return EXCEPTION_CONTINUE_SEARCH;   // counted, not logged as a crash; __except eats it
     }
-    if ((uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + kRvaDlPanicNullWrite)
+    if ((uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + GameRva(kRvaDlPanicNullWrite))
         return EXCEPTION_CONTINUE_SEARCH;   // main.cpp's PanicVeh owns this one
     // A fault raised while we are already reporting one would recurse until the stack dies.
     static thread_local bool s_inside = false;
