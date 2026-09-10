@@ -184,20 +184,26 @@ own OpenXR session.
   move the view, walking around the room is absorbed.
 * **Body pose** (`PoseMode=vr`, default) – on foot, the rig never plays a game animation. A standing pose is captured from
   the animation system once (at skeleton discovery, re-captured whenever you stand still for a second, so
-  idle/crouch/sit stances still come through as discrete poses) and written over the live Havok body pose on
+  idle/crouch stances still come through as discrete poses) and written over the live Havok body pose on
   every pose-hook call. Stance changes preserve the initial head-to-eye height offset and update camera height
   immediately, so a new pose does not leave the body vertically detached. Terrain movement is never smoothed.
   The pose is yawed to the body yaw; the arm IK and spine twist go on top. Root motion is untouched:
   rolls, attacks and running still *displace* the character (and the camera rides along 1:1), they just never pose
   the rig or whip the camera around, because the head bone the camera anchors to no longer moves relative to the
   root. Finger joints retain the game's current equipment grip instead of freezing an occasional open-hand
-  animation until the next stance capture. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
+  animation until the next stance capture. Menus such as Sites of Grace suspend stance capture until three seconds
+  after closing, preserving the saved walking pose through sitting and stand-up. The VR body and its head anchor
+  keep using that pose throughout. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
 * **Torrent** – mounting, riding and dismounting use the game's seated body and facing, with controller arm IK.
   The camera follows the live rider head using the rendered model transform, including late updates in the same
   frame. This applies with either camera anchor and ignores bob suppression while riding, so standing eye height
   is not added above the saddle. The walking template is preserved and restored after dismounting; loading a
   save already on Torrent does not capture the seated pose as a walking stance. Body shifting, spine twist,
   facing pins and direct locomotion stand down throughout the ride. Head tracking remains active.
+  Right-stick turns rotate Torrent and the seated rider together with the view, once per simulation frame;
+  physical head turns remain free look. The active horse's draw visibility and opacity are restored separately
+  from `NearDither`, preserving its shadow. These changes require a validated current rider/horse pair and
+  stand down during summon/dismount animations and mount death.
 * **Body facing** (`FaceCamera` + `FaceCameraMode`) – keeps movement in strafe mode so the arms can always reach.
   `strafe` (default with `PoseMode=vr`) only sets the ChrCtrl "strafing" flag and leaves the game's lock-on state
   alone. The old way (`lock`) forced `Chr_IsLockedOn` onto a fake far-away point every frame — which engages the
@@ -447,7 +453,9 @@ put you in. While two-handed:
 
 * the free hand's arm **rides the weapon shaft** where it took hold (`TwoHandPinHand`): its target is the weapon
   hand's (inertial, lagging) controller plus the grab distance along the weapon axis, so the hand stays on the
-  haft while the greatsword catches up;
+  haft while the greatsword catches up. `TwoHandPinOrient=true` keeps the free hand's wrist angle relative
+  to the weapon when the grab registers, then turns it with the weapon. Release and re-grab to choose a
+  new angle, or set it to `false` to follow that controller's live orientation;
 * the free hand never swings on its own, and its grip button is the grab — not the skill (LT) it is mapped to;
 * swings use the **two-handed attack rows**. They differ from the one-handed ones (`SlotLight2H`/`SlotHeavy2H`):
   with `Mode=auto` + `Learn=true` the first two-handed light / heavy swing presses the button once so the game plays

@@ -345,7 +345,7 @@ struct Config {
     float twoHandGrabMin = -0.15f;        // m along the hilt axis from the weapon hand's controller, positive = toward the pommel (where the second hand sits)
     float twoHandGrabMax = 0.45f;         // ... negative = up toward the blade
     bool  twoHandPinHand = true;          // while two-handing the free hand's arm rides the weapon shaft (follows the inertial weapon)
-    bool  twoHandPinOrient = true;        // ...and takes the weapon controller's orientation too, gripping the hilt like the main hand (else it keeps its own controller's free orientation)
+    bool  twoHandPinOrient = true;        // ...and keeps its grab-time wrist angle relative to the weapon (else follows its own controller's free orientation)
     float twoHandPinSideOffset = 0.03f;   // m the pinned hand sits off the hilt axis (perpendicular, so the wrist clears the shaft); negate to flip sides
     int   twoHandLightJudgeId = 200, twoHandHeavyJudgeId = -1;   // two-handed attack rows (R1 2H = 200 learned 2026-08-25; -1 = learn in auto mode, else the one-handed rows)
     // Skill (Ash of War) while two-handed: TwoHandSkillButton fires it. "effect" replays the TAE events the

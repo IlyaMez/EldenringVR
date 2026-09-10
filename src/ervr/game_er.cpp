@@ -11,6 +11,7 @@
 #include "body_pose.h"
 #include "movement_facing.h"
 #include "ride_state.h"
+#include "mounted_rider.h"
 #include "two_hand_aim.h"
 #include "game_memory.h"
 #include "config.h"
@@ -436,6 +437,80 @@ void ApplyHeadVisibility(uint8_t* player, bool hideHead, bool hideSheathed) {
     }
 }
 
+MountedTurnQueue g_mountedTurns;
+uint8_t* CurrentTorrent(uint8_t* player) {
+    if (!g_status.versionOk || !player) return nullptr;
+    uint8_t* world = g_worldChrManPtr ? Deref(g_worldChrManPtr) : nullptr;
+    return MountedTorrent(player, world, SafeRead);
+}
+
+bool LivingMount(uint8_t* mount) {
+    uint8_t flags = 0;
+    uint8_t* modules = mount ? Deref(mount + off::Chr_Modules) : nullptr;
+    uint8_t* data = modules ? Deref(modules) : nullptr;
+    int32_t hp = 0;
+    return data && Deref(data + 8) == mount && RD(data + 0x138, hp) && hp > 0 &&
+           RD(mount + 0x1C5, flags) && !(flags & 0x80);
+}
+
+// The close VR view needs the active horse as well as the rider. NearDither
+// only handles a material lookup; it does not restore a culled display entity
+// or character opacity. Never touch other summons or a mount/dismount fade.
+void ApplyTorrentVisibility(uint8_t* mount) {
+    if (!mount || WorldDyingNow() || !LivingMount(mount)) return;
+    uint8_t* model = Deref(mount + 0x50);
+    uint8_t* display = model ? Deref(model + off::MI_DispEntity) : nullptr;
+    if (!display) return;
+    MountedVisibility before;
+    if (!RD(mount + 0x1C4, before.frustum) || !RD(mount + 0x1C5, before.render) ||
+        !RD(display + off::Disp_Flags1, before.display) ||
+        !RD(mount + 0x238, before.opacity) || !RD(mount + 0x23C, before.previousOpacity) ||
+        !RD(mount + off::Chr_BaseTransp, before.baseOpacity)) return;
+    for (float a : {before.opacity, before.previousOpacity, before.baseOpacity})
+        if (!std::isfinite(a) || a < 0.f || a > 1.f) return;
+    const MountedVisibility visible = VisibleMountedTorrent(before);
+    if (before.frustum != visible.frustum) WR(mount + 0x1C4, visible.frustum);
+    if (before.render != visible.render) WR(mount + 0x1C5, visible.render);
+    if (before.display != visible.display) WR(display + off::Disp_Flags1, visible.display);
+    if (before.opacity != visible.opacity) WR(mount + 0x238, visible.opacity);
+    if (before.previousOpacity != visible.previousOpacity) WR(mount + 0x23C, visible.previousOpacity);
+    if (before.baseOpacity != visible.baseOpacity) WR(mount + off::Chr_BaseTransp, visible.baseOpacity);
+    static double s_last = 0;
+    const double now = NowSec();
+    if (now - s_last > 5.0) {
+        s_last = now;
+        LOGI("[ride] Torrent %p draw: frustum %02X render %02X display %08X opacity %.3f/%.3f base %.3f -> visible",
+             mount, before.frustum, before.render, before.display, before.opacity, before.previousOpacity, before.baseOpacity);
+    }
+}
+
+void ApplyMountedTurn(uint8_t* player, uint8_t* mount, float radians) {
+    if (!mount || radians == 0.f || !std::isfinite(radians) || WorldDyingNow() || !LivingMount(mount)) return;
+    uint8_t* horsePh = Physics(mount); uint8_t* riderPh = Physics(player);
+    if (!horsePh || !riderPh || Deref(horsePh + 8) != mount || Deref(riderPh + 8) != player) return;
+    float horse[12], rider[16]; // current/target quaternions, position; rider also previous position
+    if (!SafeRead(horsePh + off::Phys_Orientation, horse, sizeof(horse)) ||
+        !SafeRead(riderPh + off::Phys_Orientation, rider, sizeof(rider))) return;
+    for (float v : horse) if (!std::isfinite(v)) return;
+    for (float v : rider) if (!std::isfinite(v)) return;
+    Quat horseQ{horse[0], horse[1], horse[2], horse[3]}, riderQ{rider[0], rider[1], rider[2], rider[3]};
+    if (std::fabs(horseQ.Norm() - 1.f) > 0.05f || std::fabs(riderQ.Norm() - 1.f) > 0.05f) return;
+    const Vec3 horseP{horse[8], horse[9], horse[10]};
+    Vec3 riderP{rider[8], rider[9], rider[10]};
+    if ((riderP - horseP).Length() > 5.f) return;
+    TurnRiderAboutMount(horseP, radians, horseQ, riderP, riderQ);
+    const Quat turn = Quat::YawQ(radians);
+    const Quat horseTarget = (turn * Quat{horse[4], horse[5], horse[6], horse[7]}).Normalized();
+    const Quat riderTarget = (turn * Quat{rider[4], rider[5], rider[6], rider[7]}).Normalized();
+    const Vec3 riderPrevious = horseP + turn.Rotate(Vec3{rider[12], rider[13], rider[14]} - horseP);
+    const float horseRot[8] = {horseQ.x, horseQ.y, horseQ.z, horseQ.w, horseTarget.x, horseTarget.y, horseTarget.z, horseTarget.w};
+    const float riderState[16] = {riderQ.x, riderQ.y, riderQ.z, riderQ.w, riderTarget.x, riderTarget.y, riderTarget.z, riderTarget.w,
+        riderP.x, riderP.y, riderP.z, rider[11], riderPrevious.x, riderPrevious.y, riderPrevious.z, rider[15]};
+    SafeWrite(horsePh + off::Phys_Orientation, horseRot, sizeof(horseRot));
+    SafeWrite(riderPh + off::Phys_Orientation, riderState, sizeof(riderState));
+    LOGD("[ride] stick turn %.2f deg applied to Torrent and rider", Rad2Deg(radians));
+}
+
 // ---------------------------------------------------------------- skeleton
 struct Skeleton {
     uint8_t* chr = nullptr;
@@ -464,8 +539,10 @@ Skeleton g_skel;
 // ever shows on the body - rolls, attacks and runs still *displace* the character (root motion goes through
 // the physics module, which we do not touch) but the rig itself stays 1:1 with the VR pose. The template is
 // captured at skeleton build (whatever the animation held right then) and re-captured whenever you stand
-// still for a second, so stance changes (idle, crouch, sitting) still come through as discrete poses.
+// still for a second, so idle/crouch stances come through as discrete poses.
+// Grace/menu poses must never replace this walking template.
 std::vector<HkQsTransform> g_poseTemplate;
+BodyPoseCaptureGuard g_poseCaptureGuard;
 Vec3 g_statPos{}; double g_statSince = 0; double g_templLastCapture = 0;
 // Stance re-capture settle guard: candidate snapshot of a pose that differs from the template, only promoted to
 // template once it has held still for a while (see UpdateArms) - a transient animation must never become the template.
@@ -891,6 +968,8 @@ struct FrameInfo {
     bool valid = false;
     bool lockedOn = false; // a real enemy is locked on
     bool riding = false;  // mounting/riding/dismounting: native seated body and physics
+    bool capturePose = false; // menu/exit poses cannot replace the template; this never gates rendering
+    uint8_t* mount = nullptr; // validated, fully mounted Torrent (null during transitions)
     Vec3 root; Quat rootQ; // character root the whole frame is built on (model matrix, physics fallback)
     Vec3 anchor;         // eye anchor in game world (no HMD offset)
     float baseYaw = 0;   // game camera yaw the HMD is relative to
@@ -1071,6 +1150,11 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
     Vec3 root; Quat rootQ;
     const RideState ride = ReadRideState(player, SafeRead);
     f.riding = ride.NativeBody();
+    const uintptr_t poseOwner = reinterpret_cast<uintptr_t>(player);
+    g_poseCaptureGuard.Update(poseOwner, CombatMenuActive(), NowSec(), FramePumpCurrentPass() != 2);
+    f.capturePose = !f.riding && g_poseCaptureGuard.CanCapture(poseOwner);
+    f.mount = ride.valid && ride.active ? CurrentTorrent(player) : nullptr;
+    if (FramePumpCurrentPass() != 2) g_mountedTurns.SetMount(f.mount);
     static std::atomic<int> s_rideMode{-1};
     const int rideMode = !ride.valid ? 2 : (ride.active ? 1 : 0);
     if (s_rideMode.exchange(rideMode) != rideMode)
@@ -1654,7 +1738,8 @@ bool OursBone(int i) {
 // Snapshot the animation's current pose as the PoseMode=vr template. Only ever called when the pose buffer
 // holds the game's own output (skeleton build, or a fresh buffer while standing still), never our writes.
 bool CaptureTemplate(uint8_t* chr, const char* why) {
-    if (ReadRideState(chr, SafeRead).NativeBody()) return false; // never save a seated pose as the walking template
+    if (FramePumpCurrentPass() == 2 || !g_poseCaptureGuard.CanCapture(reinterpret_cast<uintptr_t>(chr)) ||
+        ReadRideState(chr, SafeRead).NativeBody()) return false;
     if (g_skel.boneCount <= 0 || !g_skel.hkb) return false;
     HkQsTransform* pose = g_skel.LivePose(); if (!pose) return false;
     std::vector<HkQsTransform> t(g_skel.boneCount);
@@ -1720,7 +1805,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     // PoseMode=vr: the rig is the captured template, yawed to BodyYaw, every tick - the animation system can
     // write whatever it wants into the pose buffer, we replace all of it. Root motion (the character's actual
     // displacement, physics module) is untouched, so rolls and attacks still move you - they just don't pose you.
-    if (!f.riding && FramePumpCurrentPass() != 2 && c.fpPoseMode == "vr" && (int)g_poseTemplate.size() != g_skel.boneCount) {
+    if (f.capturePose && FramePumpCurrentPass() != 2 && c.fpPoseMode == "vr" && (int)g_poseTemplate.size() != g_skel.boneCount) {
         // Build-time capture failed (pose buffer not readable yet): retry, else vr mode would silently never start.
         double nowT = NowSec();
         if (nowT - g_templLastCapture > 2.0) {
@@ -1744,7 +1829,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     if (!vrPose && !followsHead) CalibrateShoulderFlip(rootQ, w);
     if (vrPose) {
         // Stance re-capture: standing still for a second, take the animation's own pose as the new template
-        // (idle after a run capture, crouch, sitting). "The animation's own" = the buffer differs from the
+        // (idle after a run capture, crouch). "The animation's own" = the buffer differs from the
         // template on bones we never write; comparing bones we do write (roots, torso, arms) would see our own
         // previous output as "fresh animation" and bake our body-yaw rotation into the template (spinning rig).
         //
@@ -1757,7 +1842,11 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
         // back as the template we wrote, which looked like "stance returned to normal" and kept clearing the
         // candidate a real stance change had just planted.
         double nowT = NowSec();
-        if ((f.root - g_statPos).Length() > 0.03f) { g_statPos = f.root; g_statSince = nowT; g_templCandAt = 0; }
+        // A planted root also occurs during rest/stand-up. Discard any candidate
+        // through the menu and exit cooldown, without changing the pose we render.
+        if (!f.capturePose || (f.root - g_statPos).Length() > 0.03f) {
+            g_statPos = f.root; g_statSince = nowT; g_templCandAt = 0;
+        }
         // A new stance belongs to the simulation pass; both eyes must render that same template.
         else if (FramePumpCurrentPass() != 2 && poseForeign && nowT - g_statSince > 1.0 && nowT - g_templLastCapture > 3.0 && nowT - g_templCheckAt > 0.25) {
             g_templCheckAt = nowT;
@@ -1936,7 +2025,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     DebugKeysHandRotX(&handRotX);   // Numpad 6/9 live calibration wins while active
     Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
     bool any = false;
-    Vec3 tp[2]; Quat tq[2]; Quat tcq[2]; Vec3 tcf[2], tcu[2]; bool tok[2] = {false, false};
+    Vec3 tp[2]; Quat tq[2]; Vec3 tcf[2], tcu[2]; bool tok[2] = {false, false};
     for (int h = 0; h < 2; ++h) {
         if (!f.handValid[h]) continue;
         Quat cq = (baseQ * f.handQ[h] * calib).Normalized();          // controller orientation in game world
@@ -1945,22 +2034,25 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
         if (g_skel.handAxesOk[h]) q = Quat::MapPairs(g_skel.handFwd[h], g_skel.handThumb[h], cf, cu);   // hand-local -> world
         Vec3 p = f.anchor + baseQ.Rotate(f.handP[h] * c.handScale) - cf * c.handBackOffset;
         if (c.handOrigin == "head") p = p + headOff;   // hands are head-relative: re-add where the view actually is
-        tp[h] = p; tq[h] = q; tcq[h] = cq; tcf[h] = cf; tcu[h] = cu; tok[h] = true;
+        tp[h] = p; tq[h] = q; tcf[h] = cf; tcu[h] = cu; tok[h] = true;
     }
     // Two-handing: the free hand rides the weapon hand's hilt where it took hold - toward the pommel,
     // i.e. down the controller's handle (-up) or back along its aim (-forward) - so it follows the
-    // (inertial, lagging) weapon instead of drifting off the shaft. It also takes the WEAPON
-    // controller's orientation (mapped through its own hand's bone axes, so a left hand still grips
-    // like a left hand) instead of its own free-floating controller, and sits TwoHandPinSideOffset m
-    // off the hilt axis so the wrist clears the shaft instead of skewering it.
+    // (inertial, lagging) weapon instead of drifting off the shaft. Its orientation keeps the
+    // wrist's angle relative to the weapon when the grab registered, mapped through its own
+    // hand's bone axes. It sits TwoHandPinSideOffset m off the hilt axis so the wrist clears it.
     {
         int pin = -1, wep = -1; float along = 0.f; bool handle = true;
-        if (CombatTwoHandPin(&pin, &wep, &along, &handle) && pin >= 0 && wep >= 0 && tok[pin] && tok[wep]) {
+        TwoHandGripOrientation grip;
+        if (CombatTwoHandPin(&pin, &wep, &along, &handle, &grip) && pin >= 0 && wep >= 0 && tok[pin] && tok[wep]) {
             Vec3 axis = handle ? tcu[wep] : tcf[wep];                            // up the blade; pommel = -axis
             Vec3 side = (handle ? tcf[wep] : tcu[wep]).Cross(axis).Normalized();   // lateral, perpendicular to the hilt (sign verified in-game 2026-08-31)
             tp[pin] = tp[wep] + axis * -along + side * c.twoHandPinSideOffset;
-            if (c.twoHandPinOrient)
-                tq[pin] = g_skel.handAxesOk[pin] ? Quat::MapPairs(g_skel.handFwd[pin], g_skel.handThumb[pin], tcf[wep], tcu[wep]) : tcq[wep];
+            if (c.twoHandPinOrient) {
+                const Quat cq = grip.InGame(baseQ * f.handQ[wep], calib);
+                tq[pin] = g_skel.handAxesOk[pin] ? Quat::MapPairs(g_skel.handFwd[pin], g_skel.handThumb[pin],
+                                                               cq.Rotate({0, 0, 1}), cq.Rotate({0, 1, 0})) : cq;
+            }
         }
     }
     for (int h = 0; h < 2; ++h) {
@@ -2164,6 +2256,7 @@ bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
         }
     }
     ApplyHeadVisibility(player, c.fpHideHead, c.fpHideSheathed);
+    ApplyTorrentVisibility(f.mount);
     if (c.fpCameraMode == "passthrough") { skipOriginal = false; return false; }
     if (c.fpCameraMode == "post" && !afterOriginal) { skipOriginal = false; return false; }   // come back after the original
     if (afterOriginal) {
@@ -2277,7 +2370,17 @@ uint64_t __fastcall Hook_CamFinalize(void* a, void* b, void* c, void* d) {
 // pose written here is what the renderer actually skins.
 void UpdateChrModelPosBody(void* ctrl, bool post) {
     uint8_t* player = MainPlayer();
-    if (!player || Deref(player + off::Chr_ChrCtrl) != (uint8_t*)ctrl) return;
+    if (!player) return;
+    const bool isPlayer = Deref(player + off::Chr_ChrCtrl) == (uint8_t*)ctrl;
+    uint8_t* mount = g_moveRiding.load() ? CurrentTorrent(player) : nullptr;
+    const bool isMount = mount && Deref(mount + off::Chr_ChrCtrl) == (uint8_t*)ctrl;
+    if (!isPlayer && !isMount) return;
+    // Whichever member of the pair rebuilds first consumes the stick turn. Both
+    // native model updates then see the new physics transforms in the same frame.
+    if (!post)
+        ApplyMountedTurn(player, mount, g_mountedTurns.Take(mount, g_frame, FramePumpCurrentPass() != 2));
+    ApplyTorrentVisibility(mount);
+    if (!isPlayer) return;
     if (post) {
         // Skew probe: the model matrix the rig renders with this frame vs the root our camera write used.
         float p[4];
@@ -2302,7 +2405,7 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
     if (!post && Cfg().fpFaceCameraMode == "strafe") ReassertFaceCamera(player, f);
     // Keep the rebuilt model matrix native. UpdateArms expresses its solved pose in
     // that frame, so visual facing no longer changes the game's movement axes.
-    UpdateArms(player, f, 2);
+    if (Cfg().handTracking) UpdateArms(player, f, 2);
     // Camera last, from the model matrix that was just rebuilt - the very transform the rig renders with. The
     // camera step runs earlier in the frame, so a camera written there sits on a root that is up to a frame of
     // motion away from where the body ends up: the body then appears to slide toward a camera that looks static
@@ -2359,7 +2462,7 @@ void __fastcall Hook_UpdateChrModelPos(void* ctrl) {
     // Pre-write as well: the buffer measured OURS after this hook still rendered the layer's animation, so the
     // renderer's pose consumption happens INSIDE this function - the pose present at entry is what gets skinned.
     // The upper-body layer ran just before us; put ours back first, then let the original consume it.
-    bool act = !g_tripped && FirstPersonActive() && Cfg().handTracking;
+    bool act = !g_tripped && FirstPersonActive() && (Cfg().handTracking || g_moveRiding.load());
     if (act) { __try { UpdateChrModelPosBody(ctrl, false); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; act = false; } }
     g_origUpdModelPos(ctrl);
     if (act) { __try { UpdateChrModelPosBody(ctrl, true); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; } }
@@ -2940,7 +3043,7 @@ void GameERTick() {
     VRTracking tr; VRInputState in;
     bool ok = GetLatestVRState(tr, in);
     { std::lock_guard<std::mutex> g(g_vrMtx); g_vrValid = ok; if (ok) { g_vrTr = tr; g_vrIn = in; } }
-    if (!MainPlayer() || !Cfg().fpEnabled) { g_moveActive.store(false); g_camYawInit = false; g_bodyYawInit = false; }
+    if (!MainPlayer() || !Cfg().fpEnabled) { g_moveActive.store(false); g_camYawInit = false; g_bodyYawInit = false; g_mountedTurns.SetMount(nullptr); }
     ApplyStatCheat();
 }
 
@@ -2948,6 +3051,7 @@ void GameERAddCameraYaw(float radians) {
     if (radians == 0.f || !g_camYawInit) return;
     if (g_moveLocked.load()) return;   // locked on: the game aims the view, our turn input would fight it
     g_camYaw.store(WrapPi(g_camYaw.load() + radians));
+    if (g_moveRiding.load()) g_mountedTurns.Add(radians);
     float e = g_pendingYawPivot.load();
     while (!g_pendingYawPivot.compare_exchange_weak(e, e + radians)) {}
 }
@@ -2955,6 +3059,7 @@ void GameERAddCameraYaw(float radians) {
 void GameERAddBodyYaw(float radians) {
     if (radians == 0.f || !g_bodyYawInit) return;
     if (g_moveLocked.load()) return;   // locked on: the game aims the body
+    if (g_moveRiding.load()) { GameERAddCameraYaw(radians); return; } // keep the saddle and view together
     g_bodyStickYaw.store(WrapPi(g_bodyStickYaw.load() + radians));
 }
 

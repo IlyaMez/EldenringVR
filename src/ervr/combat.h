@@ -1,5 +1,6 @@
 #pragma once
 #include "vr_backend.h"
+#include "two_hand_grip.h"
 #include <cstdint>
 
 namespace ervr {
@@ -35,14 +36,17 @@ uint16_t CombatHeldButtons();
 // refuses weapon changes while it does). CombatMenuOpen returns the gate's current state.
 void CombatSetMenuOpen(bool open);
 bool CombatMenuOpen();
+bool CombatMenuActive(); // published menu state, independent of the combat MenuGate option
 // Buttons combat FORCES on the pad this tick - the game's own chords (Y + RB/LB two-hand toggle, the
 // skill button, a learn press) - applied AFTER the attack-button block. Worker thread; drives the
 // chord timing, so call it exactly once per pad update.
 uint16_t CombatForcedButtons(double now);
 // Off-hand ride: while two-handing, the free hand's arm target sits on the weapon hand's hilt axis,
 // `alongToPommel` metres from that controller toward the pommel - down the controller's handle
-// (-Y) when `handleAxis`, else back along its aim axis (+Z). game_er applies it. False otherwise.
-bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool* handleAxis);
+// (-Y) when `handleAxis`, else back along its aim axis (+Z). Optional `grip` receives
+// the controller orientation captured at the grab. game_er applies it. False otherwise.
+bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool* handleAxis,
+                      TwoHandGripOrientation* grip = nullptr);
 // Weight the hand is carrying (EquipParamWeapon weight; both hands share it when two-handing;
 // 0 = empty/unknown). Drives the inertial arm in game_er.
 float CombatHandWeight(int hand);

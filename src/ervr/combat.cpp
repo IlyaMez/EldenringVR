@@ -332,6 +332,7 @@ struct TwoHandState {
     int  weaponHand = HandRight;     // whose weapon is held...
     int  pinHand = HandLeft;         // ...by which free hand
     float along = 0.f;               // m along the weapon axis (from the weapon hand's controller) where it was grabbed
+    TwoHandGripOrientation grip;     // supporting wrist's angle relative to the weapon at that grab
     bool inZone = false;             // the free hand is on the shaft right now (its grip is the grab, not the skill button)
     bool owned = false;              // ERVR put the game into two-hand; only then does it take it back out
 } g_two;                             // under g_mtx
@@ -1668,6 +1669,7 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
                        : nullptr;
             if (!s_geoBlock) {
                 s.want = true; s.along = along;
+                s.grip.Capture(tr.hand[w].rot, tr.hand[1 - w].rot);
                 LOGI("[combat] two-hand: %s hand took the %s weapon %.2f m down the hilt (%.2f m off axis)", HandName(1 - w), HandName(w), along, perp);
             }
         }
@@ -2066,13 +2068,15 @@ uint16_t CombatForcedButtons(double now) {
     r.phase = 0; return 0;
 }
 
-bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool* handleAxis) {
+bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool* handleAxis,
+                      TwoHandGripOrientation* grip) {
     const Config& c = Cfg();
     if (!c.twoHandPinHand) return false;
     const int style = g_armStyleShared.load();
     std::lock_guard<std::mutex> g(g_mtx);
     if (!g_two.want || !TwoHandedStyle(style) || TwoHandedWeaponHand(style) != g_two.weaponHand) return false;
     *pinHand = g_two.pinHand; *weaponHand = g_two.weaponHand; *alongToPommel = g_two.along; *handleAxis = c.twoHandAxis != "forward";
+    if (grip) *grip = g_two.grip;
     return true;
 }
 
@@ -2094,7 +2098,8 @@ void CombatSetMenuOpen(bool open) {
     if (g_menuOpen.exchange(v) != v && g_status.taeHooked)
         LOGD("[combat] menu %s: physical combat %s", open ? "open" : "closed", open ? "standing down" : "re-armed");
 }
-bool CombatMenuOpen() { return Cfg().combatMenuGate && g_menuOpen.load() != 0; }
+bool CombatMenuActive() { return g_menuOpen.load() != 0; }
+bool CombatMenuOpen() { return Cfg().combatMenuGate && CombatMenuActive(); }
 
 uint16_t CombatHeldButtons() {
     const Config& c = Cfg();

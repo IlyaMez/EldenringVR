@@ -5,6 +5,25 @@
 
 namespace ervr {
 
+// Only controls saving a new stance. Rendering always keeps the existing VR
+// template, including while menus are open and during their exit animations.
+// Do not depend on movement-cancel flags: they can be closed at skeleton build
+// and throughout idle, which previously prevented ANY template being captured.
+struct BodyPoseCaptureGuard {
+    static constexpr double MenuExitSeconds = 3.0;
+    uintptr_t player = 0;
+    double resumeAt = 0;
+    bool captureAllowed = false;
+
+    void Update(uintptr_t owner, bool menu, double now, bool simulationPass) {
+        if (!simulationPass) return; // both eyes use the simulation's decision
+        if (owner != player) { player = owner; resumeAt = 0; }
+        if (menu) resumeAt = now + MenuExitSeconds;
+        captureAllowed = owner && !menu && now >= resumeAt;
+    }
+    bool CanCapture(uintptr_t owner) const { return owner && owner == player && captureAllowed; }
+};
+
 inline bool IsFingerBone(std::string_view name) {
     return name.starts_with("L_Finger") || name.starts_with("R_Finger");
 }
