@@ -23,10 +23,10 @@ release workflow and published on GitHub Releases and Nexus Mods.
 * Co-op connect guard: ERVR watches the game's multiplayer join state machine
   (`CSSessionManagerImp` lobby/protocol state) and logs every transition. While a session is being
   created, joined or left, the second eye holds and ERVR's camera/pose/combat writes stand down,
-  as on a loading screen. Inside a session (host or client) the second pass uses the SAFE set.
+  as on a loading screen. Verified with a real join and leave.
 * Co-op roster guard: another player's character appearing, leaving or loading holds the second
-  eye for `[VR] Pass2CoopGraceSeconds` (4 s), and while anyone else is in the world the second
-  pass uses the SAFE keep set (`Pass2CoopSafe`).
+  eye for `[VR] Pass2CoopGraceSeconds` (4 s). Full stereo depth in between (`Pass2CoopSafe`, off:
+  the SAFE set gave both eyes the same image in a session).
 * The OpenXR session now ends when the game destroys its D3D12 device, instead of staying bound
   through shutdown: Virtual Desktop's runtime crashed during process exit with it still alive.
 * Enemy watcher counts only HP drops the player caused (`ChrIns.last_hit_by`), so a partner's or a

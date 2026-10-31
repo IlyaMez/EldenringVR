@@ -569,9 +569,12 @@ struct Config {
     // load state (GameERCoopRoster). A Seamless Co-op connect raises none of the warp/loading
     // signals, so this is its transition guard. Hot-reloads.
     float vrPass2CoopGraceSeconds = 4.f;
-    // While any other player is in the world, pass 2 uses the SAFE keep set (no MoveMap
-    // family walking grids their characters stream through; finalize replay keeps depth).
-    bool vrPass2CoopSafe = true;
+    // While any other player is in the world (or a session exists), pass 2 uses the SAFE keep
+    // set. OFF by default: measured 2026-10-31 in a real session, SAFE gave NO depth - the
+    // finalize replay never put the second eye's camera on screen (census finalize n/0, the
+    // user saw the same image in both eyes). The join, leave and load moments that crashed are
+    // held by the session/roster guards instead; steady co-op streams characters like enemies.
+    bool vrPass2CoopSafe = false;
     // Replay the game's camera finalizer in pass 2 whenever the SAFE set is live, so the
     // second-eye camera reaches the renderer without the MoveMap family. The depth path
     // for the SAFE set; see HookCameraStepImpl.
