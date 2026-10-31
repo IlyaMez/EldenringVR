@@ -1,4 +1,4 @@
-0.4.0 (2026-09-10) - first public release
+0.4.0 (2026-09-10) - second public release
 
 - Own OpenXR session (Oculus / VDXR / SteamVR), true stereo with both eyes at the same simulation instant, cinema fallback for menus and cutscenes
 - HUD lifted out of the frame onto its own floating panel at headset resolution

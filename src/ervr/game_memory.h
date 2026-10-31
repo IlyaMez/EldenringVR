@@ -35,6 +35,10 @@ void GameHandAimTick(const VRTracking& tr, const VRInputState& in, double now);
 // "WorldChrMan"...), found through the game's own null-check getter that panics with the
 // class name. Version-proof: no per-class AOB. nullptr if the name or getter is not found.
 uint8_t* FindSingletonSlot(const char* name);
+// The singleton's live object of RTTI class `rttiName` (e.g. "CS::CSSessionManagerImp"),
+// reached from that slot - which may hold a static wrapper rather than the object itself.
+// Scans the module for the slot: call it off the hot threads. nullptr until it exists.
+uint8_t* FindSingletonInstance(const char* name, const char* rttiName, bool verbose, void*** vtOut = nullptr);
 
 // --- menu-open state ---------------------------------------------------------------
 // Is a game menu owning the controller right now? Read from the game's own state (see

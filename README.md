@@ -11,9 +11,11 @@ both want to be `dxgi.dll`.
 > ### ⚠️ Offline play only — EAC must be disabled
 >
 > ERVR injects into `eldenring.exe` and writes game memory. **Never run it with Easy Anti-Cheat
-> enabled or while connected to online play.** Doing so risks a permanent ban on your account, and
-> that is entirely on you. Anti-cheat and multiplayer are not supported, not a roadmap item, and
-> never will be. Launch the game offline with EAC disabled — the bundled ReShade add‑on build would not load under it anyway.
+> enabled or while connected to FromSoftware's online play.** Doing so risks a permanent ban on your
+> account, and that is entirely on you. Anti-cheat and official online play are not supported, not a
+> roadmap item, and never will be. Launch the game offline with EAC disabled — the bundled ReShade
+> add‑on build would not load under it anyway. The one multiplayer route that works is
+> [Seamless Co-op](#seamless-co-op), which runs with EAC disabled and never touches FromSoftware's servers.
 
 ```
                 ┌──────────────────────── eldenring.exe ──────────────────────────┐
@@ -42,8 +44,9 @@ both want to be `dxgi.dll`.
 
 ## Requirements
 
-* ELDEN RING (Steam), played **offline with EAC disabled**. Verified on exe 2.6.2.0 (patch 1.16.2) and
-  2.7.1.0 (patch 1.17.1); the log's `[game] executable version` line tells you which map was selected.
+* ELDEN RING (Steam), played **offline with EAC disabled** (or through Seamless Co-op). Verified on exe
+  2.6.2.0 (patch 1.16.2), 2.7.1.0 (patch 1.17.1) and 2.7.2.0 (patch 1.17.2); the log's
+  `[game] executable version` line tells you which map was selected.
 * A PC VR headset with an OpenXR runtime: Meta Quest via Link / Air Link (Oculus runtime), Virtual Desktop (VDXR),
   or SteamVR (Index, Vive, WMR, Pico, Steam Link…). ERVR uses whichever is the system's active OpenXR runtime.
 * Nothing else. ReShade 6.8.0 (the build with add‑on support) is included in the download. R.E.A.L. VR is not
@@ -70,6 +73,10 @@ Game\
 `RealVR.ini` first — R.E.A.L. and ReShade both live in `dxgi.dll` and cannot coexist.
 **Already using ReShade?** Keep your own `ReShade.ini`, but the `dxgi.dll` must be an add‑on‑support build (6.8+).
 **Already using a `dinput8.dll` mod loader** (ELDEN MOD LOADER etc.)? Keep it and put `ERVR.dll` in its `mods\` folder.
+**Using flat render mods** (RenoDX HDR, DLSS Enabler / OptiScaler, ReShade effects)? They break the headset image:
+RenoDX re-encodes the frame as HDR10, the DLSS Enabler wraps DXGI under ReShade, and effects run once per eye.
+`.\tools\game_mode.ps1 -Mode vr` parks them (renames to `*.ervr-off`) and `-Mode flat` puts them back and parks
+ERVR instead; `-Mode status` shows what is active. Nothing is deleted.
 
 **Your antivirus may flag it.** `ERVR.dll` injects into a running game process, and `dxgi.dll` is ReShade's add‑on
 build, which is unsigned by design (it is the variant anti‑cheat vendors do not whitelist). Both detections are
@@ -271,9 +278,11 @@ own OpenXR session.
   elbow poles) sits on the view yaw, instantly. `head` makes it chase the headset yaw with a
   `BodyYawFollowSeconds` time constant instead (shoulders come round when you turn your real body); `stick` is
   for `CameraYawSource=ervr` + `RightStick=body`. Locked on, the game aims the body.
-* Version gate: separate RVA maps cover exe 2.6.2.0 (game 1.16.2) and 2.7.1.0 (game 1.17.1).
-  The 2.7.1.0 camera/model routines and transition sites were compared against the installed binaries;
-  headset validation is still required. Other versions use the existing AOB fallbacks and cannot register
+* Version gate: separate RVA maps cover exe 2.6.2.0 (game 1.16.2), 2.7.1.0 (game 1.17.1) and 2.7.2.0
+  (game 1.17.2). Each 1.17 map was derived from the previous executable by instruction signature and
+  checked with `tools/verify_game_version_map.py OLD_EXE NEW_EXE`; the 2.7.2.0 one also agrees with every
+  address erfps2 and fromsoftware-rs publish for 1.17.2. 1.17.2 also moved WorldChrMan's fields from
+  +0x1E608 on by 0x10 (`chr_cam` +0x1ECE0 → +0x1ECF0), which `GameWorldChrManOffset` applies. Other versions use the existing AOB fallbacks and cannot register
   frame tasks through a guessed address. Keep any renamed game launcher synchronized with Steam's game files:
   running the old executable with 1.17's Torrent appearance assets can leave the horse missing even with its
   visibility flags enabled. Startup logs warn when the launcher differs from the adjacent `eldenring.exe`.
@@ -545,6 +554,33 @@ drives the same three things for its first-person camera; ERVR drives them from 
   attack)`, with `Debug=true` the 238 rewrite (`SetBulletAimAngle limits ... -> ...`), and the heartbeat's
   `cast aim right hand (cast live)`.
 
+## Seamless Co-op
+
+ERVR runs inside [Seamless Co-op](https://www.nexusmods.com/eldenring/mods/510) sessions, and your partners play
+the ordinary game — they do not need ERVR. Start the game with `ersc_launcher.exe` instead of Steam's Play button:
+it launches `eldenring.exe` itself with EAC off, and ERVR loads through `dinput8.dll` as usual (both DLLs end up in
+the same process). Seamless Co-op keeps its own save (`ER0000.co2`); copy your `ER0000.sl2` to that name if you
+want your character there. Everyone must be on the same game patch and Seamless Co-op version, so the VR player
+needs an ERVR build with an address map for that patch.
+
+What changes with other players around:
+
+* **What they see.** Your character arrives on their screens through the game's own network sync: its normal
+  locomotion animations, not your tracked arms or head. Physical melee plays no attack animation, so to them you
+  stand still while the enemy reacts to the hit.
+* **Hit attribution.** Every character records who hit it last, and ERVR only counts HP drops you caused
+  (`[Combat] EnemyWatchOwnHits`, on by default). A partner's strike on the same enemy, or a partner taking damage,
+  no longer spends your swing's damage budget or buzzes your controller.
+* **Death.** While your HP is zero ERVR stops writing to the game, so the game's own camera (Seamless Co-op's
+  spectator view included) shows on the cinema screen until you are back on your feet.
+* **Joins and leaves.** A player arriving, leaving or finishing their load briefly drops you to the flat cinema
+  view (`[VR] Pass2CoopGraceSeconds`, 4 s): the second-eye pass sits out while their character is built into the
+  world, the same way it sits out a loading screen. The log says `[coop] other players in the world: 0 -> 1`.
+* **PvP.** If you enable invasions in `ersc_settings.ini`, kinetic damage scaling applies to players you hit too.
+
+Not yet verified with a real partner: physical-melee damage on enemies the host owns while you are the client, and
+Ash-of-War replays as seen from the other side. Report what you see with a `LogLevel=debug` log.
+
 ## Troubleshooting notes (learned the hard way)
 
 * **The game imports `XINPUT1_4.dll` by ordinal** (2 = `XInputGetState`, 3 = `XInputSetState`), and overlays and
@@ -588,8 +624,10 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise — 
 * Physical melee has no attack animation at all: enemy AI/hitstop cues that key off the player's *attack state*
   (not the hit) are absent, and the game may still allow rolling mid-swing. Damage scales with swing speed
   through the live param edits (`[Combat] Kinetic*`); the weapon's own R1/R2 rows are the reference.
-* Game version: only exe 2.6.2.0 (patch 1.16.2) and 2.7.1.0 (patch 1.17.1) have verified address maps. On any
-  other build the AOB fallbacks cover part of the feature set and the rest logs a warning and stays off.
+* Game version: only exe 2.6.2.0 (patch 1.16.2), 2.7.1.0 (patch 1.17.1) and 2.7.2.0 (patch 1.17.2) have verified
+  address maps. On any other build the AOB fallbacks cover part of the feature set and the rest logs a warning
+  and stays off. After a Steam update, keep a renamed `start_protected_game.exe` in step with
+  `tools\sync_game_launcher.ps1` (it refuses builds without a map).
   Headsets other than Quest 3 (Link / Air Link / Virtual Desktop) are untested by the author.
 * Planned: a small in‑headset status overlay, directional thrust vs slash, charged (hold) skills.
 
@@ -638,7 +676,8 @@ ships as `LICENSE-ReShade.txt` in every release.
 
 ## Disclaimer
 
-Offline / EAC‑disabled use only. Anti‑cheat and online play are not supported and never will be.
+EAC‑disabled use only: offline, or in Seamless Co-op. Anti‑cheat and FromSoftware's online play are not supported
+and never will be.
 
 Not affiliated with, endorsed by, or connected to FromSoftware, Bandai Namco, Meta, Valve, or the
 ReShade project. ELDEN RING is a trademark of its respective owners. This mod ships no game

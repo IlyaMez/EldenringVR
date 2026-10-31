@@ -104,6 +104,9 @@ public:
     // Creates the session and swapchains. Safe to call repeatedly; a no-op once bound.
     virtual bool BindGraphics(ID3D12Device* device, ID3D12CommandQueue* queue) = 0;
     virtual bool GraphicsBound() const = 0;
+    // The game is about to destroy this D3D12 device. A session bound to it must end now,
+    // while the device and its queue still exist; BindGraphics re-creates it on the next one.
+    virtual void UnbindGraphics(ID3D12Device* device) { (void)device; }
     virtual bool GetRecommendedEyeSize(uint32_t& w, uint32_t& h) const = 0;
     // The formats the swapchains were CREATED with. The D3D12 images the runtime hands back
     // are typically TYPELESS, so these are the only authority on sRGB-ness and the blitter
@@ -153,6 +156,7 @@ IVRBackend* ActiveBackend();
 void BackendsInit(const char* preference);   // "openxr" (only value today; "auto" accepted)
 void BackendsTick();                          // called from worker thread
 void BackendsShutdown();
+void BackendsOnDeviceDestroyed(ID3D12Device* device);   // any thread; see IVRBackend::UnbindGraphics
 
 // Thread-safe snapshot for consumers (XInput hook runs on the game's input thread).
 bool GetLatestVRState(VRTracking& tracking, VRInputState& input);

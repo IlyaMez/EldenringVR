@@ -5,6 +5,7 @@
 #include "hud.h"
 #include "patches_er.h"
 #include "stereo.h"
+#include "vr_backend.h"
 #include "log.h"
 #include <string>
 #include <windows.h>
@@ -43,11 +44,17 @@ void OnInitDevice(reshade::api::device* dev) {
     LOGI("[reshade] D3D12 device %p", (void*)native);
 }
 
-void OnDestroyDevice(reshade::api::device*) {
+void OnDestroyDevice(reshade::api::device* dev) {
+    // Only the game's D3D12 device: overlays make and drop D3D11 devices of their own.
+    if (dev->get_api() != reshade::api::device_api::d3d12) return;
     g_device.store(nullptr);
     g_queue.store(nullptr);
     HudOnDeviceLost();
     StereoOnDeviceLost();
+    // End the OpenXR session while the device and its queue still exist. Left bound through
+    // the game's shutdown, VDXR 1.0.10 crashed during process exit (2026-10-31: an indirect
+    // call through freed memory in its LibOVR shim, CFG fail-fast, ~12 s after the device went).
+    BackendsOnDeviceDestroyed(reinterpret_cast<ID3D12Device*>(dev->get_native()));
 }
 
 // The FIRST swapchain's size, before any resize. The game builds its raster projection for
@@ -88,8 +95,8 @@ bool FirstSwapchainSizeImpl(uint32_t& w, uint32_t& h) {
     return true;
 }
 
-void OnDestroySwapchain(reshade::api::swapchain*, bool resize) {
-    if (!resize) StereoOnDeviceLost();
+void OnDestroySwapchain(reshade::api::swapchain* sc, bool resize) {
+    if (!resize && sc->get_device()->get_api() == reshade::api::device_api::d3d12) StereoOnDeviceLost();
 }
 
 // The render thread. ReShade hands us the queue it is presenting on - exactly the queue

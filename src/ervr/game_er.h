@@ -56,6 +56,14 @@ bool GameERLoadingScreen();
 // Pass2WarpGraceSeconds (bridges the flag being consumed into the player-null/loading
 // holds). Call once per frame - it also edge-logs both signals for postmortems.
 bool GameERWarpGuardActive();
+// Co-op roster guard for the frame pump: TRUE for graceSeconds after another player's
+// character appears, leaves or changes load state (Seamless Co-op connects carry no warp or
+// loading signal). *others = other players in the world now. Call once per frame.
+bool GameERCoopRoster(float graceSeconds, int* others);
+// The game's multiplayer join state machine (CSSessionManagerImp lobby/protocol state) is
+// creating, joining or leaving a session, or was within graceSeconds. Any thread.
+bool GameERCoopConnecting(float graceSeconds);
+bool GameERCoopInSession();   // lobby Host or Client
 // Union transition authority for every ERVR path that executes game code or mutates game
 // state (combat TAE injection above all): player null/dead, spawn settle, loading screen,
 // warp latch. Self-sampling - safe to call from any per-frame path in any session mode.

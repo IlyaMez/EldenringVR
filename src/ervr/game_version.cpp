@@ -39,4 +39,5 @@ void GameVersionInit() {
 }
 GameBuild CurrentGameBuild() { return g_build.load(); }
 uint32_t GameRva(uint32_t legacy) { return GameBuildRva(CurrentGameBuild(), legacy); }
+size_t GameWorldChrManOffset(size_t legacy) { return GameBuildWorldChrManOffset(CurrentGameBuild(), legacy); }
 } // namespace ervr

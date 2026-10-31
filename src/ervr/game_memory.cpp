@@ -206,23 +206,26 @@ unsigned long long ExeOff(const void* p) { return (unsigned long long)((const ui
 
 uint8_t* FindSingletonSlot(const char* name) {
     size_t n = strlen(name) + 1;                      // include the terminator
-    uint8_t* str = nullptr;
+    // Every place the name STARTS a string, not ends one. The byte before need not be zero: 2.7.x
+    // packs "CSGaitem" straight after a float constant (00 00 80 3F), so only an identifier
+    // character there means a longer name. The getter below decides which candidate is real.
+    auto ident = [](uint8_t c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == ':'; };
+    std::vector<uint8_t*> strs;
     for (auto& s : ModuleSections()) {
         if (s.exec || s.size < n) continue;
-        for (size_t off = 0; off + n <= s.size && !str; ++off) {
+        for (size_t off = 0; off + n <= s.size; ++off) {
             if (s.start[off] != (uint8_t)name[0] || memcmp(s.start + off, name, n) != 0) continue;
-            if (off > 0 && s.start[off - 1] != 0) continue;   // must START a string, not end one
-            str = s.start + off;
+            if (off > 0 && ident(s.start[off - 1])) continue;
+            strs.push_back(s.start + off);
         }
-        if (str) break;
     }
-    if (!str) { LOGW("[singleton] \"%s\": name string not in eldenring.exe", name); return nullptr; }
+    if (strs.empty()) { LOGW("[singleton] \"%s\": name string not in eldenring.exe", name); return nullptr; }
     for (auto& s : ModuleSections()) {
         if (!s.exec) continue;
         for (size_t off = 0x30; off + 7 <= s.size; ++off) {
             uint8_t* p = s.start + off;
             if (p[0] != 0x48 || p[1] != 0x8D || p[2] != 0x0D) continue;      // lea rcx,[rip+X]
-            if (ResolveRipRelative(p, 3, 7) != str) continue;
+            if (std::find(strs.begin(), strs.end(), ResolveRipRelative(p, 3, 7)) == strs.end()) continue;
             for (uint8_t* q = p - 11; q >= p - 0x30; --q) {                  // mov rax,[rip+X]; test rax,rax; jnz
                 if (q[0] == 0x48 && q[1] == 0x8B && q[2] == 0x05 && q[7] == 0x48 && q[8] == 0x85 && q[9] == 0xC0 && q[10] == 0x75) {
                     uint8_t* slot = ResolveRipRelative(q, 3, 7);
@@ -339,6 +342,11 @@ uint8_t* FindImpFrom(uint8_t* slot, const char* rttiName, void*** vtOut, bool ve
     if (verbose) LOGW("[menu] %s not reachable from slot exe+0x%llX (classes met: %s)", rttiName, ExeOff(slot), names.empty() ? "none" : names.c_str());
     return nullptr;
 }
+}
+
+uint8_t* FindSingletonInstance(const char* name, const char* rttiName, bool verbose, void*** vtOut) {
+    uint8_t* slot = FindSingletonSlot(name);
+    return slot ? FindImpFrom(slot, rttiName, vtOut, verbose) : nullptr;
 }
 
 void GameMenuInit() {

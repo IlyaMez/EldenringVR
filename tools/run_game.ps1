@@ -31,6 +31,7 @@ param(
     [int]$Shots = 0,          # screenshot interval in seconds; 0 = none
     [string]$ShotDir = "$env:TEMP\claude\ervr_shots",
     [string]$GameDir = "${env:ProgramFiles(x86)}\Steam\steamapps\common\ELDEN RING\Game",
+    [string]$Launcher = "eldenring.exe",   # e.g. ersc_launcher.exe (Seamless Co-op starts eldenring.exe itself)
     [string]$Filter = '\[m2\]|\[xr\]|\[stereo\]|\[blit\]|ERROR|WARN',
     [int]$Tail = 0
 )
@@ -55,9 +56,13 @@ function Stop-Game {
     }
 }
 
-# The autopilot lives in ERVR.ini, so set it there rather than passing it through.
+# The autopilot lives in ERVR.ini, so set it there rather than passing it through - and put the
+# file back afterwards: a value left behind presses A in the user's next session (2026-10-31 it
+# clicked through a first-launch screen in a later Seamless Co-op boot). BOM-free on purpose.
+$iniBefore = $null
 if ($PSBoundParameters.ContainsKey('AutoPilot')) {
-    $lines = Get-Content $ini
+    $iniBefore = [System.IO.File]::ReadAllLines($ini)
+    $lines = $iniBefore
     if ($lines | Select-String -Pattern '^AutoPilotSeconds=') {
         $lines = $lines -replace '^AutoPilotSeconds=.*', "AutoPilotSeconds=$AutoPilot"
     } else {
@@ -66,17 +71,18 @@ if ($PSBoundParameters.ContainsKey('AutoPilot')) {
             if ($_ -eq '[Experimental]') { "AutoPilotSeconds=$AutoPilot" }
         }
     }
-    Set-Content -Path $ini -Value $lines -Encoding utf8
-    Write-Host "AutoPilotSeconds=$AutoPilot" -ForegroundColor DarkGray
+    [System.IO.File]::WriteAllLines($ini, [string[]]$lines)
+    Write-Host "AutoPilotSeconds=$AutoPilot (restored after the run)" -ForegroundColor DarkGray
 }
+try {
 
 Stop-Game
 if (Test-Path $log) { Move-Item -Force $log "$log.prev" }
 
-Write-Host "launching eldenring.exe for ${Seconds}s ..." -ForegroundColor Cyan
+Write-Host "launching $Launcher for ${Seconds}s ..." -ForegroundColor Cyan
 # Do NOT track the process we start: eldenring.exe relaunches itself through Steam and the
 # original exits within a second. Track the NAME, and note when the pid changes.
-Start-Process -FilePath $exe -WorkingDirectory $GameDir | Out-Null
+Start-Process -FilePath (Join-Path $GameDir $Launcher) -WorkingDirectory $GameDir | Out-Null
 $deadline = (Get-Date).AddSeconds($Seconds)
 $seen = @{}
 $shotN = 0
@@ -136,8 +142,14 @@ while ((Get-Date) -lt $deadline) {
     }
 }
 if ($seen.Count -eq 0) { Write-Host "  WARNING: no game process was ever seen" -ForegroundColor Yellow }
-Stop-Game
-Start-Sleep -Milliseconds 500
+} finally {
+    Stop-Game
+    Start-Sleep -Milliseconds 500
+    if ($null -ne $iniBefore) {
+        [System.IO.File]::WriteAllLines($ini, [string[]]$iniBefore)
+        Write-Host "ERVR.ini restored (AutoPilotSeconds back to its previous value)" -ForegroundColor DarkGray
+    }
+}
 if ($Shots -gt 0) { Write-Host "$shotN screenshots in $ShotDir" -ForegroundColor Green }
 
 if (-not (Test-Path $log)) { throw "no ERVR.log was produced - did the mod load?" }

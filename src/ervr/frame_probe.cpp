@@ -139,13 +139,14 @@ bool Readable(const void* p, size_t n) {
         MEMORY_BASIC_INFORMATION mbi{};
         if (!VirtualQuery(p, &mbi, sizeof(mbi))) return false;
         if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
-        return a + n <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        return n <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize - a;
     }
     auto it = std::upper_bound(g_regions.begin(), g_regions.end(), a,
                                [](uintptr_t v, const Region& r) { return v < r.lo; });
     if (it == g_regions.begin()) return false;
     --it;
-    return a >= it->lo && a + n <= it->hi;
+    // Never a + n: statics hold sentinels like -0x10, and the sum wraps past every region's end.
+    return a >= it->lo && a < it->hi && n <= it->hi - a;
 }
 
 // Wide-string compare that tolerates a non-terminated fixed field.
@@ -1154,6 +1155,7 @@ void DoSecondPass(void* self, void* a, void* b) {
     // 2026-08-22 headless repro crashed at the exact production address precisely BECAUSE
     // mode 1 used to skip these guards - so a guard change validated under ForcePass2 is
     // validated for the real thing.
+    int coopOthers = 0;   // other players in the world (Seamless Co-op); read by the SAFE choice below
     if (g_pumpMode == 2 || (g_pumpMode == 1 && Cfg().m2ForcePass2 && !Cfg().m2Pass2NoGuards)) {
         // Which guard (if any) is holding pass 2 out, logged only when the answer CHANGES.
         // Without this a warp crash is undiagnosable after the fact: the log cannot say
@@ -1177,6 +1179,9 @@ void DoSecondPass(void* self, void* a, void* b) {
         // postmortem needs the full signal timeline, and the latch must not miss a flag
         // that is set and consumed while e.g. the death guard is the one holding.
         const bool warpGuard = GameERWarpGuardActive();
+        // Same every-frame sampling: a join that lands while another guard holds must still
+        // start its own grace.
+        const bool coopHold = GameERCoopRoster(Cfg().vrPass2CoopGraceSeconds, &coopOthers);
         static ULONGLONG s_lastInactive = GetTickCount64();
         // Spawn/teleport guard: pumping within seconds of the player appearing crashed the
         // game at exe+0x1e8b0bc (a draw fn reading a per-frame input that the spawn-fade
@@ -1202,6 +1207,12 @@ void DoSecondPass(void* self, void* a, void* b) {
         // Loading-screen guard: the community loading byte - TRUE for the whole teardown/
         // stream/rebuild window. State, not a timer: releases the moment the world is back.
         else if (GameERLoadingScreen()) hold = "loading screen (event byte)";
+        // Co-op connect guard: the game's own join state machine is in flight - it starts
+        // before the character re-initialization the connect crashes hit.
+        else if (GameERCoopConnecting(Cfg().vrPass2CoopGraceSeconds)) hold = "co-op session connecting (multiplayer join protocol)";
+        // Co-op roster guard: another player's character appeared, left or changed load
+        // state - a character-grid rebuild with none of the signals above.
+        else if (coopHold) hold = "co-op roster change (a player joining, leaving or loading)";
         // Foreign-camera guard: a menu/cutscene camera owns the FOV. The map screen is the
         // only road to fast travel, so this is what covers the fast-travel REQUEST frame -
         // the window where the 13:58 crash fired with no guard holding.
@@ -1256,7 +1267,11 @@ void DoSecondPass(void* self, void* a, void* b) {
         (g_lastHoldTick && nowTick - g_lastHoldTick < (ULONGLONG)(Cfg().vrPass2SafeSeconds * 1000.f)) ||
         // A-press window: fast-travel (and every other dangerous confirm) is an A press.
         (Cfg().vrPass2SafeOnA > 0.f && aTick &&
-         nowTick - aTick < (ULONGLONG)(Cfg().vrPass2SafeOnA * 1000.f));
+         nowTick - aTick < (ULONGLONG)(Cfg().vrPass2SafeOnA * 1000.f)) ||
+        // Other players in the world: their characters stream in and out of the grids the
+        // MoveMap family walks at any moment, so co-op stays on the SAFE set (finalize replay
+        // keeps the depth).
+        (Cfg().vrPass2CoopSafe && (coopOthers > 0 || GameERCoopInSession()));
     // SAFE is also simply "the configured full set IS the safe set" - the intended end
     // state once the finalize replay proves depth without the MoveMap family.
     const bool useSafe = inSettle || Cfg().vrPass2FullFrameKeep == Cfg().vrPass2SafeKeep;

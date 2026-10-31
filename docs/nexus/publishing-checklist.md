@@ -8,7 +8,7 @@ are the source of truth; edit them here, then paste.
 | File | Paste into |
 |---|---|
 | `summary.txt` | Mod page "Summary" (Nexus caps it at 255 characters; this one is 245). |
-| `description.bbcode` | Mod page "Description" (the Nexus editor takes BBCode; switch the editor to BBCode/source mode before pasting). |
+| `description.bbcode` | Mod page "Description" (the Nexus editor takes BBCode; switch the editor to BBCode/source mode before pasting). If list bullets land on the right, the editor flipped to right-to-left: paste in source mode, or Ctrl+A then Ctrl+Left Shift in the visual editor. |
 | `changelog.txt` | "Changelogs" tab, one entry per version. |
 
 ## Cutting the release

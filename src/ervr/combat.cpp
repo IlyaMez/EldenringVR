@@ -40,6 +40,7 @@
 #include "config.h"
 #include "game_er.h"
 #include "game_memory.h"
+#include "game_version.h"
 #include "action_queue_snapshot.h"
 #include "weapon_motion.h"
 #include "weapon_contact.h"
@@ -142,11 +143,14 @@ constexpr uint32_t BehaviorPcBase = 100000000u;
 // rebuilt every frame for the update-omission system (fromsoftware-rs world_chr_man.rs; the
 // struct's own arithmetic reproduces our in-game-verified main_player 0x1E508 / chr_cam
 // 0x1ECE0, so the neighbouring offsets are trusted). DLVector = {allocator, first, last, end}.
+// 2.7.2.0 moved both 0x10 later (GameWorldChrManOffset).
 constexpr size_t WCM_ChrByDistFirst = 0x1F1D8;
 constexpr size_t WCM_ChrByDistLast  = 0x1F1E0;
 constexpr size_t ChrDist_Stride = 0x10;          // {ChrIns* @0, f32 distance @8, pad}
 // ChrIns (fromsoftware-rs chr_ins.rs; modules @0x190 = the same container stamina already uses)
+constexpr size_t Chr_Handle   = 0x08;            // FieldInsHandle {u32 selector, i32 block}: the character itself
 constexpr size_t Chr_NpcId    = 0x64;            // i32, the 4-digit character id (e.g. 3070)
+constexpr size_t Chr_LastHitBy = 0x180;          // FieldInsHandle of whoever hit it last (selector ~0 = none)
 constexpr size_t Data_Hp      = 0x138;
 constexpr size_t Data_MaxHp   = 0x13C;
 
@@ -1265,10 +1269,14 @@ void MenuDiag(uint8_t* player) {
 // (and its size IS the damage dealt). The stamina-drop proxy this replaces misread shield
 // blocks as strike hits (13:51:38 log: the only "HIT" of the session was a 47-stamina guard
 // impact) and went blind when the behavior stamina charge was 1 (masked by regen).
+// With other players in the world (co-op, summons) that is only true for the drops the player
+// caused: each character records who hit it last, so a drop credited to anyone else - a partner's
+// strike on the same enemy, a partner taking a hit - is counted apart and never feeds the swing.
 struct EnemyFrame {
     bool  available = false;   // the list was readable this frame
     int   dmgEvents = 0;       // enemies whose HP dropped this frame
     int   dmgTotal = 0;        // sum of those drops
+    int   foreignEvents = 0;   // HP drops someone else caused (not counted above)
     float nearest = 1e9f;      // distance of the nearest live non-player character
     int   nearestNpc = 0;
 };
@@ -1290,13 +1298,16 @@ EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c) 
     uint8_t* wcm = GameERWorldChrMan();
     if (!wcm) return ef;
     uint8_t *first = nullptr, *last = nullptr;
-    if (!SafeRead(wcm + WCM_ChrByDistFirst, &first, 8) || !SafeRead(wcm + WCM_ChrByDistLast, &last, 8)) return ef;
+    if (!SafeRead(wcm + GameWorldChrManOffset(WCM_ChrByDistFirst), &first, 8) ||
+        !SafeRead(wcm + GameWorldChrManOffset(WCM_ChrByDistLast), &last, 8)) return ef;
     if (!first || !last || last < first) return ef;
     size_t count = (size_t)(last - first) / ChrDist_Stride;
     if (count > 512) return ef;   // torn read / not a vector
     ef.available = true;
     ++g_enemyFrame;
     const float radius = c.combatEnemyWatchRadius > 0.f ? c.combatEnemyWatchRadius : 8.f;
+    uint64_t self = 0;
+    const bool attribute = c.combatEnemyWatchOwnHits && SafeRead(player + Chr_Handle, &self, 8) && (uint32_t)self != UINT32_MAX;
     for (size_t i = 0; i < count; ++i) {
         uint8_t* chr = nullptr; float dist = 0.f;
         if (!SafeRead(first + i * ChrDist_Stride, &chr, 8) || !chr || chr == player) continue;
@@ -1310,8 +1321,11 @@ EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c) 
         if (it != g_enemyPrev.end()) {
             const int delta = it->second.hp - hp;
             if (delta > 0) {
-                ++ef.dmgEvents; ef.dmgTotal += delta;
-                if (c.combatDebug) LOGD("[combat] enemy npc %d (%.1f m): hp %d -> %d/%d (-%d)%s%s", npc, dist, it->second.hp, hp, maxHp, delta, anyStrikeActive ? "" : " (no strike active)", hp <= 0 ? " KILLED" : "");
+                // An unreadable or empty attacker keeps the old meaning (a drop is a hit).
+                uint64_t by = 0;
+                const bool ours = !attribute || !SafeRead(chr + Chr_LastHitBy, &by, 8) || (uint32_t)by == UINT32_MAX || by == self;
+                if (ours) { ++ef.dmgEvents; ef.dmgTotal += delta; } else ++ef.foreignEvents;
+                if (c.combatDebug) LOGD("[combat] enemy npc %d (%.1f m): hp %d -> %d/%d (-%d)%s%s%s", npc, dist, it->second.hp, hp, maxHp, delta, anyStrikeActive ? "" : " (no strike active)", hp <= 0 ? " KILLED" : "", ours ? "" : " - hit by someone else, not counted");
             }
             it->second.hp = hp; it->second.seenFrame = g_enemyFrame;
         } else g_enemyPrev[chr] = {hp, g_enemyFrame};

@@ -150,6 +150,10 @@ void BackendsShutdown() {
     g_active = nullptr;
 }
 
+void BackendsOnDeviceDestroyed(ID3D12Device* device) {
+    if (g_active) g_active->UnbindGraphics(device);
+}
+
 bool GetLatestVRState(VRTracking& tracking, VRInputState& input) {
     std::lock_guard<std::mutex> g(g_snapMtx);
     if (!g_snapValid) return false;

@@ -315,6 +315,7 @@ struct Config {
     // per swing, aligned behavior variation, fattened hit capsules.
     bool  combatEnemyWatch = true;        // read the game's by-distance ChrIns list: HP drops = landed hits (ground truth)
     float combatEnemyWatchRadius = 8.f;   // m around the player worth watching
+    bool  combatEnemyWatchOwnHits = true; // count only drops the player caused (ChrIns last_hit_by) - co-op partners' hits are not ours
     bool  kineticAlignVariation = true;   // during a strike point the weapon's behaviorVariationId at the variation whose rows we edit
     float kineticSwingBudget = 1.0f;      // max damage per swing, in vanilla-hit units x QualityToMult (0 = unlimited)
     bool  kineticFlinchFirstHitOnly = true;   // after a strike's first landed hit: no hit reaction / hitstop / poise (no stunlock)
@@ -514,7 +515,13 @@ struct Config {
     // Same principle as the character pipeline: pass 2 renders the same sim instant, so
     // menus must not advance between the eyes. ScaleformStep (142) stays kept - it is the
     // UI DRAW, not the menu logic, and the HUD layer is captured from it.
-    std::string vrPass2FullFrameKeep = "0-7,10-25,27-28,32-81,83-84,86-88,95-96,98,106-109,113-125,127-133,137-142,144-160,164,168";
+    // NETWORK stepping gated too (2026-10-31, Seamless Co-op): 15 NetworkFlowStep, 28/133
+    // TestNet, 32-36 FrpgNet_*, 39 FrpgNetMan, 40 NetworkUserManager, 41 SessionManager,
+    // 42 BlockList, 44 RmiMan, 47 REMOTEMAN, 64 WorldChrMan_ChrNetwork, 80 NetFlushSendData,
+    // 137-140 GameFlowFrpgNet_*. Idle offline, so the offline crash hunts never caught them,
+    // but in a session every connect state machine and packet flush ran twice per pair - a
+    // connect crashed at the transition null-call site with no other guard holding.
+    std::string vrPass2FullFrameKeep = "0-7,10-14,16-25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168";
     // SAFE variant, active during the settle window after any pass-2 guard releases (and
     // whenever a guard holds, trivially). Differs from the full set by gating ONLY the
     // GameFlowInGame_MoveMap_PostPhysics family (118, 123-125): measured 2026-08-22, that
@@ -523,7 +530,7 @@ struct Config {
     // crasher (it walks the WorldBlockChr grid and task lists, which teardown/arrival
     // rebuilds under it - the whole exe+0xc7f88b/0x3f9b2b/0x513baa/0x32b04a family).
     // Steady-state play needs it for stereo depth; the settle window must not run it.
-    std::string vrPass2SafeKeep = "0-7,10-25,27-28,32-81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-133,137-142,144-160,164,168";
+    std::string vrPass2SafeKeep = "0-7,10-14,16-25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168";
     // Seconds of SAFE keep set after the last guard releases. Was 20 (timer-guess era),
     // then 8; now 1.5 (2026-08-24 pt2, user asked for 1-2 s transitions): post-load
     // streaming is not a special state for full-set pass 2 - the open world streams
@@ -558,6 +565,13 @@ struct Config {
     // (The >100 m arrival-jump grace it used to size is a fixed 1 s in
     // GameERTeleportGraceActive - that heuristic is superseded by the signals.)
     float vrPass2WarpGraceSeconds = 2.f;
+    // Seconds pass 2 stays off after another player's character appears, leaves or changes
+    // load state (GameERCoopRoster). A Seamless Co-op connect raises none of the warp/loading
+    // signals, so this is its transition guard. Hot-reloads.
+    float vrPass2CoopGraceSeconds = 4.f;
+    // While any other player is in the world, pass 2 uses the SAFE keep set (no MoveMap
+    // family walking grids their characters stream through; finalize replay keeps depth).
+    bool vrPass2CoopSafe = true;
     // Replay the game's camera finalizer in pass 2 whenever the SAFE set is live, so the
     // second-eye camera reaches the renderer without the MoveMap family. The depth path
     // for the SAFE set; see HookCameraStepImpl.

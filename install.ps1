@@ -71,6 +71,12 @@ if ($leftovers) {
     Write-Warning "R.E.A.L. VR files found in the game folder: $($leftovers -join ', ')."
     Write-Warning "ERVR does not use R.E.A.L. and replaces its dxgi.dll. Delete those files so a second VR runtime does not fight ERVR."
 }
+$flatMods = @(Get-ChildItem -LiteralPath $GameDir -Filter *.dll | Where-Object { $_.VersionInfo.ProductName -match 'DLSS Enabler|OptiScaler' }) +
+             @(Get-ChildItem -LiteralPath (Join-Path $GameDir 'reshade-addons') -Filter *.addon* -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.addon(64)?$' })
+if ($flatMods) {
+    Write-Warning "Flat render mods are active: $($flatMods.Name -join ', '). They break the headset image (HDR re-encoding, DXGI wrapping)."
+    Write-Warning "Park them for VR with .\tools\game_mode.ps1 -Mode vr (restore with -Mode flat)."
+}
 if (Test-Path $gameDxgi) {
     if ((Sha $gameDxgi) -eq (Sha $srcDxgi)) {
         Write-Host "dxgi.dll is already the bundled ReShade."

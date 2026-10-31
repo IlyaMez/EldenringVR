@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include <cmath>
 #include <cstring>
@@ -42,7 +43,8 @@ namespace {
 // ---------------------------------------------------------------- offsets (1.16.2)
 namespace off {
     constexpr size_t WCM_MainPlayer   = 0x1E508;   // WorldChrMan -> PlayerIns*
-    constexpr size_t WCM_ChrCam       = 0x1ECE0;   // WorldChrMan -> ChrCam*
+    constexpr size_t WCM_ChrCam       = 0x1ECE0;   // WorldChrMan -> ChrCam* (+0x10 on 2.7.2.0, see GameWorldChrManOffset)
+    constexpr size_t WCM_PlayerChrSet = 0x10EE0;   // WorldChrMan -> ChrSet<PlayerIns> (inline), host + other players
     constexpr size_t Chr_ChrCtrl      = 0x58;
     constexpr size_t Chr_IsLockedOn   = 0xC9;
     constexpr size_t Chr_LockOnTarget = 0xD0;      // float4 world position the character faces when locked
@@ -311,7 +313,14 @@ Vec3 QuatRotate(const Quat& q, const Vec3& v) { return q.Rotate(v); }
 // ---------------------------------------------------------------- game object access
 uint8_t* WorldChrMan() { return g_worldChrManPtr ? Deref(g_worldChrManPtr) : nullptr; }
 uint8_t* MainPlayer() { uint8_t* w = WorldChrMan(); return w ? Deref(w + off::WCM_MainPlayer) : nullptr; }
-uint8_t* ChrCam() { uint8_t* w = WorldChrMan(); return w ? Deref(w + off::WCM_ChrCam) : nullptr; }
+bool LooksLikeCam(uint8_t* p);
+// Every chr-cam write is a 64-byte matrix, so only ever hand out a camera: on a game patch whose
+// WorldChrMan layout is not mapped, the slot holds some other object.
+uint8_t* ChrCam() {
+    uint8_t* w = WorldChrMan(); if (!w) return nullptr;
+    uint8_t* cc = Deref(w + GameWorldChrManOffset(off::WCM_ChrCam));
+    return LooksLikeCam(cc) ? cc : nullptr;
+}
 uint8_t* GameRend() {
     uint8_t* fa = g_fieldAreaPtr ? Deref(g_fieldAreaPtr) : nullptr; if (!fa) return nullptr;
     return Deref(fa + off::FA_GameRend);
@@ -433,7 +442,7 @@ void ApplyHeadVisibility(uint8_t* player, bool hideHead, bool hideSheathed) {
     if (uint8_t* res = Deref(player + off::PI_AsmModelRes)) {
         uint8_t b;
         // 1.17's ChrAsmModelRes masks moved by eight bytes (erfps2 1.17 layout).
-        if (CurrentGameBuild() == GameBuild::V271) res += 8;
+        if (IsGame117(CurrentGameBuild())) res += 8;
         if (RD(res + 0x58, b)) WR(res + 0x58, (uint8_t)((b & ~8) | (hideHead ? 8 : 0)));
         if (RD(res + 0x49, b)) WR(res + 0x49, (uint8_t)((b & ~8) | (hideHead ? 8 : 0)));
         if (RD(res + 0x50, b)) WR(res + 0x50, (uint8_t)((b & ~32) | (hideHead ? 32 : 0)));
@@ -2918,6 +2927,119 @@ bool GameERLoadingScreen() {
     return RD(blocks + 0x113, b) && b != 0;
 }
 
+// Co-op roster. Seamless Co-op adds and removes other players' characters with no warp,
+// loading screen or player teardown - the signals every pump guard keys on - and that
+// rebuilds the character grids the pass-2 MoveMap family walks (2026-10-31: a connect
+// crashed at the transition null-call site, task 0x90000052, with every guard quiet).
+// WorldChrMan.player_chr_set (+0x10EE0, fromsoftware-rs; unmoved from 2.6.2 to 2.7.2):
+// ChrSet {vft, index, capacity u32 @+0x10, entries @+0x18}, entries 16 bytes
+// {ChrIns* @0, u8 load_status @8}. The main player is skipped, so solo play never changes it.
+bool GameERCoopRoster(float graceSeconds, int* others) {
+    static ULONGLONG s_changeTick = 0;
+    static int s_others = 0;
+    static uint64_t s_sig = 0;
+    static ULONGLONG s_loadLogTick = 0;
+    const ULONGLONG now = GetTickCount64();
+    const bool holding = s_changeTick && now - s_changeTick < (ULONGLONG)(graceSeconds * 1000.f);
+    // No main player (loading, title) = nothing to tell ourselves apart from: keep the last
+    // roster rather than count our own entry as somebody else.
+    uint8_t* me = MainPlayer();
+    if (!me) { if (others) *others = s_others; return holding; }
+    int n = 0; uint64_t sig = 0;
+    uint8_t* set = WorldChrMan() ? WorldChrMan() + off::WCM_PlayerChrSet : nullptr;
+    uint32_t cap = 0; uint8_t* entries = nullptr;
+    if (set && RD(set + 0x10, cap) && RD(set + 0x18, entries) && entries && cap <= 64) {
+        for (uint32_t i = 0; i < cap; ++i) {
+            uint8_t* chr = nullptr; uint8_t status = 0;
+            if (!RD(entries + i * 16, chr) || !chr || chr == me) continue;
+            RD(entries + i * 16 + 8, status);
+            ++n;
+            sig = (sig ^ ((uint64_t)(uintptr_t)chr ^ ((uint64_t)status << 56))) * 1099511628211ull;
+        }
+    }
+    if (n != s_others) {
+        LOGI("[coop] other players in the world: %d -> %d (pass 2 holds %.1f s; SAFE keep set while anyone is here)",
+             s_others, n, graceSeconds);
+        s_changeTick = now;
+    } else if (sig != s_sig) {
+        if (now - s_loadLogTick > 2000) { LOGI("[coop] a player's character changed load state; pass 2 holds"); s_loadLogTick = now; }
+        s_changeTick = now;
+    }
+    s_others = n; s_sig = sig;
+    if (others) *others = n;
+    return s_changeTick && now - s_changeTick < (ULONGLONG)(graceSeconds * 1000.f);
+}
+
+// Multiplayer session state: the game's own join state machine, which Seamless Co-op drives
+// (fromsoftware-rs session_manager.rs). CSSessionManagerImp {vft, u32, lobby_state u32 @+0xC,
+// protocol_state u32 @+0x10}; protocol_state walks JoinCheck -> WaitInitData -> WaitReloadWait
+// -> WaitReload ("reload start to character initialization") -> WaitReload2 -> Ingame.
+// 2026-10-31: two connects crashed 11-12 s after the item was used with no warp, loading or
+// roster signal first - this machine is what runs in that window.
+namespace {
+std::atomic<uint8_t*> g_sessionMan{nullptr};
+std::atomic<void**> g_sessionVt{nullptr};
+std::atomic<bool> g_sessionLookup{false};
+std::atomic<uint32_t> g_sessLobby{0}, g_sessProto{0};
+std::atomic<ULONGLONG> g_connectSince{0}, g_connectLast{0};
+const char* const kLobbyNames[] = {"None", "TryToCreateSession", "FailedToCreateSession", "Host", "TryToJoinSession",
+                                   "FailedToJoinSession", "Client", "OnLeaveSession", "FailedToLeaveSession"};
+const char* const kProtocolNames[] = {"None", "JoinCheck", "WaitInitData", "WaitReloadWait", "WaitReload",
+                                      "WaitReload2", "Ingame", "WaitReentryToMap"};
+// Creating, joining or leaving a session, the join-only protocol steps, or a reload while a
+// session exists. Seamless Co-op runs WaitReload2 -> Ingame on every SOLO world load too
+// (measured 2026-10-31, lobby None), which the loading guards already cover.
+bool SessionConnecting(uint32_t lobby, uint32_t proto) {
+    return lobby == 1 || lobby == 4 || lobby == 7 || (proto >= 1 && proto <= 3) ||
+           (lobby != 0 && (proto == 4 || proto == 5 || proto == 7));
+}
+// Worker thread: find the manager once (module scan, so on its own thread), then sample and
+// log every transition - the timeline a co-op crash needs, in any stereo mode.
+void SessionWatchTick() {
+    uint8_t* sm = g_sessionMan.load();
+    if (!sm) {
+        if (!MainPlayer() || g_sessionLookup.exchange(true)) return;
+        std::thread([] {
+            uint8_t* p = nullptr; void** vt = nullptr;
+            for (int i = 0; i < 10 && !p; ++i) {
+                p = FindSingletonInstance("CSSessionManager", "CS::CSSessionManagerImp", i == 9, &vt);
+                if (!p) Sleep(3000);
+            }
+            if (p) { g_sessionVt.store(vt); g_sessionMan.store(p); LOGI("[coop] CSSessionManagerImp at %p - multiplayer join state watched", (void*)p); }
+            else LOGW("[coop] CSSessionManagerImp not found - co-op connects are guarded by the player roster only");
+        }).detach();
+        return;
+    }
+    uint32_t lobby = 0, proto = 0; void** vt = nullptr;
+    if (!RD(sm, vt) || vt != g_sessionVt.load() || !RD(sm + 0xC, lobby) || !RD(sm + 0x10, proto) || lobby > 8 || proto > 7) {
+        // Freed (process exit, or re-created elsewhere): drop it and find it again.
+        LOGI("[coop] session manager %p went away - looking it up again", (void*)sm);
+        g_sessionMan.store(nullptr); g_sessLobby.store(0); g_sessProto.store(0); g_connectSince.store(0);
+        g_sessionLookup.store(false);
+        return;
+    }
+    static bool s_first = true;
+    if (s_first) { s_first = false; LOGI("[coop] session lobby %s, protocol %s (first read)", kLobbyNames[lobby], kProtocolNames[proto]); }
+    const uint32_t pl = g_sessLobby.exchange(lobby), pp = g_sessProto.exchange(proto);
+    if (lobby != pl || proto != pp)
+        LOGI("[coop] session lobby %s -> %s, protocol %s -> %s", kLobbyNames[pl], kLobbyNames[lobby], kProtocolNames[pp], kProtocolNames[proto]);
+    const ULONGLONG now = GetTickCount64();
+    if (SessionConnecting(lobby, proto)) {
+        // The 30 s cap runs per state: a long search must not use it up before the join
+        // steps that follow it.
+        if (!g_connectSince.load() || lobby != pl || proto != pp) g_connectSince.store(now);
+        g_connectLast.store(now);
+    } else g_connectSince.store(0);
+}
+}
+
+bool GameERCoopConnecting(float graceSeconds) {
+    const ULONGLONG now = GetTickCount64(), since = g_connectSince.load(), last = g_connectLast.load();
+    if (since) return now - since < 30000;   // a state that never settles must not hold all session
+    return last && now - last < (ULONGLONG)(graceSeconds * 1000.f);
+}
+bool GameERCoopInSession() { const uint32_t l = g_sessLobby.load(); return l == 3 || l == 6; }
+
 // Latched warp guard for the frame pump: TRUE from the first frame warp_requested reads set
 // until Pass2WarpGraceSeconds after it last read set. The tail bridges the gap between the
 // flag being consumed by the transfer machinery and the player-null/loading-screen guards
@@ -2947,6 +3069,8 @@ bool GameERWarpGuardActive() {
 bool GameERWorldDying() {
     if (GameERPlayerDead()) return true;
     if (GameERLoadingScreen()) return true;
+    // A co-op join re-initializes characters under us like a load does (WaitReload*).
+    if (GameERCoopConnecting(Cfg().vrPass2CoopGraceSeconds)) return true;
     const ULONGLONG now = GetTickCount64();
     if (GameERWarpRequested()) g_warpReqTick.store(now, std::memory_order_relaxed);
     const ULONGLONG w = g_warpReqTick.load(std::memory_order_relaxed);
@@ -3001,6 +3125,7 @@ void GameERTick() {
     { std::lock_guard<std::mutex> g(g_vrMtx); g_vrValid = ok; if (ok) { g_vrTr = tr; g_vrIn = in; } }
     if (!MainPlayer() || !Cfg().fpEnabled) { g_moveActive.store(false); g_camYawInit = false; g_bodyYawInit = false; g_mountedTurns.SetMount(nullptr); }
     ApplyStatCheat();
+    SessionWatchTick();
 }
 
 void GameERAddCameraYaw(float radians) {

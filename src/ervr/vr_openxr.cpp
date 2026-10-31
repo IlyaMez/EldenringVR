@@ -173,6 +173,13 @@ public:
     }
     bool GraphicsBound() const override { return bound_; }
 
+    void UnbindGraphics(ID3D12Device* device) override {
+        std::lock_guard<std::recursive_mutex> g(g_mtx);
+        if (!bound_ || device != device_) return;
+        LOGI("[xr] the game is destroying the D3D12 device the session is bound to - ending the session first");
+        TeardownSession();
+    }
+
     bool GetRecommendedEyeSize(uint32_t& w, uint32_t& h) const override {
         if (viewConfig_.empty()) return false;
         w = viewConfig_[0].recommendedImageRectWidth;

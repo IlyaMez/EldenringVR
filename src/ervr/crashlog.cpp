@@ -109,6 +109,10 @@ constexpr uintptr_t kRvaTransitionMovss = 0x3f9b2b;
 constexpr uint8_t kMovssBytes[8] = {0xf3, 0x0f, 0x10, 0x89, 0xb0, 0x00, 0x00, 0x00};
 constexpr uint8_t kNullCallBytes[14] = {0x48, 0x8b, 0x01, 0x48, 0x8d, 0x54, 0x24, 0x28,
                                         0xff, 0x90, 0x44, 0x04, 0x00, 0x00};
+// 1.17 (2.7.1.0 and 2.7.2.0) calls [rax+0x448] at the same site; same 14 bytes long.
+constexpr uint8_t kNullCallBytes117[14] = {0x48, 0x8b, 0x01, 0x48, 0x8d, 0x54, 0x24, 0x28,
+                                           0xff, 0x90, 0x48, 0x04, 0x00, 0x00};
+const uint8_t* NullCallBytes() { return IsGame117(CurrentGameBuild()) ? kNullCallBytes117 : kNullCallBytes; }
 std::atomic<long> g_nullCallEats{0};
 
 bool SafeRead64(const uint64_t* p, uint64_t* out);   // defined below
@@ -139,7 +143,7 @@ LONG CALLBACK Veh(EXCEPTION_POINTERS* xp) {
         // Every condition below was verifiably TRUE in the 16:43 crash dump, yet the eat
         // did not happen - so when it fails again, say exactly which check refused.
         const bool rcx0 = xp->ContextRecord->Rcx == 0;
-        const int cmp = CodeBytesMatch(g_base + GameRva(kRvaTransitionNullCall), kNullCallBytes, sizeof(kNullCallBytes)) ? 0 : 1;
+        const int cmp = CodeBytesMatch(g_base + GameRva(kRvaTransitionNullCall), NullCallBytes(), sizeof(kNullCallBytes)) ? 0 : 1;
         if (!rcx0 || cmp != 0)
             LOGE("[crash] null-call site hit but NOT eaten: rcx=%llx cmp=%d base=%p addr=%p",
                  (unsigned long long)xp->ContextRecord->Rcx, cmp, (void*)g_base,
@@ -148,7 +152,7 @@ LONG CALLBACK Veh(EXCEPTION_POINTERS* xp) {
     if (code == EXCEPTION_ACCESS_VIOLATION &&
         (uint8_t*)xp->ExceptionRecord->ExceptionAddress == g_base + GameRva(kRvaTransitionNullCall) &&
         xp->ContextRecord->Rcx == 0 &&
-        (CodeBytesMatch(g_base + GameRva(kRvaTransitionNullCall), kNullCallBytes, sizeof(kNullCallBytes)) ||
+        (CodeBytesMatch(g_base + GameRva(kRvaTransitionNullCall), NullCallBytes(), sizeof(kNullCallBytes)) ||
          GameERVersionOk())) {
         const long n = g_nullCallEats.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= 32)

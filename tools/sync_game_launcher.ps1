@@ -17,8 +17,9 @@ $taskInstalledDll = Join-Path $taskGameRoot 'ERVR\ERVR.dll'
 $taskBuiltDll = Join-Path $taskRoot 'build\Release\ERVR.dll'
 $taskVersion = (Get-Item -LiteralPath $taskExe).VersionInfo.FileVersion
 $taskLauncherVersion = (Get-Item -LiteralPath $taskLauncher).VersionInfo.FileVersion
-if ($taskVersion -notin @('2.6.2.0', '2.7.1.0')) { throw "No verified VR address map for installed game version $taskVersion" }
-if ($taskLauncherVersion -notin @('2.6.2.0', '2.7.1.0')) { throw 'The destination is not a recognized renamed game executable.' }
+$taskVerified = @('2.6.2.0', '2.7.1.0', '2.7.2.0')   # builds with an RVA map in src/ervr/game_version.h
+if ($taskVersion -notin $taskVerified) { throw "No verified VR address map for installed game version $taskVersion" }
+if ($taskLauncherVersion -notin $taskVerified) { throw 'The destination is not a recognized renamed game executable.' }
 foreach ($taskFile in @($taskBuiltDll, $taskInstalledDll)) {
     if (!(Test-Path -LiteralPath $taskFile -PathType Leaf)) { throw "Missing file: $taskFile" }
 }

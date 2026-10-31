@@ -110,6 +110,8 @@ void Config::Load(const std::wstring& path) {
     vrPass2SpawnGraceSeconds = GetF(ini, L"VR", L"Pass2SpawnGraceSeconds", vrPass2SpawnGraceSeconds);
     vrPass2MenuGraceSeconds = GetF(ini, L"VR", L"Pass2MenuGraceSeconds", vrPass2MenuGraceSeconds);
     vrPass2WarpGraceSeconds = GetF(ini, L"VR", L"Pass2WarpGraceSeconds", vrPass2WarpGraceSeconds);
+    vrPass2CoopGraceSeconds = GetF(ini, L"VR", L"Pass2CoopGraceSeconds", vrPass2CoopGraceSeconds);
+    vrPass2CoopSafe = GetB(ini, L"VR", L"Pass2CoopSafe", vrPass2CoopSafe);
     vrPass2FinalizeReplay = GetB(ini, L"VR", L"Pass2FinalizeReplay", vrPass2FinalizeReplay);
     vrPass2SafeOnA = GetF(ini, L"VR", L"Pass2SafeOnA", vrPass2SafeOnA);
     vrPass2KeepActionRequest = GetB(ini, L"VR", L"Pass2KeepActionRequest", vrPass2KeepActionRequest);
@@ -253,6 +255,7 @@ void Config::Load(const std::wstring& path) {
     kineticStaminaDamageScales = GetB(ini, L"Combat", L"KineticStaminaDamageScales", kineticStaminaDamageScales);
     combatEnemyWatch = GetB(ini, L"Combat", L"EnemyWatch", combatEnemyWatch);
     combatEnemyWatchRadius = GetF(ini, L"Combat", L"EnemyWatchRadius", combatEnemyWatchRadius);
+    combatEnemyWatchOwnHits = GetB(ini, L"Combat", L"EnemyWatchOwnHits", combatEnemyWatchOwnHits);
     kineticAlignVariation = GetB(ini, L"Combat", L"KineticAlignVariation", kineticAlignVariation);
     kineticSwingBudget = GetF(ini, L"Combat", L"KineticSwingBudget", kineticSwingBudget);
     kineticFlinchFirstHitOnly = GetB(ini, L"Combat", L"KineticFlinchFirstHitOnly", kineticFlinchFirstHitOnly);
