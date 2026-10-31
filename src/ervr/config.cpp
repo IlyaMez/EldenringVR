@@ -237,6 +237,8 @@ void Config::Load(const std::wstring& path) {
     kineticInertia = GetB(ini, L"Combat", L"Inertia", kineticInertia);
     contactOnSpeed = Clamp(GetF(ini, L"Combat", L"ContactOnSpeed", contactOnSpeed), 0.1f, 10.f);
     contactOffSpeed = Clamp(GetF(ini, L"Combat", L"ContactOffSpeed", contactOffSpeed), 0.05f, contactOnSpeed * 0.9f);
+    contactValleyFrac = Clamp(GetF(ini, L"Combat", L"ContactValley", contactValleyFrac), 0.f, 0.9f);
+    contactSpentSeconds = Clamp(GetF(ini, L"Combat", L"ContactSpentSeconds", contactSpentSeconds), 0.1f, 10.f);
     inertiaAngAccel = GetF(ini, L"Combat", L"InertiaAngAccel", inertiaAngAccel);
     inertiaSpringHz = GetF(ini, L"Combat", L"InertiaSpringHz", inertiaSpringHz);
     inertiaComRef = GetF(ini, L"Combat", L"InertiaComRef", inertiaComRef);

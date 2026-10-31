@@ -32,6 +32,21 @@ release workflow and published on GitHub Releases and Nexus Mods.
 * Enemy watcher counts only HP drops the player caused (`ChrIns.last_hit_by`), so a partner's or a
   spirit ash's hit no longer spends your swing budget or fires your hit haptics
   (`[Combat] EnemyWatchOwnHits`, default on).
+* Dying in a session no longer crashes the respawn. ERVR resumed its pose and camera writes in the
+  gap between the death load and Seamless Co-op's reload, through a skeleton cache and a follow-cam
+  pointer left over from the world that had just been freed; an enemy built in that memory then
+  crashed. Both are now checked against their live owner on every write (the player's
+  hkbCharacter, the chr cam's follow cam).
+
+### Combat
+* A swing whose damage budget was spent stayed inert until the weapon tip came to rest, which a long
+  weapon rarely does mid-fight, so every later swing was swallowed ("attacks stopped registering").
+  A spent swing now ends at the tip's next speed valley, or `[Combat] ContactSpentSeconds` (1 s)
+  after it was spent, and the next swing starts with a fresh budget (`ContactValley`, 0.4 of the
+  swing's peak speed).
+* The log gets a 5 s combat summary while fighting: strikes, landed and budget-spent swings,
+  damage, and whose HP drops the enemy watcher saw. In a co-op session the first drops of each kind
+  are logged with the attacker handles.
 
 ### Fixes
 * Singleton lookup accepts a name string packed right after non-text data; `CSGaitem` (Ash of War

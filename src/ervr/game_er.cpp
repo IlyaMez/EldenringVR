@@ -76,6 +76,7 @@ namespace off {
     constexpr size_t Disp_Flags1      = 0x20;
     constexpr size_t Cam_Matrix       = 0x10;      // CSCam: 4 rows right/up/forward/pos
     constexpr size_t Cam_Fov          = 0x50;
+    constexpr size_t ChrCam_ExFollowCam = 0x60;    // ChrCam -> ChrExFollowCam* (fromsoftware-rs; 2.7.2.0's chr-cam update calls the follow update with [chrCam+0x60])
     constexpr size_t FA_GameRend      = 0x20;
     // CSCamera (fromsoftware-rs): +0x08 = pers_cam_1, the FINAL render camera; +0x10/+0x18/+0x20 = sources the
     // camera step copies into it per camera_mask (+0x28). Writing only +0x20 (the old GR_PersCam1) meant the true
@@ -320,6 +321,26 @@ uint8_t* ChrCam() {
     uint8_t* w = WorldChrMan(); if (!w) return nullptr;
     uint8_t* cc = Deref(w + GameWorldChrManOffset(off::WCM_ChrCam));
     return LooksLikeCam(cc) ? cc : nullptr;
+}
+// The follow cam the hooks last saw, but only while the live chr cam still owns it. The hooks keep
+// capturing it through a death and its loads, so the cached pointer can outlive the object, and a
+// 64-byte matrix written into a freed-and-reused follow cam is float data inside whatever lives there
+// now (2026-10-31 co-op death: an EnemyIns field read back as two floats, 0x3bb25448'3e59877c).
+uint8_t* FollowCam() {
+    uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed);
+    if (!fc) return nullptr;
+    uint8_t* cc = ChrCam();
+    uint8_t* owned = cc ? Deref(cc + off::ChrCam_ExFollowCam) : nullptr;
+    static std::atomic<ULONGLONG> s_logAt{0};
+    static std::atomic<int> s_state{-1};   // last logged: 1 owned, 0 not
+    const int st = owned == fc ? 1 : 0;
+    const ULONGLONG now = GetTickCount64();
+    if (st != s_state.load(std::memory_order_relaxed) && now - s_logAt.load(std::memory_order_relaxed) > 30000) {
+        s_state.store(st, std::memory_order_relaxed); s_logAt.store(now, std::memory_order_relaxed);
+        if (st) LOGI("[cam] follow cam %p is the chr cam's own - follow-cam writes validated", (void*)fc);
+        else LOGI("[cam] follow cam %p is not the chr cam's (%p) - follow-cam writes skipped until it is", (void*)fc, (void*)owned);
+    }
+    return st ? fc : nullptr;
 }
 uint8_t* GameRend() {
     uint8_t* fa = g_fieldAreaPtr ? Deref(g_fieldAreaPtr) : nullptr; if (!fa) return nullptr;
@@ -592,6 +613,22 @@ uint8_t* FindHkbCharacter(uint8_t* chr) {
     }
     return nullptr;
 }
+// The cached skeleton is `player`'s only while that character still runs the same hkbCharacter. A
+// respawn can put the new PlayerIns at the old address, and then the pose buffer reached through the
+// dead character's hkbCharacter is freed memory: every bulk pose write is 7 KB of bone floats into
+// whatever reuses it (2026-10-31 co-op death: writes resumed between the death load and Seamless
+// Co-op's reload with no skeleton rebuild logged, then an EnemyIns held float data and crashed).
+// Either behavior path FindHkbCharacter accepts may hold it: a rebuild also resets the VR pose
+// template, so a transient read of one path must not count as a new skeleton.
+bool SkeletonCurrent(uint8_t* player) {
+    if (!player || g_skel.chr != player || !g_skel.hkb) return false;
+    uint8_t* beh = Behavior(player); if (!beh) return false;
+    for (size_t o : { off::Beh_Unk10, off::Beh_HkbContext }) {
+        uint8_t* ctx = Deref(beh + o);
+        if (ctx && Deref(ctx + off::Ctx_HkbCharacter) == g_skel.hkb) return true;
+    }
+    return false;
+}
 
 bool BuildSkeleton(uint8_t* chr) {
     Skeleton s; s.chr = chr;
@@ -685,7 +722,7 @@ bool ComputeWorld(const Skeleton& s, HkQsTransform* pose, const Vec3& rootPos, c
 // camera hooks). Uses the *live* pose - with CameraAnchor=head nothing of ours moves the root bones any more, so
 // what we read is the animation's own head placement, which is exactly what the camera should sit on.
 bool HeadBoneWorld(uint8_t* player, const Vec3& rootPos, const Quat& rootQ, Vec3& out) {
-    if (g_skel.chr != player || !g_skel.hkb) { if (!BuildSkeleton(player)) return false; }
+    if (!SkeletonCurrent(player)) { if (!BuildSkeleton(player)) return false; }
     if (g_skel.head < 0) return false;
     HkQsTransform* pose = g_skel.LivePose(); if (!pose) return false;
     int chain[64]; int n = 0;
@@ -1066,7 +1103,7 @@ void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
             hb = root + rootQ.Rotate(g_seatedFrame.headLocal);
             haveHb = true;
         }
-        if (!f.riding && c.fpPoseMode == "vr" && g_skel.chr == player && g_skel.hkb)
+        if (!f.riding && c.fpPoseMode == "vr" && SkeletonCurrent(player))
             haveHb = HeadBoneTemplateWorld(root, rootQ, g_bodyYaw.load(), hb);
         const bool templatePose = haveHb;
         if (!haveHb) haveHb = HeadBoneWorld(player, root, rootQ, hb);
@@ -1396,7 +1433,7 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
             WriteCamMatrix(cc + off::Cam_Matrix, r2, u2, f2, p2);
             if (fov2 > 0.05f) SafeWrite(cc + off::Cam_Fov, &fov2, 4);
         }
-        if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed))
+        if (uint8_t* fc = FollowCam())
             WriteCamMatrix(fc + off::Cam_Matrix, r2, u2, f2, p2);
         // Keep the reassert hooks (follow cam, CamFinalize) replaying THIS eye for the rest
         // of the pass.
@@ -1517,7 +1554,7 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
       float m[16] = { r.x, r.y, r.z, 0.f, u.x, u.y, u.z, 0.f, fw.x, fw.y, fw.z, 0.f, pos.x, pos.y, pos.z, 1.f };
       memcpy(g_lastCamMtx, m, sizeof(m)); g_haveCamMtx.store(true, std::memory_order_relaxed); }
     if (uint8_t* cc = ChrCam()) WriteCamMatrix(cc + off::Cam_Matrix, r, u, fw, pos);
-    if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
+    if (uint8_t* fc = FollowCam()) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
     // Cast aim: with a casting hand the ray the game aims unlocked bullets from is the controller's, not the
     // head's - the fake lock target goes down it and the aim view matrix looks along it from the hand.
     Vec3 aimO, aimD; bool casting = false, handAim = false;
@@ -1678,7 +1715,7 @@ bool OursBone(int i) {
 bool CaptureTemplate(uint8_t* chr, const char* why) {
     if (FramePumpCurrentPass() == 2 || !g_poseCaptureGuard.CanCapture(reinterpret_cast<uintptr_t>(chr)) ||
         ReadRideState(chr, SafeRead).NativeBody()) return false;
-    if (g_skel.boneCount <= 0 || !g_skel.hkb) return false;
+    if (g_skel.boneCount <= 0 || !SkeletonCurrent(chr)) return false;
     HkQsTransform* pose = g_skel.LivePose(); if (!pose) return false;
     std::vector<HkQsTransform> t(g_skel.boneCount);
     if (!SafeRead(pose, t.data(), sizeof(HkQsTransform) * g_skel.boneCount)) return false;
@@ -1705,7 +1742,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     // own animation (ragdoll, death anim) owns the body, and our bulk pose write is 720
     // bytes of floats going into memory teardown is about to free - stand down.
     if (WorldDyingNow()) return;
-    if (g_skel.chr != player || !g_skel.hkb) { if (!BuildSkeleton(player)) return; }
+    if (!SkeletonCurrent(player)) { if (!BuildSkeleton(player)) return; }
     HkQsTransform* pose = g_skel.LivePose(); if (!pose) return;
     // Same root the camera anchor was built from - the bones must be solved in the frame they are drawn in.
     Vec3 rootPos = f.root; Quat rootQ = f.rootQ;
@@ -2317,7 +2354,7 @@ void ReassertCameraMatrix() {
     uint8_t* pcs[4]; int n = AllPersCams(pcs);
     for (int i = 0; i < n; ++i) SafeWrite(pcs[i] + off::Cam_Matrix, m, sizeof(m));
     if (uint8_t* cc = ChrCam()) SafeWrite(cc + off::Cam_Matrix, m, sizeof(m));
-    if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) SafeWrite(fc + off::Cam_Matrix, m, sizeof(m));
+    if (uint8_t* fc = FollowCam()) SafeWrite(fc + off::Cam_Matrix, m, sizeof(m));
 }
 // Pass-1 finalize call, captured fresh every frame for the pass-2 replay below. Pass 1
 // always runs the full camera chain natively (our pass-2 gating never touches pass 1), so
@@ -2682,7 +2719,7 @@ bool GameERApplySecondEyeCamera() {
     uint8_t* pcs[4]; const int npc = AllPersCams(pcs);
     for (int i = 0; i < npc; ++i) WriteCamMatrix(pcs[i] + off::Cam_Matrix, r, u, fw, pos);
     if (uint8_t* cc = ChrCam()) WriteCamMatrix(cc + off::Cam_Matrix, r, u, fw, pos);
-    if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
+    if (uint8_t* fc = FollowCam()) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
     // Retain the finished basis: UpdateCamera re-applies it on every camera-step call during
     // pass 2 (the write above, alone, never reached the renderer - see SecondEyeStash).
     {
@@ -2763,7 +2800,7 @@ bool GameERDebugPitchCamera(float pitchDeg) {
     if (npc == 0) return false;
     for (int i = 0; i < npc; ++i) WriteCamMatrix(pcs[i] + off::Cam_Matrix, r, u, fw, pos);
     if (uint8_t* cc = ChrCam()) WriteCamMatrix(cc + off::Cam_Matrix, r, u, fw, pos);
-    if (uint8_t* fc = (uint8_t*)g_followCamPtr.load(std::memory_order_relaxed)) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
+    if (uint8_t* fc = FollowCam()) WriteCamMatrix(fc + off::Cam_Matrix, r, u, fw, pos);
     return true;
 }
 

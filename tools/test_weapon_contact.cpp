@@ -25,6 +25,16 @@ int main() {
           "the gated model must still enforce its maximum swing time");
     Check(!WeaponContactContinues(true, 0.f, 0.25f, 0.1, 0.6f),
           "a stopped blade must close even a newly opened continuous contact");
+    Check(SpentContactEnd(false, 0.3f, 9.f, 0.25f, 0.4f, 5.0, 1.f) == 0,
+          "a live contact never ends through the spent-contact rule");
+    Check(SpentContactEnd(true, 0.3f, 9.f, 0.25f, 0.4f, 0.1, 1.f) == 1,
+          "a spent long-weapon contact must end at a reversal that never reaches the off speed");
+    Check(SpentContactEnd(true, 6.f, 9.f, 0.25f, 0.4f, 0.1, 1.f) == 0,
+          "a spent contact still mid-stroke keeps waiting for its valley");
+    Check(SpentContactEnd(true, 6.f, 9.f, 0.25f, 0.4f, 1.2, 1.f) == 2,
+          "a spent contact that never slows (windmilling) must still re-arm");
+    Check(SpentContactEnd(true, 0.2f, 0.4f, 0.25f, 0.4f, 0.0, 1.f) == 1,
+          "a slow spent contact falls back to the off speed as its valley");
     WeaponContactLifetime contact;
     contact.Begin(); contact.End();
     Check(contact.active && contact.first, "a contact shorter than a game frame must survive until delivery");

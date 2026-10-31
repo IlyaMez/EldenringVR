@@ -39,4 +39,15 @@ inline bool WeaponContactContinues(bool continuous, float tip, float offSpeed,
     return tip >= offSpeed && (continuous || elapsed < maxSeconds);
 }
 
+// A spent contact (damage budget gone, the blade inert) ends at the tip's next speed valley or a
+// while after it was spent, not only at rest: a long weapon's tip seldom slows to the off speed
+// mid-fight, and the next swing must open a new contact. Returns 0 (keep), 1 (valley), 2 (timeout).
+inline int SpentContactEnd(bool spent, float tip, float peak, float offSpeed, float valleyFrac,
+                           double sinceSpent, float spentSeconds) {
+    if (!spent) return 0;
+    const float valley = valleyFrac * peak > offSpeed ? valleyFrac * peak : offSpeed;
+    if (tip < valley) return 1;
+    return sinceSpent >= spentSeconds ? 2 : 0;
+}
+
 } // namespace ervr

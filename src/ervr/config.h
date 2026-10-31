@@ -285,6 +285,11 @@ struct Config {
     bool  kineticContinuous = true;
     float contactOnSpeed = 0.8f;         // m/s: continuous contacts open immediately, including wrist-driven arcs
     float contactOffSpeed = 0.25f;       // m/s: contact hysteresis; a resting blade does not attack
+    // A strike whose swing budget is spent ends at the tip's next speed valley (below this fraction of the
+    // swing's peak) or this long after it was spent, so the next swing opens a new strike. Before, it only
+    // ended at rest, which a long weapon's tip rarely reaches mid-fight (2026-10-31: swings stopped registering).
+    float contactValleyFrac = 0.4f;
+    float contactSpentSeconds = 1.0f;
     float kineticContinuousMult = 0.2f;
     std::string kineticStaminaMode = "off";   // off (bar out of the loop, game's on-hit charge refunded) | game | full
     float kineticHitPause = 0.25f;        // gated model only: s the attack pauses after a landed hit (0 = the strike ends on its first hit)
