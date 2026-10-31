@@ -107,6 +107,21 @@ constexpr uintptr_t kRvaTransitionNullCall = 0xc7f88b;
 // garbage float in a dying chr's update instead of a dead process.
 constexpr uintptr_t kRvaTransitionMovss = 0x3f9b2b;
 constexpr uint8_t kMovssBytes[8] = {0xf3, 0x0f, 0x10, 0x89, 0xb0, 0x00, 0x00, 0x00};
+// That movss is the first touch of the chr in a small per-chr update (2.7.2.0 0x3f9dd0, called
+// for each node of a WorldChrMan chr list, task 0x90000052). Skipping only the load was not
+// enough on 2.7.2.0: the pointer is not even canonical (14:39:34: a FieldInsHandle sat in the
+// node), and the same function faulted again on [rcx+0x190] two instructions later. With this
+// exact prologue in front of the site, the eat returns from the whole function instead - that
+// character's update skipped, the list walk goes on to the next node.
+constexpr size_t kMovssFnOffset = 0x1b;   // function start -> movss
+constexpr uint8_t kMovssPrologue[kMovssFnOffset] = {
+    0x48, 0x8b, 0xc4,                                   // mov rax, rsp
+    0x57,                                               // push rdi
+    0x48, 0x83, 0xec, 0x40,                             // sub rsp, 0x40
+    0x48, 0xc7, 0x40, 0xd8, 0xfe, 0xff, 0xff, 0xff,     // mov qword [rax-0x28], -2
+    0x48, 0x89, 0x58, 0x08,                             // mov [rax+8], rbx
+    0x48, 0x89, 0x70, 0x10,                             // mov [rax+0x10], rsi
+    0x48, 0x8b, 0xd9};                                  // mov rbx, rcx
 constexpr uint8_t kNullCallBytes[14] = {0x48, 0x8b, 0x01, 0x48, 0x8d, 0x54, 0x24, 0x28,
                                         0xff, 0x90, 0x44, 0x04, 0x00, 0x00};
 // 1.17 (2.7.1.0 and 2.7.2.0) calls [rax+0x448] at the same site; same 14 bytes long.
@@ -167,11 +182,27 @@ LONG CALLBACK Veh(EXCEPTION_POINTERS* xp) {
         (CodeBytesMatch(g_base + GameRva(kRvaTransitionMovss), kMovssBytes, sizeof(kMovssBytes)) ||
          GameERVersionOk())) {
         const long n = g_nullCallEats.fetch_add(1, std::memory_order_relaxed) + 1;
+        CONTEXT* c = xp->ContextRecord;
+        const uint8_t* fn = g_base + GameRva(kRvaTransitionMovss) - kMovssFnOffset;
+        // At the movss: rax still holds the entry rsp (return address), rsp is 0x48 below it,
+        // rbx/rsi sit in the home slots, rdi was pushed. Undo exactly that and return.
+        const uint64_t entry = c->Rsp + 0x48;
+        uint64_t ret = 0, rdi = 0, rbx = 0, rsi = 0;
+        if (c->Rax == entry && CodeBytesMatch(fn, kMovssPrologue, 16) &&
+            CodeBytesMatch(fn + 16, kMovssPrologue + 16, kMovssFnOffset - 16) &&
+            SafeRead64((const uint64_t*)entry, &ret) && SafeRead64((const uint64_t*)(entry - 8), &rdi) &&
+            SafeRead64((const uint64_t*)(entry + 8), &rbx) && SafeRead64((const uint64_t*)(entry + 0x10), &rsi)) {
+            if (n <= 32)
+                LOGW("[crash] transition movss on poisoned chr pointer %llx EATEN (#%ld): that "
+                     "character's update skipped", (unsigned long long)c->Rcx, n);
+            c->Rip = ret; c->Rsp = entry + 8; c->Rdi = rdi; c->Rbx = rbx; c->Rsi = rsi; c->Rax = 0;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
         if (n <= 32)
             LOGW("[crash] transition movss on poisoned chr pointer EATEN (#%ld): load "
                  "skipped, xmm1 zeroed", n);
-        xp->ContextRecord->Rip += sizeof(kMovssBytes);
-        xp->ContextRecord->Xmm1.Low = 0; xp->ContextRecord->Xmm1.High = 0;
+        c->Rip += sizeof(kMovssBytes);
+        c->Xmm1.Low = 0; c->Xmm1.High = 0;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (!Fatal(code)) return EXCEPTION_CONTINUE_SEARCH;

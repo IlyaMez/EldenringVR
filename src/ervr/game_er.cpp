@@ -2918,6 +2918,44 @@ void ApplyStatCheat() {
     applied = want;
 }
 
+// [Cheats] SetLevel: a level no single value reaches (158 = 237 points, not a multiple of 8). The
+// difference comes off the highest stats (or goes onto the lowest), one point at a time, so the
+// build keeps its shape until a respec; then the key is set back to 0 in ERVR.ini, so it applies
+// exactly once and a later level-up is never undone.
+void ApplyLevelCheat() {
+    static int applied = 0;
+    const int want = Cfg().cheatSetLevel;
+    if (want <= 0 || want == applied || !g_gameDataManPtr || !MainPlayer()) return;
+    uint8_t* gdm = Deref(g_gameDataManPtr); if (!gdm) return;
+    uint8_t* pgd = Deref(gdm + 0x8); if (!pgd) return;
+    int stats[8]; if (!SafeRead(pgd + 0x3C, stats, sizeof(stats))) return;
+    for (int& s : stats) if (s < 1 || s > 99) return;   // sanity: not a PlayerGameData we understand
+    applied = want;
+    int sum = 0; for (int s : stats) sum += s;
+    const int from = sum - 79, target = want + 79;
+    if (target < 8 || target > 8 * 99) { LOGW("[cheat] SetLevel=%d is out of range (level 1..713)", want); return; }
+    while (sum > target) {   // highest first; ties from arcane back towards vigor
+        int i = 7; for (int k = 6; k >= 0; --k) if (stats[k] > stats[i]) i = k;
+        if (stats[i] <= 1) break;
+        --stats[i]; --sum;
+    }
+    while (sum < target) {   // lowest first; ties from vigor on
+        int i = 0; for (int k = 1; k < 8; ++k) if (stats[k] < stats[i]) i = k;
+        if (stats[i] >= 99) break;
+        ++stats[i]; ++sum;
+    }
+    const int level = sum - 79;
+    if (level != from) {
+        SafeWrite(pgd + 0x3C, stats, sizeof(stats));
+        SafeWrite(pgd + 0x68, &level, 4);
+    }
+    LOGI("[cheat] level %d -> %d (vigor %d mind %d endurance %d strength %d dexterity %d intelligence %d faith %d arcane %d)",
+         from, level, stats[0], stats[1], stats[2], stats[3], stats[4], stats[5], stats[6], stats[7]);
+    const std::wstring& ini = Cfg().iniPath;
+    if (!ini.empty() && WritePrivateProfileStringW(L"Cheats", L"SetLevel", L"0", ini.c_str()))
+        LOGI("[cheat] [Cheats] SetLevel set back to 0 in ERVR.ini (applied once)");
+}
+
 // In-game time in ms (GameDataMan+0xA0, the community IGT offset speedrun timers use). IGT
 // advances by the frame dt each sim frame, which makes it the perfect probe for the pass-2
 // dt swap: a full-dt second pass doubles its rate, a dt~0 one leaves it at 1.0x realtime.
@@ -2995,8 +3033,8 @@ bool GameERCoopRoster(float graceSeconds, int* others) {
         }
     }
     if (n != s_others) {
-        LOGI("[coop] other players in the world: %d -> %d (pass 2 holds %.1f s; SAFE keep set while anyone is here)",
-             s_others, n, graceSeconds);
+        LOGI("[coop] other players in the world: %d -> %d (pass 2 holds %.1f s%s)",
+             s_others, n, graceSeconds, Cfg().vrPass2CoopSafe ? "; SAFE keep set while anyone is here" : "");
         s_changeTick = now;
     } else if (sig != s_sig) {
         if (now - s_loadLogTick > 2000) { LOGI("[coop] a player's character changed load state; pass 2 holds"); s_loadLogTick = now; }
@@ -3162,6 +3200,7 @@ void GameERTick() {
     { std::lock_guard<std::mutex> g(g_vrMtx); g_vrValid = ok; if (ok) { g_vrTr = tr; g_vrIn = in; } }
     if (!MainPlayer() || !Cfg().fpEnabled) { g_moveActive.store(false); g_camYawInit = false; g_bodyYawInit = false; g_mountedTurns.SetMount(nullptr); }
     ApplyStatCheat();
+    ApplyLevelCheat();
     SessionWatchTick();
 }
 

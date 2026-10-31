@@ -60,6 +60,17 @@ release workflow and published on GitHub Releases and Nexus Mods.
   kind are logged with the attacker handles.
 
 ### Fixes
+* The second-eye pass no longer re-runs the game's event scripts (groups 22-24 EmkSystem, 25
+  EventMan). Running them twice per stereo pair left a centre dialog raised by an item pickup on
+  screen, ignoring every button and menu until a respawn. Pass 2 renders the same moment as pass 1,
+  so like characters, menus and the network, events must not advance between the eyes.
+* A WorldChrMan character-list node holding a stale character (a character handle where the pointer
+  belongs) crashed the ragdoll task in a long co-op session. The existing guard at that site only
+  skipped one load, and the same function faulted again two instructions later; it now returns from
+  that character's whole update, so the list walk goes on (only when the function's prologue is
+  byte-identical to 2.7.2.0's).
+* `[Cheats] SetLevel=N`: reach exactly level N once (points come off the highest stats), then the
+  key sets itself back to 0 in ERVR.ini.
 * Singleton lookup accepts a name string packed right after non-text data; `CSGaitem` (Ash of War
   cost lookup) was never found on 1.17.
 * Frame-task probe: the readable-range check no longer wraps for sentinel pointers, which logged

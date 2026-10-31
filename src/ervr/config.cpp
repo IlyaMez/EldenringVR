@@ -217,6 +217,7 @@ void Config::Load(const std::wstring& path) {
     combatExtraStamina[2] = GetI(ini, L"Combat", L"ExtraStaminaLeft", combatExtraStamina[2]);
     combatSuppressAnimAttacks = GetB(ini, L"Combat", L"SuppressAnimAttacks", combatSuppressAnimAttacks);
     cheatSetAllStats = GetI(ini, L"Cheats", L"SetAllStats", cheatSetAllStats);
+    cheatSetLevel = GetI(ini, L"Cheats", L"SetLevel", cheatSetLevel);
     cheatInfiniteStamina = GetB(ini, L"Cheats", L"InfiniteStamina", cheatInfiniteStamina);
     combatDebug = GetB(ini, L"Combat", L"Debug", combatDebug);
     combatMenuGate = GetB(ini, L"Combat", L"MenuGate", combatMenuGate);
