@@ -235,6 +235,7 @@ struct HandSM {
     double lastPoll = 0;
     double spentAt = 0;           // when the game thread retired this strike (budget spent), 0 = live
     float restSpeed = 0;          // continuous cooldown: tip speed under which the hand may arm again (0 = ContactOffSpeed)
+    float rearmMin = 0;           // after a valley end: lowest tip speed since; a new strike must rise above it (RearmReady)
 } g_sm[2];
 std::atomic<int> g_spentValleyEnds{0}, g_spentTimeoutEnds{0};   // worker -> 5 s combat summary
 
@@ -1009,6 +1010,7 @@ float Fatigue(int stam, int maxStam, const Config& c) {
 }
 
 int g_prevStam = INT_MIN;   // stamina at the end of the previous frame body (hit / block impact detection); INT_MIN = unknown
+constexpr int kHitMarkStamina = 8;   // stamina off, one hit per swing: the strike's on-hit behavior cost (refunded) - clear of a frame's regen
 
 // End of the per-frame body. [Cheats] InfiniteStamina refills the bar to max here - AFTER the
 // hit / blocked-hit detection above has seen this frame's one-frame drop - so the game charges its
@@ -1280,8 +1282,11 @@ struct EnemyFrame {
     int   dmgEvents = 0;       // enemies whose HP dropped this frame
     int   dmgTotal = 0;        // sum of those drops
     int   unattributed = 0;    // ...of which no attacker was recorded (still counted as ours)
+    int   ownEvents = 0;       // ...of which the attacker recorded is the player
     int   foreignEvents = 0;   // HP drops someone else caused (not counted above)
     int   foreignDmg = 0;
+    int   riseEvents = 0;      // HP went UP: regen, or the owner's game overriding a drop we applied locally
+    int   riseTotal = 0;
     float nearest = 1e9f;      // distance of the nearest live non-player character
     int   nearestNpc = 0;
 };
@@ -1295,6 +1300,7 @@ struct CombatTally {
     int strikes[2] = {}, landed[2] = {}, spent[2] = {};
     int hitFrames = 0, dmg = 0, sliceN = 0; float sliceSum = 0.f;
     int unattributed = 0, foreign = 0, foreignDmg = 0, outside = 0;
+    int stamMarks = 0, stamOnly = 0, rises = 0, riseTotal = 0;
 } g_tally;
 double g_tallyAt = 0;
 
@@ -1316,12 +1322,13 @@ void FlushTally(double now) {
     g_tallyAt = now;
     CombatTally& t = g_tally;
     const int spentEnds = g_spentValleyEnds.exchange(0), spentTimeouts = g_spentTimeoutEnds.exchange(0);
-    if (t.strikes[0] + t.strikes[1] + t.hitFrames + t.foreign + t.outside + spentEnds + spentTimeouts > 0)
+    if (t.strikes[0] + t.strikes[1] + t.hitFrames + t.foreign + t.outside + t.rises + spentEnds + spentTimeouts > 0)
         LOGI("[combat] 5 s: strikes right %d (%d landed, %d budget-spent) left %d (%d landed, %d budget-spent); spent strikes re-armed at a speed valley %d, by timeout %d | "
-             "own hit-frames %d, %d damage, mean slice %.2f of a vanilla hit | HP drops: %d without a recorded attacker (counted as ours), %d not ours (%d damage), %d of ours outside a strike%s",
+             "own hit-frames %d, %d damage, mean hit %.2f of a vanilla hit, %d on-hit stamina marks (%d with no HP drop seen) | HP drops: %d without a recorded attacker (counted as ours), "
+             "%d not ours (%d damage), %d of ours outside a strike | HP rose %d times (+%d)%s",
              t.strikes[HandRight], t.landed[HandRight], t.spent[HandRight], t.strikes[HandLeft], t.landed[HandLeft], t.spent[HandLeft], spentEnds, spentTimeouts,
-             t.hitFrames, t.dmg, t.sliceN ? t.sliceSum / (float)t.sliceN : 0.f, t.unattributed, t.foreign, t.foreignDmg, t.outside,
-             GameERCoopInSession() ? " | co-op session" : "");
+             t.hitFrames, t.dmg, t.sliceN ? t.sliceSum / (float)t.sliceN : 0.f, t.stamMarks, t.stamOnly, t.unattributed, t.foreign, t.foreignDmg, t.outside,
+             t.rises, t.riseTotal, GameERCoopInSession() ? " | co-op session" : "");
     t = CombatTally{};
 }
 
@@ -1366,11 +1373,11 @@ EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c) 
                 uint64_t by = 0;
                 const bool none = attribute && (!SafeRead(chr + Chr_LastHitBy, &by, 8) || (uint32_t)by == UINT32_MAX);
                 const bool ours = !attribute || none || by == self;
-                if (ours) { ++ef.dmgEvents; ef.dmgTotal += delta; if (none) ++ef.unattributed; }
+                if (ours) { ++ef.dmgEvents; ef.dmgTotal += delta; if (none) ++ef.unattributed; else ++ef.ownEvents; }
                 else { ++ef.foreignEvents; ef.foreignDmg += delta; }
                 if (attribute) SampleAttribution(none ? 1 : ours ? 0 : 2, npc, delta, by, self, anyStrikeActive);
                 if (c.combatDebug) LOGD("[combat] enemy npc %d (%.1f m): hp %d -> %d/%d (-%d)%s%s%s", npc, dist, it->second.hp, hp, maxHp, delta, anyStrikeActive ? "" : " (no strike active)", hp <= 0 ? " KILLED" : "", ours ? "" : " - hit by someone else, not counted");
-            }
+            } else if (delta < 0 && it->second.hp > 0) { ++ef.riseEvents; ef.riseTotal -= delta; }
             it->second.hp = hp; it->second.seenFrame = g_enemyFrame;
         } else g_enemyPrev[chr] = {hp, g_enemyFrame};
     }
@@ -1445,13 +1452,42 @@ void GameFrameBody(uint8_t* player) {
     // charges per hit - but never while the shield is up and the drop is guard-impact sized;
     // 13:51:38 log: the session's only stamina-"HIT" was a 47-point blocked enemy attack.
     const EnemyFrame ef = WatchEnemies(player, cmd[0].active || cmd[1].active, c);
-    bool stamHit = stamKnown && (g_prevStam - stamAtEntry) >= (stamOff ? 1 : c.kineticHitStamina);
-    if (blk.raised && stamKnown && (g_prevStam - stamAtEntry) >= c.blockImpactStamina) stamHit = false;
-    const bool hitNow = ef.available ? ef.dmgEvents > 0 : stamHit;
+    // One hit per swing (continuous contacts, KineticSlices=false): the swing's damage lands as ONE
+    // quality-scaled hit and the strike is spent. ER takes flat defense off every hit, so the per-frame
+    // slices (6-10% of a hit) dealt 3-5 HP each where a full hit deals hundreds (2026-10-31 co-op log).
+    const bool oneHit = c.kineticContinuous && !c.kineticSlices;
+    // The game charges the strike's behavior stamina when OUR attack lands - an attacker-side mark no one
+    // else's hit can make. Stamina off forces that cost to kHitMarkStamina for the strike (refunded), so
+    // the mark stands clear of a frame's regen; at 1 it was lost in it.
+    const int stamDrop = stamKnown ? g_prevStam - stamAtEntry : 0;
+    bool stamHit = stamKnown && stamDrop >= (stamOff ? (oneHit ? kHitMarkStamina / 2 : 1) : c.kineticHitStamina);
+    if (blk.raised && stamKnown && stamDrop >= c.blockImpactStamina) stamHit = false;
+    const bool striking = cmd[0].active || cmd[1].active;
+    // On an enemy another player's game owns, the game records no attacker at all (2026-10-31: every
+    // co-op drop read last_hit_by ffffffff, ours included), so a partner's hit there reads as ours and
+    // would end our swing. Once the stamina mark has been seen landing with such a drop three times this
+    // session, only the mark (or a drop the game does attribute to us) counts - plus drops on two strike
+    // frames in a row, which is our own blade inside an enemy (a partner's hit is one event): a mark that
+    // stopped working can cost at most a second hit, never a hit every frame.
+    static bool s_markTrusted = false, s_wasSession = false;
+    static int s_markEvidence = 0, s_dropRun = 0;
+    const bool session = GameERCoopInSession();
+    if (session != s_wasSession) { s_markTrusted = false; s_markEvidence = 0; s_wasSession = session; }
+    if (oneHit && session && !s_markTrusted && striking && stamHit && ef.dmgEvents > 0 && ++s_markEvidence >= 3) {
+        s_markTrusted = true;
+        LOGI("[combat] co-op: your hits carry the game's own on-hit stamina mark - HP drops with no attacker recorded (a partner's hits) no longer end your swing");
+    }
+    s_dropRun = striking && ef.dmgEvents > 0 ? s_dropRun + 1 : 0;
+    bool hitNow;
+    if (!ef.available) hitNow = stamHit;
+    else if (s_markTrusted) hitNow = stamHit || ef.ownEvents > 0 || s_dropRun >= 2;
+    else hitNow = ef.dmgEvents > 0 || (oneHit && stamHit);
+    if (striking && stamHit) { ++g_tally.stamMarks; if (ef.dmgEvents == 0) ++g_tally.stamOnly; }
     if (ef.available) {
-        if (cmd[0].active || cmd[1].active) { if (ef.dmgEvents > 0) { ++g_tally.hitFrames; g_tally.dmg += ef.dmgTotal; } }
+        if (striking) { if (ef.dmgEvents > 0) { ++g_tally.hitFrames; g_tally.dmg += ef.dmgTotal; } }
         else g_tally.outside += ef.dmgEvents;
         g_tally.unattributed += ef.unattributed; g_tally.foreign += ef.foreignEvents; g_tally.foreignDmg += ef.foreignDmg;
+        g_tally.rises += ef.riseEvents; g_tally.riseTotal += ef.riseTotal;
     }
     static double s_lastHitHaptic[2] = {0, 0};
     for (int h = HandRight; h >= HandLeft; --h) {   // right first (main hand)
@@ -1479,6 +1515,11 @@ void GameFrameBody(uint8_t* player) {
             // watcher signalling the hit there may be nothing to refund).
             if (stamOff && stamAtEntry < g_prevStam) { WriteStamina(player, g_prevStam); stam = g_prevStam; }
             if (c.combatDebug && (!c.kineticContinuous || s_strikeHits[h] == 1)) LOGD("[combat] %s strike HIT #%d (%d damage, stamina %d -> %d)%s", HandName(h), s_strikeHits[h], ef.dmgTotal, g_prevStam, stamAtEntry, stamOff ? " refunded" : "");
+            if (oneHit) {   // the swing landed its one hit: spent (the worker re-arms on the next swing)
+                std::lock_guard<std::mutex> g(g_mtx);
+                if (g_cmd[h].id == k.id) g_cmd[h].active = false;
+                continue;
+            }
             if (!c.kineticContinuous) {
                 if (c.kineticHitPause <= 0.f) {
                     std::lock_guard<std::mutex> g(g_mtx);
@@ -1539,7 +1580,7 @@ void GameFrameBody(uint8_t* player) {
             const float fat = stamOff ? 1.f : Fatigue(stam, maxStam, c);
             if (k.quality > s_qMax[h]) s_qMax[h] = k.quality;
             if (k.qualityCommit > s_qMax[h]) s_qMax[h] = k.qualityCommit;
-            if (c.kineticContinuous) {
+            if (c.kineticContinuous && c.kineticSlices) {
                 // Every frame of contact is a hit, so each one is a slice of a vanilla hit sized by the
                 // tip's speed right now: nothing at rest, KineticContinuousMult at KineticRefSpeed.
                 const float ref = c.kineticRefSpeed > 0.5f ? c.kineticRefSpeed : 8.f;
@@ -1566,7 +1607,7 @@ void GameFrameBody(uint8_t* player) {
                 // reaction (dmg_level/hitstop/poise -> 0): one flinch per swing, no stunlock.
                 const bool suppress = c.kineticFlinchFirstHitOnly && s_strikeHits[h] > 0;
                 ApplyAtk(h, r, mult, suppress);
-                if (stamOff) ApplyBhvStamina(h, r, 1);
+                if (stamOff) ApplyBhvStamina(h, r, oneHit ? kHitMarkStamina : 1);
                 // A weapon whose own variation lacks this judge: point its behaviorVariationId at
                 // the candidate that has it for the strike's duration, so the game's own resolve
                 // lands on the rows edited above instead of whatever its fallback finds (or fails
@@ -2264,10 +2305,11 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             pending = g_cmd[h].active && g_cmd[h].first;
         }
         if (fail && s.st == HandSM::Swinging) { s.st = HandSM::Cooldown; s.t = now; }
+        if (s.rearmMin > 0.f && (s.st == HandSM::Cooldown || s.st == HandSM::Idle)) s.rearmMin = std::min(s.rearmMin, std::max(tip, 0.01f));
         switch (s.st) {
         case HandSM::Idle:
-            if (pending || !WeaponContactStarts(allowed, continuous, tip, handSpd, onSpeed, c.minHandSpeed)) break;
-            s.st = HandSM::Armed; s.t = now; s.peak = tip;
+            if (pending || !WeaponContactStarts(allowed, continuous, tip, handSpd, onSpeed, c.minHandSpeed) || !RearmReady(tip, s.rearmMin)) break;
+            s.st = HandSM::Armed; s.t = now; s.peak = tip; s.rearmMin = 0.f;
             [[fallthrough]];
         case HandSM::Armed: {
             if (tip > s.peak) s.peak = tip;
@@ -2319,8 +2361,10 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                 if (c.combatDebug) LOGD("[combat] %s swing end after %.0f ms (peak %.2f m/s, virtual peak %.2f m/s, arc %.2f m)%s", HandName(h), (now - s.t) * 1000.0, s.peak, s.vVirtPeak, s.arc,
                                         valleyEnd ? " - spent strike, speed valley" : timeoutEnd ? " - spent strike, timeout" : "");
                 EndSwing(h); s.st = HandSM::Cooldown; s.t = now;
-                // Re-arm from the valley (or at once after a timeout) rather than from rest.
+                // Re-arm from the valley (or at once after a timeout) rather than from rest; after a
+                // valley only once the tip speeds up again.
                 s.restSpeed = valleyEnd ? valley : timeoutEnd ? 1e9f : 0.f;
+                s.rearmMin = valleyEnd ? std::max(tip, 0.01f) : 0.f;
                 if (valleyEnd) g_spentValleyEnds.fetch_add(1, std::memory_order_relaxed);
                 if (timeoutEnd) g_spentTimeoutEnds.fetch_add(1, std::memory_order_relaxed);
             } else UpdateSwing(h, StrikeQuality(vEff, s.arc, weight, reach, c), s.arc, vEff, tip);

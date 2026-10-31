@@ -50,4 +50,11 @@ inline int SpentContactEnd(bool spent, float tip, float peak, float offSpeed, fl
     return sinceSpent >= spentSeconds ? 2 : 0;
 }
 
+// After a spent contact ended at a valley, the next contact needs the tip to speed up again from the
+// lowest speed it reached since (rearmMin, 0 = no condition): the follow-through of the swing that
+// just hit only slows down, so it can never open a second hit.
+inline bool RearmReady(float tip, float rearmMin) {
+    return rearmMin <= 0.f || tip >= rearmMin * 1.5f + 0.5f;
+}
+
 } // namespace ervr

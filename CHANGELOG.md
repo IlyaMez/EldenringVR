@@ -39,14 +39,25 @@ release workflow and published on GitHub Releases and Nexus Mods.
   hkbCharacter, the chr cam's follow cam).
 
 ### Combat
+* Each swing now lands ONE hit scaled by the swing's quality instead of a slice of a hit on every frame
+  of contact. ELDEN RING takes the enemy's flat defense off every hit, so slices of 6-10% of a hit dealt
+  3-5 HP each where a full hit deals hundreds; swings "connected but did much less damage".
+  `[Combat] KineticSlices=true` restores the slice model.
+* Your own hits are marked by the game's on-hit stamina charge (with `KineticStamina=off` the strike's
+  cost is 8 instead of 1, refunded). On enemies a co-op partner's game owns the game records no
+  attacker, so a partner's hit used to read as yours; once the mark has been seen with your hits, it
+  alone (or two strike frames in a row with HP drops) ends a swing.
+* After a swing that hit, the next one arms only once the weapon speeds up again, so the
+  follow-through cannot land a second hit.
 * A swing whose damage budget was spent stayed inert until the weapon tip came to rest, which a long
   weapon rarely does mid-fight, so every later swing was swallowed ("attacks stopped registering").
   A spent swing now ends at the tip's next speed valley, or `[Combat] ContactSpentSeconds` (1 s)
   after it was spent, and the next swing starts with a fresh budget (`ContactValley`, 0.4 of the
   swing's peak speed).
 * The log gets a 5 s combat summary while fighting: strikes, landed and budget-spent swings,
-  damage, and whose HP drops the enemy watcher saw. In a co-op session the first drops of each kind
-  are logged with the attacker handles.
+  damage, on-hit stamina marks, whose HP drops the enemy watcher saw, and how often enemy HP rose
+  again (in co-op: the owner's game overriding a hit). In a co-op session the first drops of each
+  kind are logged with the attacker handles.
 
 ### Fixes
 * Singleton lookup accepts a name string packed right after non-text data; `CSGaitem` (Ash of War

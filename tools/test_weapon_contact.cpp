@@ -35,6 +35,9 @@ int main() {
           "a spent contact that never slows (windmilling) must still re-arm");
     Check(SpentContactEnd(true, 0.2f, 0.4f, 0.25f, 0.4f, 0.0, 1.f) == 1,
           "a slow spent contact falls back to the off speed as its valley");
+    Check(RearmReady(0.9f, 0.f), "without a valley end the usual contact start applies");
+    Check(!RearmReady(2.5f, 3.1f), "a decelerating follow-through must not open a second hit");
+    Check(RearmReady(1.0f, 0.3f), "the next swing out of a reversal must arm");
     WeaponContactLifetime contact;
     contact.Begin(); contact.End();
     Check(contact.active && contact.first, "a contact shorter than a game frame must survive until delivery");

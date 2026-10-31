@@ -283,6 +283,10 @@ struct Config {
     // Continuous model (2026-08-25, user's call): every frame of contact is a hit, each sized by the tip's
     // speed right now - 0 at rest, KineticContinuousMult of a vanilla hit at KineticRefSpeed.
     bool  kineticContinuous = true;
+    // Continuous contacts deliver each swing as ONE hit scaled by the swing's quality, then the strike is
+    // spent. ER takes flat defense off every hit, so per-frame slices of 6-10% of a hit dealt 3-5 HP each
+    // on an enemy a full hit takes hundreds from (2026-10-31). true = the per-frame slice model.
+    bool  kineticSlices = false;
     float contactOnSpeed = 0.8f;         // m/s: continuous contacts open immediately, including wrist-driven arcs
     float contactOffSpeed = 0.25f;       // m/s: contact hysteresis; a resting blade does not attack
     // A strike whose swing budget is spent ends at the tip's next speed valley (below this fraction of the
