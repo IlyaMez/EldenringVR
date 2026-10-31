@@ -81,6 +81,8 @@ struct StereoStats {
     long  monoStalls = 0;
     float lastSubmitMs = 0;
     float cropU = 1, cropV = 1;   // fraction of the back buffer each eye actually uses
+    float waitFrameMsAvg = 0, waitFrameMsMax = 0;   // xrWaitFrame on the game's frame thread, since the last read
+    float headsetHz = 0;          // 1 / predictedDisplayPeriod; 0 until a frame has been waited
 };
 StereoStats StereoGetStats();
 }

@@ -30,6 +30,23 @@ std::atomic<float> g_lastSubmitMs{0.f};
 std::atomic<int>   g_mode{(int)StereoMode::Off};
 std::atomic<float> g_cropU{1.f}, g_cropV{1.f};
 
+// xrWaitFrame runs on the game's own frame thread (inside a Present, inside pass 2 under
+// PresentLag=1), so every millisecond the runtime holds it is a millisecond of the stereo
+// loop. Summed per heartbeat, with the headset refresh it is pacing against.
+std::atomic<long long> g_waitUs{0}, g_waitMaxUs{0};
+std::atomic<long>      g_waitN{0};
+std::atomic<long long> g_displayPeriodNs{0};
+
+bool WaitBegin(IVRBackend* vr, VRFrameInfo& fi) {
+    if (!vr->WaitBeginFrame(fi)) return false;
+    const long long us = (long long)(fi.waitMs * 1000.f);
+    g_waitUs.fetch_add(us, std::memory_order_relaxed);
+    if (us > g_waitMaxUs.load(std::memory_order_relaxed)) g_waitMaxUs.store(us, std::memory_order_relaxed);
+    g_waitN.fetch_add(1, std::memory_order_relaxed);
+    if (fi.displayPeriodNs > 0) g_displayPeriodNs.store(fi.displayPeriodNs, std::memory_order_relaxed);
+    return true;
+}
+
 // ---- the baton ---------------------------------------------------------------------
 std::mutex        g_batonMtx;
 bool              g_reqActive = false;
@@ -617,7 +634,7 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
         }
         g_lastOpenTick = GetTickCount64();
         VRFrameInfo fi;
-        if (!vr->WaitBeginFrame(fi)) return;
+        if (!WaitBegin(vr, fi)) return;
         g_openFi = fi;
         PublishEyeRequest(vr, f, fi);
 
@@ -667,7 +684,7 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
                     g_monoStalls.fetch_add(1, std::memory_order_relaxed);
                 }
                 VRFrameInfo fi;
-                if (!vr->WaitBeginFrame(fi)) return;
+                if (!WaitBegin(vr, fi)) return;
                 PublishEyeRequest(vr, f, fi);
                 VRSubmitLayer layer;
                 if (fi.shouldRender && BlitQuad(vr, f, bp)) layer.quadValid = true;
@@ -755,7 +772,7 @@ void StereoOnPresent(const Dx12Frame& f) {
 
     const double t0 = NowMs();
     VRFrameInfo fi;
-    if (!vr->WaitBeginFrame(fi)) return;   // not running / not visible yet
+    if (!WaitBegin(vr, fi)) return;   // not running / not visible yet
 
     VRSubmitLayer layer;
     bool didStereo = false;
@@ -812,6 +829,11 @@ StereoStats StereoGetStats() {
     s.lastSubmitMs = g_lastSubmitMs.load();
     s.cropU = g_cropU.load();
     s.cropV = g_cropV.load();
+    const long wn = g_waitN.exchange(0);
+    const long long wus = g_waitUs.exchange(0), wmax = g_waitMaxUs.exchange(0);
+    if (wn > 0) { s.waitFrameMsAvg = (float)wus / 1000.f / (float)wn; s.waitFrameMsMax = (float)wmax / 1000.f; }
+    const long long per = g_displayPeriodNs.load();
+    if (per > 0) s.headsetHz = (float)(1e9 / (double)per);
     return s;
 }
 }

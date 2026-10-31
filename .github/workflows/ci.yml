@@ -38,7 +38,8 @@ jobs:
             "build/dist/LICENSE-ReShade.txt",
             "build/dist/dinput8.dll",
             "build/dist/ERVR/ERVR.dll",
-            "build/dist/ERVR/ERVR.ini"
+            "build/dist/ERVR/ERVR.ini",
+            "build/dist/ERVR Launcher.exe"
           )
           $missing = $expected | Where-Object { -not (Test-Path $_) }
           if ($missing) { throw "missing from dist: $($missing -join ', ')" }

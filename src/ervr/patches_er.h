@@ -12,6 +12,9 @@ void PatchesInit();   // apply once, after the game module is loaded (worker thr
 float* PatchesFrameDtImm();
 // Patch the imm to `dt` (protection dance + icache flush). False when unresolved/failed.
 bool  PatchesWriteFrameDt(float dt);
+// [VR] LimiterFollowsHeadset: given the headset's refresh (0 = unknown), raise the frame
+// limiter just above it if it sits lower. Cheap to call every worker tick; acts on changes.
+void  PatchesFollowHeadsetRefresh(float hz);
 
 // [VR] GameRes: overwrite the game's 1920x1080 resolution-table entry with the VR render
 // target and bypass the 16:9 aspect clamp, so the user can pick a headset-sized (near-
@@ -24,6 +27,9 @@ void PatchesApplyGameResolution();
 // game also polls the same metrics during play, and a standing height lie is the measured
 // cause of the vertical head-motion warp (2026-08-22, and once before at 1496x1360).
 void PatchesNoteBackbufferSize(uint32_t w, uint32_t h);
+// The 16:9 letterbox patch is in: a window off 16:9 renders full-size instead of a 16:9
+// frame inside black bars. False when it was never needed, or is unavailable.
+bool PatchesLetterboxRemoved();
 // DllMain(PROCESS_ATTACH)-safe optimistic GraphicsConfig.xml write - kernel32 file APIs
 // only, no logging, no patching. Must beat the game's boot-time read of the file, which
 // even the first worker-thread statements measurably lose to. `module` is ERVR's own

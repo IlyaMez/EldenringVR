@@ -56,11 +56,26 @@ both want to be `dxgi.dll`.
 
 ## Download
 
-Grab the latest zip from [**Releases**](../../releases) (the same file is published on Nexus Mods) and unpack it
-into your `ELDEN RING\Game` folder, next to `eldenring.exe`:
+Grab the latest zip from [**Releases**](../../releases) (the same file is published on Nexus Mods), unpack it
+anywhere and start **`ERVR Launcher.exe`**:
+
+* **Play** checks this PC: the game in your Steam libraries and whether its patch has a verified address map,
+  the OpenXR runtimes (Automatic picks Virtual Desktop while its streamer runs, SteamVR while it runs, else
+  Windows' active one), the headset (*Check* asks the runtime), ERVR in the game folder, and flat mods in VR's way.
+  **START VR** then installs or updates ERVR, parks those mods, starts Steam if needed and starts the game with
+  EAC off (or through Seamless Co-op when it is installed), and shows `ERVR.log` live as it plays.
+* **Options** edits the game folder's `ERVR.ini` in place (view, resolution, HUD panel, turning, combat, log
+  level...), and ERVR takes each change within a second, mid-game too.
+* **Controls** lists the default bindings; **About** has *Play flat* (park ERVR, restore the flat mods) and
+  *Remove ERVR*.
+
+The launcher changes only the files listed below and the mods it parks (renamed to `*.ervr-off`, never deleted),
+and like ERVR it has no network code: links open in your browser, updates are a new zip. Unpacking the zip straight
+into `ELDEN RING\Game`, next to `eldenring.exe`, works as before; the launcher then finds itself in place.
 
 ```
 Game\
+  ERVR Launcher.exe the launcher (optional: the files below are all the game needs)
   dxgi.dll          ReShade 6.8.0 with add-on support (bundled, unmodified)
   ReShade.ini       ReShade defaults (tutorial off, overlay on Home)
   dinput8.dll       ERVR's proxy loader
@@ -96,12 +111,15 @@ source — it takes a minute.
 ## Build & install
 
 ```powershell
-.\build.ps1          # -> build\dist\{dxgi.dll, ReShade.ini, dinput8.dll, ERVR\ERVR.dll, ERVR\ERVR.ini}
+.\build.ps1          # -> build\dist\{ERVR Launcher.exe, dxgi.dll, ReShade.ini, dinput8.dll, ERVR\ERVR.dll, ERVR\ERVR.ini}
 .\install.ps1        # copies into ...\ELDEN RING\Game   (-GameDir to override, -Uninstall to remove)
 ```
 
 `install.ps1` keeps an existing `ERVR.ini` and `ReShade.ini`, backs up a foreign `dxgi.dll` to `dxgi.dll.ervr-bak`,
 and refuses to overwrite another mod loader's `dinput8.dll` (it tells you where to put `ERVR.dll` instead).
+`build\dist\ERVR Launcher.exe` does the same from its window (it installs the `build\dist` beside it; started from
+`build\Release` it finds `build\dist` too). The launcher's sources are in `src/launcher/`; `-DERVR_BUILD_LAUNCHER=OFF`
+skips it.
 For a manual DLL update, replace only `ERVR\ERVR.dll`; copying the bundled `ERVR.ini` resets your settings.
 
 Then launch the game (offline, EAC disabled) and put the headset on. `Game\ERVR\ERVR.log` shows what happened:

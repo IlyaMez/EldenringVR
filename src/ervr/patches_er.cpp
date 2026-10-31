@@ -1,5 +1,6 @@
 #include "patches_er.h"
 #include "game_memory.h"
+#include "game_res.h"
 #include "config.h"
 #include "log.h"
 #include <windows.h>
@@ -30,12 +31,12 @@ bool PatchWrite(uint8_t* at, const void* bytes, size_t n) {
 
 // Patterns from uberhalit/EldenRingFpsUnlockAndMore GameData.cs (MIT, (c) uberhalit).
 //
-// FRAMELOCK: `mov [reg+disp], 0x3C888889` - the 1/60 the game stores as its per-frame delta
-// time every frame. This is the SAME constant our registered probe tasks observed coming
-// back as FD4TaskData::dt (fixed 0.01667 even when the real frame rate sagged to 40), so
-// patching it moves the limiter target AND the simulation step together: the game runs at
-// correct speed exactly when it actually reaches the target rate, and in slow motion when
-// the GPU cannot keep up. That is inherent to the game's fixed-step design, not a bug here.
+// FRAMELOCK: `mov [reg+disp], 0x3C888889` - the 1/60 the game stores as its frame-time
+// target every frame: the frame LIMITER. It does not set game speed: the tasks consume the
+// MEASURED frame time (the frame-dt global, see frame_probe.cpp), so the sim keeps real time
+// at any achieved rate - measured 2026-10-31, in-game clock x0.98 of wall time at 52 pairs/s
+// under a 1/72 tick (a fixed step would have read x0.68). Below the target the cost is
+// frame rate, not slow motion.
 constexpr const char* kPatFramelock = "C7 ?? ?? ?? 88 88 3C EB";
 constexpr int         kOffFramelock = 3;   // the imm32 float (its low byte varies: 88/89/90)
 constexpr const char* kPatFramelockFuzzy = "89 73 ?? C7 ?? ?? ?? ?? ?? ?? EB ?? 89 73";
@@ -102,6 +103,8 @@ constexpr int         kOffAspectOld = 4;
 constexpr const char* kPatAspectNew = "74 4F 45 8B 94 CC";
 constexpr int         kOffAspectNew = 0;
 
+std::atomic<bool> g_letterboxOff{false};   // PatchAspectClamp applied: the frame fills the window
+
 bool PatchAspectClamp() {
     static int s_state = -1;   // -1 untried, 0 unavailable, 1 patched
     if (s_state >= 0) return s_state == 1;
@@ -116,6 +119,7 @@ bool PatchAspectClamp() {
     }
     const uint8_t jmp = 0xEB;
     s_state = PatchWrite(je, &jmp, 1) ? 1 : 0;
+    g_letterboxOff.store(s_state == 1);
     if (s_state)
         LOGI("[patch] 16:9 letterbox removed at rva 0x%llx: the frame now fills the window, so "
              "its frustum matches its dimensions and the eye crop is exact",
@@ -127,9 +131,52 @@ bool PatchAspectClamp() {
 
 // Every patched slot, at file scope so the GameResScan census below can watch them.
 std::vector<uint8_t*> g_resSlots;
+// The table's LAST entry (stock 3840x2160, four slots past 1920x1080; 12 entries from 800x450,
+// dumped from 2.7.2.0). Which entry the settings-apply picks is ORDER-dependent: the last one,
+// in table order, that fits inside the request. Every measured snap fits that rule and no
+// other - 3712x2088 asked with the target in the 1920x1080 slot came up 3200x1800 (2026-10-31),
+// 4224x2376 -> 3840x2160 (08-23), 1496x1360 -> 1440x810 (08-21). So on the oversize path,
+// where the patched size check lets the walk reach the end, the target must ALSO sit in the
+// last slot or a stock entry after the 1920 slot outbids it.
+constexpr uint32_t kLastSlotOff = 4 * 8, kLastSlotW = 3840, kLastSlotH = 2160;
+std::vector<uint8_t*> g_resLastSlots;
+// The last slot as written at DLL attach (EarlyLastSlotWrite), so the worker's scan accepts it.
+uint8_t* g_earlyLastSlot = nullptr;
 
-// Put `w`x`h` into the table so the game accepts it from GraphicsConfig.xml.
-bool PatchResTable(uint32_t w, uint32_t h) {
+// DllMain-safe (kernel32-free, POD only, SEH): find the table in the game's initialized
+// .data and write the target into its LAST slot. Attach time because the worker loses the
+// race: the boot-time settings apply walks the table ~0.5 s in, the worker's patch landed
+// ~0.1 s after that (2026-10-31: apply's monitor-rect queries at :53.498, worker table patch
+// at :53.608 - the walk saw only stock sizes and 3712x2088 came up 3200x1800). Only the last
+// slot: should the size-check NOP ever be missing, the walk stops at the first stock entry
+// too big for the desktop and never reaches it - today's fallback, unchanged.
+uint8_t* EarlyLastSlotWrite(uint32_t w, uint32_t h) {
+    __try {
+        auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+        auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+        IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
+        for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++s) {
+            if (memcmp(s->Name, ".data\0\0\0", 8) != 0) continue;
+            uint8_t* p = base + s->VirtualAddress;
+            const size_t len = s->SizeOfRawData < s->Misc.VirtualSize ? s->SizeOfRawData : s->Misc.VirtualSize;
+            for (size_t o = 0; o + kLastSlotOff + 8 <= len; o += 4) {
+                const uint32_t* q = (const uint32_t*)(p + o);
+                if (q[0] != kSlotW || q[1] != kSlotH || q[2] != 2048 || q[3] != 1152) continue;
+                uint32_t* last = (uint32_t*)(p + o + kLastSlotOff);
+                if (last[0] != kLastSlotW || last[1] != kLastSlotH) return nullptr;
+                last[0] = w;
+                last[1] = h;
+                return (uint8_t*)last;
+            }
+            return nullptr;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return nullptr;
+}
+
+// Put `w`x`h` into the table so the game accepts it from GraphicsConfig.xml; `lastSlot` also
+// writes the final entry (oversize path only - see g_resLastSlots).
+bool PatchResTable(uint32_t w, uint32_t h, bool lastSlot) {
     static bool s_scanned = false;
     if (!s_scanned) {
         s_scanned = true;
@@ -137,18 +184,30 @@ bool PatchResTable(uint32_t w, uint32_t h) {
             uint32_t sw = 0, sh = 0;
             // Bit-exact check: if the slot does not read as the stock 1920x1080 the layout is
             // not what we think it is, and writing blind would corrupt a real entry.
-            if (SafeRead(slot, &sw, 4) && SafeRead(slot + 4, &sh, 4) && sw == kSlotW && sh == kSlotH)
+            if (SafeRead(slot, &sw, 4) && SafeRead(slot + 4, &sh, 4) && sw == kSlotW && sh == kSlotH) {
                 g_resSlots.push_back(slot);
+                uint8_t* last = slot + kLastSlotOff;
+                if (last == g_earlyLastSlot ||
+                    (SafeRead(last, &sw, 4) && SafeRead(last + 4, &sh, 4) && sw == kLastSlotW && sh == kLastSlotH))
+                    g_resLastSlots.push_back(last);
+            }
         }
         if (g_resSlots.empty())
             LOGW("[patch] resolution table not found; the game will snap GameRes to its nearest "
                  "built-in size");
         else
-            LOGD("[patch] resolution table: %zu copy(ies) of the 1920x1080 slot", g_resSlots.size());
+            LOGD("[patch] resolution table: %zu copy(ies) of the 1920x1080 slot, %zu of the last slot",
+                 g_resSlots.size(), g_resLastSlots.size());
     }
     const uint32_t wh[2] = {w, h};
     int ok = 0;
     for (uint8_t* slot : g_resSlots) if (PatchWrite(slot, wh, sizeof(wh))) ++ok;
+    if (lastSlot) {
+        if (g_resLastSlots.empty())
+            LOGW("[patch] the resolution table's last slot is not the stock 3840x2160; an oversize "
+                 "GameRes may snap to the largest stock entry that fits inside it");
+        for (uint8_t* slot : g_resLastSlots) PatchWrite(slot, wh, sizeof(wh));
+    }
     return ok > 0;
 }
 
@@ -553,23 +612,9 @@ std::wstring CachePath() {
     return (p == std::wstring::npos ? std::wstring(L".") : ini.substr(0, p)) + L"\\ERVR.cache.ini";
 }
 
-// The target the settings file should hold; false = feature off / stereo off.
-// The oversize auto target: a 16:9 frame carrying the same pixel budget as the headset's
-// own (near-square) eye recommendation, times GameResScale. 16:9 on purpose - the game's
-// projection carries a constant 1.778 aspect (camera struct +0x54, measured 2026-08-23
-// even on a 0.94 buffer), so a 16:9 frame has exactly the geometry of the fitted frame
-// the stereo math is proven on, just denser; the eye-shaped frame of 08-22/23 is where
-// every geometry regression lived. Equal pixel budget = equal GPU cost to the shape the
-// user already ran. Pure arithmetic: shared with the DllMain-time config write, which
-// must land on the identical numbers or the settings-apply rejects the request.
-void Auto169Target(uint32_t eyeW, uint32_t eyeH, double scale, uint32_t& w, uint32_t& h) {
-    const double budget = (double)eyeW * (double)eyeH;
-    double fh = std::sqrt(budget * 9.0 / 16.0) * scale;
-    if (fh < 480.0) fh = 480.0;
-    h = (uint32_t)(fh + 0.5);
-    w = (uint32_t)(fh * 16.0 / 9.0 + 0.5);
-}
-
+// The target the settings file should hold; false = feature off / stereo off. The auto size
+// and the final snap (game_res.h) are shared with the DllMain-time config write, which must
+// land on the identical numbers or the settings-apply rejects the request.
 bool ResolveResTarget(uint32_t& w, uint32_t& h) {
     const Config& c = Cfg();
     if (c.vrStereoMode == "off" || c.vrGameRes == "off" || c.vrGameRes.empty()) return false;
@@ -601,14 +646,24 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
     const float s = std::min(2.f, std::max(0.25f, c.vrGameResScale));
     const bool oversize = c.vrGameResOversize && PatchSizeCheck();
     if (oversize) {
+        const uint32_t askW = w, askH = h;
         if (c.vrGameRes == "auto") {
             // No ceiling: a 16:9 frame at the eye recommendation's pixel budget (see
             // Auto169Target), GameResScale scaling that height.
-            const uint32_t ew = w, eh = h;
-            Auto169Target(ew, eh, s, w, h);
+            Auto169Target(askW, askH, s, w, h);
+            SnapGameRes(w, h);
             LOGI("[patch] GameRes auto: 16:9 frame %ux%u at the headset's %ux%u pixel budget"
-                 " (x%.2f) - fitted-frame geometry, oversize density", w, h, ew, eh, s);
+                 " (x%.2f) - fitted-frame geometry, oversize density", w, h, askW, askH, s);
+        } else {
+            SnapGameRes(w, h);
+            if (w != askW || h != askH)
+                LOGI("[patch] GameRes %ux%u -> %ux%u: %s", askW, askH, w, h,
+                     (uint64_t)w * 9 == (uint64_t)h * 16
+                         ? "exact 16:9 - a frame slightly off 16:9 renders 16:9 inside black "
+                           "bars, where the HUD layer cannot find the UI"
+                         : "multiples of 8");
         }
+        // After the snap: the lies have to cover the size actually requested.
         if (w > screenW || h > screenH) {
             g_fakeDeskW.store(w + 16);
             g_fakeDeskH.store(h + 16);
@@ -618,6 +673,7 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
                  "window clamp lifted, no DSR needed. The swapchain line below is the proof.",
                  w, h, screenW, screenH);
         }
+        return true;
     } else if (c.vrGameRes == "auto") {
         // Fit to the desktop: HEIGHT-first, because per-eye pixels track the frame's height
         // almost alone - the crop keeps roughly 1.05*height horizontally however wide the
@@ -632,8 +688,9 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
         // sharpest frame this desktop allows". Applied to the headset's raw recommendation
         // instead it would do nothing at all until it dropped below the desktop cap.
         const uint32_t maxH = std::min({screenH, (uint32_t)((uint64_t)screenW * 9 / 16)});
-        const uint32_t fh = std::min({(uint32_t)(std::min(h, maxH) * s), maxH});
-        const uint32_t fw = (uint32_t)((uint64_t)fh * 16 / 9);
+        uint32_t fh = std::min({(uint32_t)(std::min(h, maxH) * s), maxH});
+        uint32_t fw = (uint32_t)((uint64_t)fh * 16 / 9);
+        SnapGameRes(fw, fh, maxH);   // exact 16:9, still inside the desktop
         if (fw != w || fh != h)
             LOGI("[patch] GameRes target %ux%u -> %ux%u: the tallest 16:9 frame that fits the "
                  "%ux%u desktop%s.",
@@ -641,17 +698,13 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
                  c.vrGameResOversize ? " (size-check patch unavailable on this game version)"
                                      : " (GameResOversize=false)");
         w = fw; h = fh;
+        return true;
     } else if (w > screenW || h > screenH) {
         LOGW("[patch] GameRes %ux%u is larger than the %ux%u desktop and the size-check patch "
              "is unavailable; the game will clamp it to a built-in size. Lower it.",
              w, h, screenW, screenH);
     }
-    // Multiple-of-8 keeps every downstream size (swapchain, crops, video encoders) happy.
-    w = (w + 4u) & ~7u;
-    h = (h + 4u) & ~7u;
-    const auto clampU = [](uint32_t v, uint32_t lo, uint32_t hi) { return v < lo ? lo : (v > hi ? hi : v); };
-    w = clampU(w, 640u, 8192u);
-    h = clampU(h, 480u, 8192u);
+    SnapGameRes(w, h);
     return true;
 }
 
@@ -738,6 +791,36 @@ bool PatchesWriteFrameDt(float dt) {
     return PatchWrite(at, &dt, 4);
 }
 
+// The limiter must sit ABOVE the headset's refresh. Below it the loop can never meet the
+// refresh and the runtime drops the game to half rate: FpsTarget=72 under VD's 90 Hz was the
+// "sluggish" 2026-10-31 session (45 Hz display period, ~52 pairs/s, xrWaitFrame holding the
+// frame thread 6.6 ms a pair); the same loop uncapped ran 88 pairs/s at a 90 Hz period. 5%
+// over the refresh, not equal to it: then xrWaitFrame alone paces the loop - two pacers on
+// nominally the same rate drift against each other and drop frames. Raise-only: a limiter
+// already above the refresh (or a refresh that later drops) needs nothing. The sim consumes
+// the MEASURED frame time, so moving the limiter changes the cap only, never game speed.
+void PatchesFollowHeadsetRefresh(float hz) {
+    static float s_seen = 0.f;
+    if (!Cfg().vrLimiterFollowsHeadset || hz < 30.f || std::fabs(hz - s_seen) < 0.5f) return;
+    s_seen = hz;
+    const float* imm = PatchesFrameDtImm();
+    if (!imm) return;
+    float cur = 0.f;
+    memcpy(&cur, imm, 4);
+    const float curHz = cur > 1e-5f ? 1.f / cur : 0.f;
+    const float want = hz * 1.05f;
+    if (curHz >= want - 0.5f) {
+        LOGI("[patch] frame limiter %.0f fps already clears the %.0f Hz headset", curHz, hz);
+        return;
+    }
+    if (PatchesWriteFrameDt(1.f / want))
+        LOGI("[patch] frame limiter %.0f -> %.0f fps to clear the %.0f Hz headset (a limiter "
+             "below the refresh makes the runtime halve the game's rate)", curHz, want, hz);
+    else
+        LOGW("[patch] frame limiter write failed; with the limiter at %.0f fps under a %.0f Hz "
+             "headset, raise [Patches] FpsTarget above %.0f", curHz, hz, hz);
+}
+
 void PatchesMakeDpiAware() {
     if (!Cfg().patchDpiAware) return;
     static bool s_done = false;
@@ -813,17 +896,18 @@ void PatchesEarlyGraphicsConfigWrite(void* module) {
         w = (uint32_t)GetPrivateProfileIntW(L"Cache", L"HmdEyeW", 0, cache.c_str());
         h = (uint32_t)GetPrivateProfileIntW(L"Cache", L"HmdEyeH", 0, cache.c_str());
         if (!w || !h) { w = 2064; h = 2208; }   // first run: Quest 3-sized default
-        GetPrivateProfileStringW(L"VR", L"GameResScale", L"1.0", buf, 64, ini.c_str());
-        const double s = std::min(2.0, std::max(0.25, _wtof(buf) > 0.01 ? _wtof(buf) : 1.0));
+        GetPrivateProfileStringW(L"VR", L"GameResScale", L"0.86", buf, 64, ini.c_str());   // = config.h default
+        const double s = std::min(2.0, std::max(0.25, _wtof(buf) > 0.01 ? _wtof(buf) : 0.86));
         // Same arithmetic as ResolveResTarget's oversize branch - the two MUST agree.
         const uint32_t ew = w, eh = h;
         Auto169Target(ew, eh, s, w, h);
     } else if (swscanf_s(buf, L"%ux%u", &w, &h) != 2 && swscanf_s(buf, L"%uX%u", &w, &h) != 2) {
         return;
     }
-    w = ((w + 4u) & ~7u); h = ((h + 4u) & ~7u);
-    if (w < 640u) w = 640u; if (w > 8192u) w = 8192u;
-    if (h < 480u) h = 480u; if (h > 8192u) h = 8192u;
+    SnapGameRes(w, h);
+
+    // The file names the size; the table has to list it by the time the apply walks it.
+    g_earlyLastSlot = EarlyLastSlotWrite(w, h);
 
     for (const std::wstring& path : GraphicsConfigPaths()) {
         std::wstring xml;
@@ -850,10 +934,18 @@ void PatchesApplyGameResolution() {
              g_earlyWroteW, g_earlyWroteH);
         g_earlyWroteW = g_earlyWroteH = 0;
     }
+    static bool s_lastSlotLogged = false;
+    if (!s_lastSlotLogged) {
+        s_lastSlotLogged = true;
+        if (g_earlyLastSlot)
+            LOGI("[patch] resolution table's last slot set at DLL attach (rva 0x%llx), ahead of "
+                 "the game's boot-time walk",
+                 (unsigned long long)(g_earlyLastSlot - (uint8_t*)GetModuleHandleW(nullptr)));
+    }
     if (!ResolveResTarget(w, h)) return;
     // The table entry has to exist every launch (it is a memory patch), even when the file
     // already says the right thing - so this runs before the early-out below.
-    const bool listed = PatchResTable(w, h);
+    const bool listed = PatchResTable(w, h, Cfg().vrGameResOversize && PatchSizeCheck());
     // The census must be armed HERE, before the game's boot-time settings apply walks the
     // table - by the first present it has already happened.
     if (Cfg().vrGameResScan) reswatch::Arm(w, h);
@@ -921,6 +1013,8 @@ void PatchesNoteBackbufferSize(uint32_t w, uint32_t h) {
          "height lie is the vertical head-motion warp)", w, h);
 }
 
+bool PatchesLetterboxRemoved() { return g_letterboxOff.load(std::memory_order_relaxed); }
+
 void PatchesNoteHmdEyeSize(uint32_t w, uint32_t h) {
     if (!w || !h) return;
     if (w == g_hmdEyeW && h == g_hmdEyeH) return;   // called at scan cadence; dedupe first
@@ -959,8 +1053,8 @@ void PatchesInit() {
         LOGW("[patch] framelock found at rva 0x%llx but the write failed", (unsigned long long)(flimm - base));
         return;
     }
-    LOGI("[patch] fps unlock: frame tick at rva 0x%llx: %.1f -> %d fps (dt %.5f). The game "
-         "runs slow-motion whenever it cannot actually reach this rate.",
+    LOGI("[patch] fps unlock: frame tick at rva 0x%llx: %.1f -> %d fps (dt %.5f) - the "
+         "limiter target; game speed follows the measured frame time.",
          (unsigned long long)(flimm - base),
          before > 1e-6f ? 1.f / before : 0.f, target, dt);
 

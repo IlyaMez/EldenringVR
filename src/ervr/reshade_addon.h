@@ -38,6 +38,11 @@ struct ReShadeStats {
     long     presents = 0;
     uint32_t width = 0, height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    // Present timing per engine pass ([0] = pass 1, [1] = pass 2), since the last read: ERVR's
+    // own present-event work (eye blits, XR submit, xrWaitFrame) and how long the real DXGI
+    // Present then held the frame thread (monitor vsync / flip-queue back-pressure).
+    float ervrMsAvg[2] = {}, ervrMsMax[2] = {};
+    float dxgiMsAvg[2] = {}, dxgiMsMax[2] = {};
 };
 ReShadeStats ReShadeAddonGetStats();
 

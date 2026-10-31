@@ -89,6 +89,8 @@ void Config::Load(const std::wstring& path) {
     vrCinemaDistance = GetF(ini, L"VR", L"CinemaDistance", vrCinemaDistance);
     vrCinemaWidth    = GetF(ini, L"VR", L"CinemaWidth", vrCinemaWidth);
     vrMirrorWindow   = GetB(ini, L"VR", L"MirrorWindow", vrMirrorWindow);
+    vrHeadsetRefreshHz = GetI(ini, L"VR", L"HeadsetRefreshHz", vrHeadsetRefreshHz);
+    vrLimiterFollowsHeadset = GetB(ini, L"VR", L"LimiterFollowsHeadset", vrLimiterFollowsHeadset);
     vrXrDebug        = GetB(ini, L"VR", L"XrDebug", vrXrDebug);
     vrFovDeg         = GetF(ini, L"VR", L"FovDeg", vrFovDeg);
     vrFovAxis        = GetS(ini, L"VR", L"FovAxis", vrFovAxis);

@@ -5,6 +5,21 @@ release workflow and published on GitHub Releases and Nexus Mods.
 
 ## Unreleased
 
+### Launcher
+* `ERVR Launcher.exe` in the zip: unpack anywhere and press START VR. It finds the game in the Steam
+  libraries and checks its patch against ERVR's verified address maps, lists the OpenXR runtimes
+  (Automatic: Virtual Desktop while its streamer runs, SteamVR while it runs, else Windows' active
+  one; the choice reaches ERVR through `XR_RUNTIME_JSON`), checks the headset, installs or updates
+  ERVR in the game folder (`install.ps1`'s rules), parks flat render mods and R.E.A.L. leftovers
+  (`game_mode.ps1`'s), starts Steam when needed, starts the game with EAC off (`steam_appid.txt`) or
+  through Seamless Co-op, and shows `ERVR.log` as it is written.
+* Options tab: the common `ERVR.ini` settings, written in place (every other byte kept) so ERVR
+  hot-reloads them mid-game. Controls and About tabs; Copy report for bug reports; Play flat and
+  Remove ERVR.
+* No network code, as ERVR. Dear ImGui (MIT) and the Cinzel and Barlow fonts (OFL), see THIRD_PARTY.md.
+* Regression tests: `launcher_text` (ini edits, log lines, Steam files) and `launcher_folder`
+  (install / park / flat / uninstall on a throwaway game folder).
+
 ### Game patch 1.17.2 (exe 2.7.2.0)
 * RVA map for 2.7.2.0, derived from 2.7.1.0 by instruction signature (all 15 sites unique) and
   matching every address erfps2 and fromsoftware-rs publish for 1.17.2.
@@ -59,6 +74,28 @@ release workflow and published on GitHub Releases and Nexus Mods.
   again (in co-op: the owner's game overriding a hit). In a co-op session the first drops of each
   kind are logged with the attacker handles.
 
+### Frame rate and resolution
+* The game's frame limiter now follows the headset (`[VR] LimiterFollowsHeadset`, on). With
+  `FpsTarget=72` under a 90 Hz headset the game could never reach 90, so Virtual Desktop ran it at
+  half rate (45 Hz) and synthesized the rest: ~52 stereo pairs/s, sluggish. With the limiter raised
+  above the refresh, the same PC (RTX 5090, 9800X3D) runs ~88 pairs/s at 90 Hz. Virtual Desktop
+  only offers its current streaming rate to games, so choose 72/80/90 Hz in VD itself; the log
+  names the rate. `[VR] HeadsetRefreshHz` requests a rate on runtimes that allow it.
+* `GameResScale` now gets exactly the size it asks for. The game picks the LAST resolution-table
+  entry that fits the request, and ERVR's table entry arrived ~0.1 s after the game's boot walk, so
+  most targets snapped down to a built-in size (3712x2088 came up 3200x1800). The table's last slot
+  is now written at DLL attach. Default `GameResScale` 0.86 (3200x1800 for a Quest 3 at VD's
+  2688x2880), the size the snap used to land on; 1.0 (3712x2088) was GPU-bound at 90 Hz.
+* The size is exact 16:9, in steps of 128x72 (3584x2016 for a Quest Pro). The game renders a
+  window even a few pixels off 16:9 as a 16:9 frame inside black bars, and the HUD layer could
+  not find that frame's UI: at 3632x2040 the menus, map and HUD stayed in the 3D view (the
+  menu outside both eyes, the map magnified). A non-16:9 back buffer is now a log warning.
+* The "GAME SPEED n%" warning was wrong: the game runs on measured frame time and keeps real speed
+  at any frame rate (in-game clock x0.98 at 52 pairs/s). It now reports pairs/s against the
+  headset's refresh, at most every 30 s.
+* Debug heartbeat timing line: each engine pass, ERVR's present work, the DXGI Present block,
+  `xrWaitFrame` and the headset refresh (`hb: timing`).
+
 ### Fixes
 * The second-eye pass no longer re-runs the game's event scripts (groups 22-24 EmkSystem, 25
   EventMan). Running them twice per stereo pair left a centre dialog raised by an item pickup on
@@ -83,6 +120,7 @@ release workflow and published on GitHub Releases and Nexus Mods.
   every run.
 * `tools/verify_game_version_map.py` checks any pair of mapped builds; `sync_game_launcher.ps1`
   accepts 2.7.2.0.
+* `xrprobe` lists every extension the OpenXR runtime advertises.
 
 ## 0.4.0 — 2026-09-10 — second public release
 

@@ -54,8 +54,10 @@ int main() {
     xrEnumerateInstanceExtensionProperties(nullptr, extCount, &extCount, exts.data());
     bool haveD3D12 = false;
     printf("[1] runtime advertises %u extensions\n", extCount);
-    for (auto& e : exts)
+    for (auto& e : exts) {
+        printf("    %s v%u\n", e.extensionName, e.extensionVersion);
         if (strcmp(e.extensionName, XR_KHR_D3D12_ENABLE_EXTENSION_NAME) == 0) haveD3D12 = true;
+    }
     printf("    XR_KHR_D3D12_enable: %s\n\n", haveD3D12 ? "YES" : "NO  <-- fatal");
     if (!haveD3D12) return 1;
 

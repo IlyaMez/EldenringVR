@@ -278,8 +278,14 @@ public:
 
         XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState fs{XR_TYPE_FRAME_STATE};
+        LARGE_INTEGER w0, w1, qf;
+        QueryPerformanceCounter(&w0);
         XrResult r = xrWaitFrame(session_, &wi, &fs);   // deliberately outside the lock
+        QueryPerformanceCounter(&w1);
         if (XR_FAILED(r)) return frameFail("xrWaitFrame", r);
+        QueryPerformanceFrequency(&qf);
+        out.waitMs = (float)((double)(w1.QuadPart - w0.QuadPart) * 1000.0 / (double)qf.QuadPart);
+        out.displayPeriodNs = fs.predictedDisplayPeriod;
 
         std::lock_guard<std::recursive_mutex> g(g_mtx);
         XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
@@ -635,6 +641,8 @@ private:
         std::vector<const char*> exts{XR_KHR_D3D12_ENABLE_EXTENSION_NAME};
         haveTimeConv_ = has(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
         if (haveTimeConv_) exts.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+        haveRefresh_ = has(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        if (haveRefresh_) exts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         if (Cfg().vrXrDebug && has(XR_EXT_DEBUG_UTILS_EXTENSION_NAME)) exts.push_back(XR_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
         XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
@@ -933,7 +941,11 @@ private:
                 if (e->state == XR_SESSION_STATE_READY) {
                     XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO};
                     bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-                    if (XR_SUCCEEDED(xrBeginSession(session_, &bi))) { sessionRunning_ = true; LOGI("[xr] session running"); }
+                    if (XR_SUCCEEDED(xrBeginSession(session_, &bi))) {
+                        sessionRunning_ = true;
+                        LOGI("[xr] session running");
+                        ApplyRefreshRate();
+                    }
                 } else if (e->state == XR_SESSION_STATE_STOPPING) {
                     xrEndSession(session_);
                     sessionRunning_ = false;
@@ -953,10 +965,61 @@ private:
             case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
                 LOGD("[xr] interaction profile changed");
                 break;
+            case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
+                auto* e = (XrEventDataDisplayRefreshRateChangedFB*)&ev;
+                LOGI("[xr] headset refresh changed: %.0f -> %.0f Hz", e->fromDisplayRefreshRate,
+                     e->toDisplayRefreshRate);
+                refreshHz_.store(e->toDisplayRefreshRate, std::memory_order_relaxed);
+                break;
+            }
             default: break;
             }
         }
     }
+
+    // Reads the headset's refresh (the game's frame limiter follows it - see
+    // PatchesFollowHeadsetRefresh) and, with [VR] HeadsetRefreshHz=N, requests the supported
+    // rate nearest N. Runtimes differ in what they let an app pick: VDXR 1.0.10 lists ONLY its
+    // current streaming rate (measured 2026-10-31: "supported: 90"), so under Virtual Desktop
+    // the rate is the streamer's Frame rate setting and this only reports it.
+    void ApplyRefreshRate() {
+        if (!haveRefresh_ || session_ == XR_NULL_HANDLE) return;
+        auto enumRates = GetProc<PFN_xrEnumerateDisplayRefreshRatesFB>("xrEnumerateDisplayRefreshRatesFB");
+        auto getRate = GetProc<PFN_xrGetDisplayRefreshRateFB>("xrGetDisplayRefreshRateFB");
+        auto reqRate = GetProc<PFN_xrRequestDisplayRefreshRateFB>("xrRequestDisplayRefreshRateFB");
+        if (!enumRates || !getRate || !reqRate) return;
+        float cur = 0.f;
+        if (XR_FAILED(getRate(session_, &cur)) || cur < 1.f) return;
+        refreshHz_.store(cur, std::memory_order_relaxed);
+        uint32_t n = 0;
+        if (XR_FAILED(enumRates(session_, 0, &n, nullptr)) || n == 0) return;
+        std::vector<float> rates(n);
+        if (XR_FAILED(enumRates(session_, n, &n, rates.data())) || n == 0) return;
+        rates.resize(n);
+        std::string list;
+        for (float r : rates) { list += std::to_string((int)(r + 0.5f)); list += ' '; }
+        const int want = Cfg().vrHeadsetRefreshHz;
+        float pick = cur;
+        if (want > 0) {
+            float best = 1e9f;
+            for (float r : rates) if (std::fabs(r - (float)want) < best) { best = std::fabs(r - (float)want); pick = r; }
+        }
+        if (std::fabs(pick - cur) < 0.5f) {
+            LOGI("[xr] headset refresh %.0f Hz (supported: %s)%s", cur, list.c_str(),
+                 want > 0 && std::fabs((float)want - cur) >= 0.5f
+                     ? " - HeadsetRefreshHz cannot be honoured; set the rate in the streamer "
+                       "(Virtual Desktop: Streaming > Frame rate)" : "");
+            return;
+        }
+        const XrResult r = reqRate(session_, pick);
+        if (XR_SUCCEEDED(r))
+            LOGI("[xr] headset refresh %.0f Hz -> %.0f Hz requested (HeadsetRefreshHz; supported: %s)",
+                 cur, pick, list.c_str());
+        else
+            LOGW("[xr] headset refresh %.0f -> %.0f Hz request failed: %s - set the rate in the "
+                 "streamer instead", cur, pick, XrStr(r));
+    }
+    float DisplayRefreshHz() const override { return refreshHz_.load(std::memory_order_relaxed); }
 
     void TeardownSession() {
         std::lock_guard<std::recursive_mutex> g(g_mtx);
@@ -993,6 +1056,8 @@ private:
     ID3D12Device* device_ = nullptr;
     ID3D12CommandQueue* queue_ = nullptr;
     bool bound_ = false, sessionRunning_ = false, frameBegun_ = false, haveTimeConv_ = false;
+    bool haveRefresh_ = false;   // XR_FB_display_refresh_rate enabled on the instance
+    std::atomic<float> refreshHz_{0.f};   // the panel's refresh, 0 = unknown
     uint64_t lastAttach_ = 0;
     double   lastCensus_ = 0;
     uint32_t lastCensusMask_ = 0xFFFFFFFF;   // never equals a real mask, so the first poll logs

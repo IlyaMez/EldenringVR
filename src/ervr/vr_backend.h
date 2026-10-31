@@ -56,6 +56,8 @@ struct VRFrameInfo {
     double   displayTimeSec = 0;
     bool     shouldRender = false; // XrFrameState::shouldRender
     uint64_t pairIndex = 0;
+    int64_t  displayPeriodNs = 0;  // XrFrameState::predictedDisplayPeriod = the headset's refresh interval
+    float    waitMs = 0.f;         // how long xrWaitFrame held the calling (game) thread
 };
 
 // Where a quad hangs. Cinema and the HUD both use this.
@@ -128,6 +130,9 @@ public:
 
     // -- frame loop (render thread only; stereo.cpp is the sole caller) --
     virtual bool WaitBeginFrame(VRFrameInfo& out) = 0;                       // xrWaitFrame + xrBeginFrame + event pump
+    // The panel's refresh rate in Hz (XR_FB_display_refresh_rate), 0 = unknown. Unlike the
+    // predicted display period it does not halve when the runtime throttles a slow app.
+    virtual float DisplayRefreshHz() const { return 0.f; }
     virtual bool LocateViews(int64_t displayTimeNs, VREyeView out[2]) = 0;   // BOTH eyes at the SAME time: the true-stereo contract
     // The same two views expressed RELATIVE TO THE HEAD (VIEW space) - i.e. the headset's
     // IPD geometry, with where the head happens to be divided out. This is what the game

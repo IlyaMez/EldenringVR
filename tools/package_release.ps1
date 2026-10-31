@@ -7,6 +7,7 @@
   the DLLs it needs, drops stray logs, zips it, and writes a .sha256 next to the zip.
 
   Layout inside the zip:
+    ERVR Launcher.exe       finds the game, installs the files below into it, starts it with EAC off
     dxgi.dll                ReShade 6.8.0 add-on build (unmodified)
     ReShade.ini
     dinput8.dll             proxy loader
@@ -39,7 +40,7 @@ if (-not $Version) {
     $Version = $m.Groups[1].Value
 }
 
-$required = @("dxgi.dll", "ReShade.ini", "dinput8.dll", "LICENSE-ReShade.txt", "ERVR\ERVR.dll", "ERVR\ERVR.ini")
+$required = @("ERVR Launcher.exe", "dxgi.dll", "ReShade.ini", "dinput8.dll", "LICENSE-ReShade.txt", "ERVR\ERVR.dll", "ERVR\ERVR.ini")
 $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
 if ($missing) { throw "missing from build\dist: $($missing -join ', ') - run .\build.ps1" }
 
@@ -47,6 +48,9 @@ if ($missing) { throw "missing from build\dist: $($missing -join ', ') - run .\b
 $dll = Join-Path $dist "ERVR\ERVR.dll"
 $stamp = (Get-Item $dll).VersionInfo.FileVersion
 if ($stamp -ne $Version) { throw "ERVR.dll in build\dist is version '$stamp', not $Version - rebuild (.\build.ps1) before packaging" }
+# The launcher installs what it is packed with; it must be the same release.
+$launcherStamp = (Get-Item (Join-Path $dist "ERVR Launcher.exe")).VersionInfo.FileVersion
+if ($launcherStamp -ne $Version) { throw "ERVR Launcher.exe in build\dist is version '$launcherStamp', not $Version - rebuild before packaging" }
 
 $name  = "ERVR-v$Version"
 $stage = Join-Path $OutDir "stage\$name"

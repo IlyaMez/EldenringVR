@@ -1,0 +1,38 @@
+#include <winres.h>
+#include "launcher_version.h" // CMake writes it: ERVR_RC_VERSION and ERVR_RC_VERSION_NUMBERS
+
+// The emblem (tools/make_launcher_icon.py draws it).
+1 ICON "ervr.ico"
+
+// The launcher's print (main.cpp loads them; SIL Open Font License, fonts/*-OFL.txt).
+FONT_BODY RCDATA "fonts/Barlow-Medium.ttf"
+FONT_SEMIBOLD RCDATA "fonts/Barlow-SemiBold.ttf"
+FONT_LABEL RCDATA "fonts/BarlowCondensed-Bold.ttf"
+FONT_KICKER RCDATA "fonts/BarlowCondensed-SemiBold.ttf"
+FONT_DISPLAY RCDATA "fonts/Cinzel-Bold.ttf"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION ERVR_RC_VERSION_NUMBERS
+PRODUCTVERSION ERVR_RC_VERSION_NUMBERS
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "ERVR project (GPL-3.0-or-later)"
+            VALUE "FileDescription", "ERVR launcher - native VR for ELDEN RING"
+            VALUE "FileVersion", ERVR_RC_VERSION
+            VALUE "InternalName", "ervr_launcher"
+            VALUE "LegalCopyright", "GPL-3.0-or-later. Source: https://github.com/IlyaMez/EldenringVR"
+            VALUE "OriginalFilename", "ERVR Launcher.exe"
+            VALUE "ProductName", "ERVR - native VR for ELDEN RING"
+            VALUE "ProductVersion", ERVR_RC_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -28,6 +28,14 @@ struct Config {
     float vrCinemaDistance = 2.5f;         // m in front of the head
     float vrCinemaWidth = 4.0f;            // m; height follows the back buffer's aspect
     bool  vrMirrorWindow = true;           // keep presenting to the monitor as well
+    // Headset refresh rate requested through XR_FB_display_refresh_rate at session start.
+    // 0 = keep the runtime's/streamer's rate; N = the supported rate nearest N. VDXR only
+    // offers its current streaming rate, so under Virtual Desktop this is set in VD itself.
+    int   vrHeadsetRefreshHz = 0;
+    // Raise the game's frame limiter above the headset's refresh while a VR session runs. A
+    // limiter below the refresh can never meet it and the runtime halves the game's rate
+    // (FpsTarget 72 under a 90 Hz Quest 3: 45 Hz half-rate, ~52 pairs/s; at 90, 88 pairs/s).
+    bool  vrLimiterFollowsHeadset = true;
     bool  vrXrDebug = false;               // enable XR_EXT_debug_utils when the runtime offers it
     // Vertical FOV in degrees to force into the camera so one image covers a whole eye.
     // The render thread crops back down to the runtime's exact FOV, so too wide only costs
@@ -59,7 +67,11 @@ struct Config {
     // ERVR.cache.ini so it is known at boot, before the runtime is up), "WxH" = exact
     // override, "off" = leave the player's own resolution alone.
     std::string vrGameRes = "auto";        // off | auto | WxH (e.g. 3072x3264)
-    float vrGameResScale = 1.0f;           // scales the auto target (GPU headroom knob)
+    // Scales the auto target (GPU headroom knob). 0.86 = ~3200x1800 for a Quest 3 at VD's
+    // 2688x2880 budget - what a 90 Hz headset gets held at on an RTX 5090 (1.0 = 3712x2088 was
+    // GPU-bound there). The target lands exactly now (see EarlyLastSlotWrite), no more snap,
+    // so it is made exact 16:9 first (SnapGameRes in game_res.h).
+    float vrGameResScale = 0.86f;
     // Make the game accept a target LARGER than the desktop - the native alternative to
     // NVIDIA DSR, and the difference between 1440 and full headset-height frames on a
     // 3440x1440 monitor. Two parts: the settings-apply pass's own too-big-for-the-screen

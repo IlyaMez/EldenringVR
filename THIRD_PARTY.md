@@ -25,8 +25,12 @@ anti-cheat vendors do not whitelist); ERVR is offline/EAC-off only, so that cost
 | [ReShade headers](https://github.com/crosire/reshade) (`include/reshade*.hpp`) | v6.8.0 | BSD-3-Clause | Header-only add-on API. `reshade.hpp` finds the loaded ReShade module at runtime; nothing is linked. |
 | [OpenXR SDK loader](https://github.com/KhronosGroup/OpenXR-SDK) | release-1.1.62 | Apache-2.0 | Statically linked into `ERVR.dll` so the distribution stays a single DLL. ERVR creates and owns its own `XrSession` bound to the game's D3D12 device. |
 | [JsonCpp](https://github.com/open-source-parsers/jsoncpp) (vendored by the OpenXR loader) | as shipped with the loader | MIT / Public Domain | Runtime-manifest parsing inside the loader. |
+| [Dear ImGui](https://github.com/ocornut/imgui) | v1.92.9b | MIT | The window of `ERVR Launcher.exe` (Win32 + DirectX 11 backends). Fetched by CMake `FetchContent`; not in ERVR.dll. |
+| [Barlow](https://github.com/jpt/barlow) (Medium, SemiBold, Condensed Bold and SemiBold) | as in the repository | SIL OFL 1.1 | The launcher's text, compiled into `ERVR Launcher.exe`. Files and license in [`src/launcher/fonts/`](src/launcher/fonts/). |
+| [Cinzel](https://github.com/NDISCOVER/Cinzel) (Bold) | as in the repository | SIL OFL 1.1 | The launcher's name, headlines and tabs, compiled into `ERVR Launcher.exe`. Files and license in [`src/launcher/fonts/`](src/launcher/fonts/). |
 
 Their copyright notices travel with their own source trees, which CMake places under `build/_deps/`.
+The OpenXR loader is also linked into the launcher, for its headset check.
 
 ## Knowledge and reference, not code
 

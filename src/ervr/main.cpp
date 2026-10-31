@@ -212,6 +212,7 @@ DWORD WINAPI Worker(LPVOID) {
             }
         }
         BackendsTick();
+        if (IVRBackend* vr = ActiveBackend()) PatchesFollowHeadsetRefresh(vr->DisplayRefreshHz());
         VirtualPadUpdate(t);
         GameERTick();
         if ((++tick % (int)(5.0 / period)) == 0) {   // heartbeat every ~5s at debug level
@@ -257,12 +258,27 @@ DWORD WINAPI Worker(LPVOID) {
                      ss.hudFrames, hs.captures, hs.misses, hs.redirects, hs.lastDrawsIntoTarget,
                      hs.firstDraw, (int)hs.targetFound);
             }
-            // The engine's sim step is a FIXED 1/60 s, so a loop below 60 Hz is not just
-            // lower fps - the whole game runs at loopHz/60 speed. Under stereo the loop is
-            // usually GPU-bound; the fix is lowering the game's resolution/settings.
-            if (pumpHz > 5.0 && pumpHz < 54.0)
-                LOGW("[stereo] loop at %.0f Hz -> GAME SPEED %.0f%%. GPU cannot hold 60 pairs/s; "
-                     "lower the game resolution or graphics settings", pumpHz, pumpHz / 60.0 * 100.0);
+            // Where a stereo pair's time goes: the two engine passes, and inside them our present
+            // work, the DXGI Present block and the runtime's xrWaitFrame.
+            const PumpPassTimes pt = FramePumpTakePassTimes();
+            if (pumpHz > 0)
+                LOGD("hb: timing ms avg/max: pass1 %.1f/%.1f, pass2 %.1f/%.1f | ervr present p1 %.1f/%.1f "
+                     "p2 %.1f/%.1f | dxgi Present p1 %.1f/%.1f p2 %.1f/%.1f | xrWaitFrame %.1f/%.1f | headset %.0f Hz",
+                     pt.msAvg[0], pt.msMax[0], pt.msAvg[1], pt.msMax[1], rs.ervrMsAvg[0], rs.ervrMsMax[0],
+                     rs.ervrMsAvg[1], rs.ervrMsMax[1], rs.dxgiMsAvg[0], rs.dxgiMsMax[0], rs.dxgiMsAvg[1],
+                     rs.dxgiMsMax[1], ss.waitFrameMsAvg, ss.waitFrameMsMax, ss.headsetHz);
+            // Below the headset's refresh the runtime fills the missing frames by reprojection -
+            // judder and added latency are the cost. Game SPEED is not: the sim consumes the
+            // measured frame time (igt tracks wall time at any pair rate, x0.98 at 52 pairs/s on
+            // 2026-10-31; the residue is the in-game clock's whole-millisecond truncation).
+            const double targetHz = ss.headsetHz > 1.f ? ss.headsetHz : 60.0;
+            static double s_lastRateWarn = 0;
+            if (pumpHz > 5.0 && pumpHz < targetHz * 0.92 && nowT - s_lastRateWarn > 30.0) {
+                s_lastRateWarn = nowT;
+                LOGW("[stereo] %.0f stereo pairs/s against a %.0f Hz headset: the runtime reprojects "
+                     "the missing frames (judder, added latency). Game speed is unaffected (in-game "
+                     "clock x%.2f of real time).", pumpHz, targetHz, igtRate);
+            }
             CombatStatus cs = CombatGetStatus();
             LOGD("hb: combat: taeHook %d physical %d learned L%d H%d Left%d stamina %d | 5s: swings %ld, injected %ld | kinetic: params %d last q %.2f x%.2f | shield %d guard %d q %.2f | 2H: arm style %d grab %d | skill %s (%d recorded) fp %d | cast aim %s%s",
                  cs.taeHooked, cs.physical, cs.learnedLight, cs.learnedHeavy, cs.learnedLeft, cs.stamina, cs.swings, cs.injected,

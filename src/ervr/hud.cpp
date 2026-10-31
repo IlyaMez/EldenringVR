@@ -1,6 +1,7 @@
 #include "hud.h"
 #include "config.h"
 #include "dx12_blit.h"
+#include "patches_er.h"
 #include "reshade_addon.h"
 #include "vrmath.h"
 #include "log.h"
@@ -360,6 +361,20 @@ void LearnBackBuffersLocked(rs::swapchain* sc) {
     }
     g_bbCount.store(count, std::memory_order_release);
     LOGI("[hud] tracking %d back buffers (%ux%u)", count, g_bbW, g_bbH);
+    // Off 16:9 (and no letterbox patch) the game renders a 16:9 frame INSIDE the back buffer,
+    // so every target - the UI's included - is a few px narrower or shorter than it and
+    // RelearnTarget's full-size test never matches; the bar draws then pass for UI and the
+    // real UI stays in the eye images (2026-10-31: a 3632x2040 window rendered at 3628x2040,
+    // the menu outside both eye crops, the map magnified). Say so: it is invisible otherwise.
+    static uint32_t s_warnedW = 0, s_warnedH = 0;
+    if (g_bbH && (uint64_t)g_bbW * 9 != (uint64_t)g_bbH * 16 && !PatchesLetterboxRemoved() &&
+        (g_bbW != s_warnedW || g_bbH != s_warnedH)) {
+        s_warnedW = g_bbW; s_warnedH = g_bbH;
+        LOGW("[hud] back buffer %ux%u is not exactly 16:9: the game renders a 16:9 frame inside "
+             "it with black bars, and the HUD layer cannot find that frame's UI - menus and HUD "
+             "stay in the eye images. Use [VR] GameRes=auto or an exact 16:9 size (3200x1800).",
+             g_bbW, g_bbH);
+    }
 }
 
 void OnInitSwapchainHud(rs::swapchain* sc, bool) {

@@ -641,6 +641,17 @@ std::atomic<int> g_curPass{1};   // 1 = real frame, 2 = draw-only second pass
 std::atomic<ULONGLONG> g_p2PresentTick{0};
 std::atomic<float> g_pumpLastMs{0.f};
 DWORD g_qtThread = 0;            // the main-loop thread queue_tasks runs on
+// Wall time of each engine pass's queue_tasks call ([0] = pass 1, [1] = pass 2), summed per
+// heartbeat. Against the loop period it says how much of a stereo pair is spent in neither.
+std::atomic<long long> g_passUs[2]{}, g_passMaxUs[2]{};
+std::atomic<long>      g_passN[2]{};
+void NotePassTime(int idx, long long qpcTicks) {
+    static const long long f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x.QuadPart; }();
+    const long long us = qpcTicks * 1000000 / f;
+    g_passUs[idx].fetch_add(us, std::memory_order_relaxed);
+    if (us > g_passMaxUs[idx].load(std::memory_order_relaxed)) g_passMaxUs[idx].store(us, std::memory_order_relaxed);
+    g_passN[idx].fetch_add(1, std::memory_order_relaxed);
+}
 
 // Pass windows for the present-pairing probe: while g_winTrace is on, every pass-1 and
 // pass-2 execution records its [enter, exit] QPC window.
@@ -1571,6 +1582,7 @@ void DoSecondPass(void* self, void* a, void* b) {
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
     g_pumpLastMs.store((float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart),
                        std::memory_order_relaxed);
+    NotePassTime(1, t1.QuadPart - t0.QuadPart);
     InterlockedIncrement(&g_pumpPasses);
     // Watchdog: pass 2 was CALLED, but did the engine actually run it? In the 2026-08-22
     // incident the first (corrupted) pass wedged the frame runner mid-frame and every later
@@ -1658,6 +1670,7 @@ uint64_t __fastcall Hook_QueueTasks(void* self, void* a, void* b) {
     }
     if (!g_qtThread) g_qtThread = GetCurrentThreadId();
     const uint64_t r = g_origQueueTasks(self, a, b);
+    { LARGE_INTEGER tp; QueryPerformanceCounter(&tp); NotePassTime(0, tp.QuadPart - t0.QuadPart); }
     // Pass 1 is complete (every camera writer ran, Flip presented): finish and push its eye
     // report with the camera the renderer really used. Must precede DoSecondPass, which
     // stashes pass 2's own pending report.
@@ -2264,6 +2277,15 @@ void FramePumpNotePass2Present() { g_p2PresentTick.store(GetTickCount64(), std::
 bool FramePumpSafeSetActive() { return g_safeSetActive.load(std::memory_order_relaxed); }
 int  FramePumpCurrentPass() { return g_curPass.load(std::memory_order_acquire); }
 long FramePumpTakePasses() { return InterlockedExchange(&g_pumpPasses, 0); }
+PumpPassTimes FramePumpTakePassTimes() {
+    PumpPassTimes t;
+    for (int i = 0; i < 2; ++i) {
+        const long n = g_passN[i].exchange(0);
+        const long long us = g_passUs[i].exchange(0), mx = g_passMaxUs[i].exchange(0);
+        if (n > 0) { t.msAvg[i] = (float)us / 1000.f / (float)n; t.msMax[i] = (float)mx / 1000.f; }
+    }
+    return t;
+}
 float FramePumpLastMs() { return g_pumpLastMs.load(std::memory_order_relaxed); }
 void FramePumpSetGpuQueue(ID3D12CommandQueue* q) { g_gpuQueue.store(q, std::memory_order_release); }
 float FramePumpGpuSyncLastMs() { return g_syncLastMs.load(std::memory_order_relaxed); }

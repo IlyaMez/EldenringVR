@@ -32,6 +32,54 @@ std::atomic<bool> g_trace{false};
 PresentSample g_traceBuf[512];
 std::atomic<int> g_traceN{0};
 
+// Present timing, per engine pass. present and finish_present fire back to back on the frame
+// thread around the real Present, so the gap between our event returning and finish_present
+// is exactly what DXGI held the thread for. Summed here, read and reset by the heartbeat.
+struct PassPresentTiming {
+    std::atomic<long long> ervrUs{0}, ervrMaxUs{0}, dxgiUs{0}, dxgiMaxUs{0};
+    std::atomic<long> ervrN{0}, dxgiN{0};
+};
+PassPresentTiming g_passTiming[2];
+thread_local long long t_presentEnd = 0;   // QPC when our present event returned; 0 = none pending
+thread_local int t_presentPass = 0;
+
+long long QpcNow() { LARGE_INTEGER q; QueryPerformanceCounter(&q); return q.QuadPart; }
+long long QpcToUs(long long d) {
+    static const long long f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x.QuadPart; }();
+    return d * 1000000 / f;
+}
+void AddSample(std::atomic<long long>& sum, std::atomic<long long>& mx, std::atomic<long>& n, long long us) {
+    sum.fetch_add(us, std::memory_order_relaxed);
+    if (us > mx.load(std::memory_order_relaxed)) mx.store(us, std::memory_order_relaxed);
+    n.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Times our whole present event, whichever way it returns.
+struct PresentEventClock {
+    long long t0 = QpcNow();
+    int pass = FramePumpCurrentPass();
+    ~PresentEventClock() {
+        const long long t1 = QpcNow();
+        t_presentEnd = t1;
+        t_presentPass = pass;
+        if (pass == 1 || pass == 2) {
+            PassPresentTiming& pt = g_passTiming[pass - 1];
+            AddSample(pt.ervrUs, pt.ervrMaxUs, pt.ervrN, QpcToUs(t1 - t0));
+        }
+    }
+};
+
+void OnFinishPresent(reshade::api::command_queue*, reshade::api::swapchain* sc) {
+    if (!t_presentEnd || sc->get_device()->get_api() != reshade::api::device_api::d3d12) return;
+    const long long us = QpcToUs(QpcNow() - t_presentEnd);
+    const int pass = t_presentPass;
+    t_presentEnd = 0;
+    if (pass == 1 || pass == 2) {
+        PassPresentTiming& pt = g_passTiming[pass - 1];
+        AddSample(pt.dxgiUs, pt.dxgiMaxUs, pt.dxgiN, us);
+    }
+}
+
 void OnInitDevice(reshade::api::device* dev) {
     const bool d12 = dev->get_api() == reshade::api::device_api::d3d12;
     g_isD3D12.store(d12);
@@ -112,6 +160,7 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* sc,
         g_isD3D12.store(true);
         LOGI("[reshade] D3D12 detected at present (init_device was missed - registered mid-run)");
     }
+    PresentEventClock clock;
 
     Dx12Frame f;
     f.device = reinterpret_cast<ID3D12Device*>(dev->get_native());
@@ -195,6 +244,7 @@ bool ReShadeAddonInstall(void* selfModule) {
     reshade::register_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
     reshade::register_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
     reshade::register_event<reshade::addon_event::present>(&OnPresent);
+    reshade::register_event<reshade::addon_event::finish_present>(&OnFinishPresent);
     HudRegisterEvents();
     g_eventsUp.store(true);
     return true;
@@ -212,6 +262,7 @@ void ReShadeAddonShutdown() {
         reshade::unregister_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
         reshade::unregister_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
         reshade::unregister_event<reshade::addon_event::present>(&OnPresent);
+        reshade::unregister_event<reshade::addon_event::finish_present>(&OnFinishPresent);
         HudUnregisterEvents();
     }
     reshade::unregister_addon(g_self);
@@ -240,6 +291,14 @@ ReShadeStats ReShadeAddonGetStats() {
     s.width  = g_width.load();
     s.height = g_height.load();
     s.format = (DXGI_FORMAT)g_format.load();
+    for (int p = 0; p < 2; ++p) {
+        PassPresentTiming& pt = g_passTiming[p];
+        const long en = pt.ervrN.exchange(0), dn = pt.dxgiN.exchange(0);
+        const long long eus = pt.ervrUs.exchange(0), emax = pt.ervrMaxUs.exchange(0);
+        const long long dus = pt.dxgiUs.exchange(0), dmax = pt.dxgiMaxUs.exchange(0);
+        if (en > 0) { s.ervrMsAvg[p] = (float)eus / 1000.f / (float)en; s.ervrMsMax[p] = (float)emax / 1000.f; }
+        if (dn > 0) { s.dxgiMsAvg[p] = (float)dus / 1000.f / (float)dn; s.dxgiMsMax[p] = (float)dmax / 1000.f; }
+    }
     return s;
 }
 }
