@@ -16,6 +16,11 @@ release workflow and published on GitHub Releases and Nexus Mods.
 * Options tab: the common `ERVR.ini` settings, written in place (every other byte kept) so ERVR
   hot-reloads them mid-game. Controls and About tabs; Copy report for bug reports; Play flat and
   Remove ERVR.
+* Game graphics: START VR turns off the game's depth of field, motion blur and ray tracing in its own
+  `GraphicsConfig.xml` before the game reads it (the value set to `DISABLE`, the preset to `CUSTOM`,
+  auto-detect `OFF`, as the game's menu writes them; every other byte kept, the original saved once
+  as `GraphicsConfig_ervr_backup.xml`). Each is a toggle in Options (on by default) and a row in This
+  PC; nothing is written while the game runs, since it writes the file back as it closes.
 * No network code, as ERVR. Dear ImGui (MIT) and the Cinzel and Barlow fonts (OFL), see THIRD_PARTY.md.
 * Regression tests: `launcher_text` (ini edits, log lines, Steam files) and `launcher_folder`
   (install / park / flat / uninstall on a throwaway game folder).
@@ -97,6 +102,13 @@ release workflow and published on GitHub Releases and Nexus Mods.
   `xrWaitFrame` and the headset refresh (`hb: timing`).
 
 ### Fixes
+* Black headset from boot through the title screen. Once the render size was exact 16:9 the HUD
+  layer found the title screen's UI target, and at the title that UI is the whole picture (logo,
+  ring, menu: 7 draws over a black clear), so the frame on the cinema screen came out pure black
+  and the picture hung on the HUD panel alone; three boots in a row showed nothing. The UI now
+  leaves the frame only while the eyes are stereo: flat frames (title, loading screens, the map,
+  cutscenes) go onto the cinema screen whole, UI included, as on the monitor. The first minute of
+  every VR session logs what reached the headset (`hb: xr`, `hb: hud`) whatever `LogLevel` says.
 * The second-eye pass no longer re-runs the game's event scripts (groups 22-24 EmkSystem, 25
   EventMan). Running them twice per stereo pair left a centre dialog raised by an item pickup on
   screen, ignoring every button and menu until a respawn. Pass 2 renders the same moment as pass 1,

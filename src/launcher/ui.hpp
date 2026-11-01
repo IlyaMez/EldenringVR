@@ -122,6 +122,8 @@ private:
     void begin(bool switchFirst, bool attach);
     // A change to the game folder from a button: its lines go to the log, then the folder is read again.
     void apply(const Change& change, const char* what);
+    // The chosen game effects turned off now (the game must be closed), what changed noted in the log.
+    void turnOffEffects();
     void rescan();
     void save() { saveSettings(settings_); }
     void copyLog();

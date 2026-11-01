@@ -41,6 +41,35 @@ int main() {
     Check(iniSet("[A]\nx=1", "A", "y", "2") == "[A]\nx=1\ny=2\n", "the new key starts its own line");
     Check(iniSet("[A]\nx=\n", "A", "x", "3") == "[A]\nx=3\n", "empty value");
 
+    // The game's GraphicsConfig.xml, in its own shape: every other setting the player chose must survive.
+    const std::wstring graphics =
+        L"<?xml version=\"1.0\" encoding=\"UTF-16\" ?>\r\n<config><ScreenMode>WINDOW</ScreenMode>\r\n"
+        L"<Auto-detectBestRenderingSettings>ON</Auto-detectBestRenderingSettings>\r\n<QualitySetting>MAX</QualitySetting>\r\n"
+        L"<SSAO>MAX</SSAO>\r\n<DepthOfField>MAX</DepthOfField>\r\n<MotionBlur>DISABLE</MotionBlur>\r\n"
+        L"<RaytracingQuality> HIGH </RaytracingQuality>\r\n</config>\r\n";
+    Check(xmlGet(graphics, "DepthOfField") == "MAX" && xmlGet(graphics, "RaytracingQuality") == "HIGH", "xml value, trimmed");
+    Check(!xmlGet(graphics, "Depth").has_value(), "a tag matches whole");
+    std::wstring xml = graphics;
+    std::vector<std::string> changed = turnEffectsOff(xml, allEffects());
+    Check(changed == std::vector<std::string>{"depth of field (was MAX)", "ray tracing (was HIGH)"},
+          "what changed; motion blur was off already");
+    Check(xmlGet(xml, "DepthOfField") == "DISABLE" && xmlGet(xml, "MotionBlur") == "DISABLE" &&
+              xmlGet(xml, "RaytracingQuality") == "DISABLE",
+          "all three off");
+    Check(xmlGet(xml, "QualitySetting") == "CUSTOM" && xmlGet(xml, "Auto-detectBestRenderingSettings") == "OFF",
+          "preset and auto-detect can't put them back");
+    Check(xml.find(L"<SSAO>MAX</SSAO>\r\n<DepthOfField>DISABLE</DepthOfField>") != std::wstring::npos &&
+              xml.rfind(L"</config>\r\n") == xml.size() - 11,
+          "nothing else changes");
+    Check(turnEffectsOff(xml, allEffects()).empty(), "a second pass changes nothing");
+    xml = graphics;
+    Check(turnEffectsOff(xml, EffectsOff{false, true, false}).empty() && xml == graphics,
+          "an effect left to the game stays, and nothing else moves");
+    xml = L"<config><DepthOfField>LOW</DepthOfField></config>";
+    Check(turnEffectsOff(xml, allEffects()).size() == 1 && xml == L"<config><DepthOfField>DISABLE</DepthOfField></config>",
+          "missing tags stay missing");
+    Check(listed({"a"}) == "a" && listed({"a", "b"}) == "a and b" && listed({"a", "b", "c"}) == "a, b and c", "lists");
+
     // ERVR.log's lines.
     LogLine line = parseLogLine("17:36:02:114 [ 1234] | INFO  | ERVR 0.4.0 starting (pid 99) in C:\\Game\\ERVR");
     Check(line.time == "17:36:02" && line.kind == LineKind::good, "start line is a milestone");

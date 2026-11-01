@@ -242,10 +242,19 @@ DWORD WINAPI Worker(LPVOID) {
               if (ig && s_igtMs && ig > s_igtMs && nowT > s_igtT)
                   igtRate = (double)(ig - s_igtMs) / 1000.0 / (nowT - s_igtT);
               s_igtT = nowT; s_igtMs = ig; }
-            LOGD("hb: xr: addon %d d3d12 %d bound %d | 5s: presents %ld, submitted %ld (stereo %ld), submitFails %ld, blitFails %ld | back buffer %ux%u fmt %u | crop %.0f%%x%.0f%% | submit %.2f ms | pump: %.0f Hz, %.1f ms, sync %.1f ms | igt x%.2f",
-                 rs.registered, rs.d3d12, ss.graphicsBound, rs.presents, ss.frames, ss.stereoFrames, ss.submitFails, ss.blitFails,
-                 rs.width, rs.height, (unsigned)rs.format, ss.cropU * 100.f, ss.cropV * 100.f, ss.lastSubmitMs,
-                 pumpHz, FramePumpLastMs(), FramePumpGpuSyncLastMs(), igtRate);
+            // The first minute of every VR session is logged whatever LogLevel says: "what reached
+            // the headset" is the first question about a black or broken view, and the default log
+            // has to answer it (2026-10-31: three black boots at LogLevel=info left nothing to read).
+            static bool s_wasBound = false;
+            static int s_loudBeats = 0;
+            if (ss.graphicsBound && !s_wasBound) s_loudBeats = 12;
+            s_wasBound = ss.graphicsBound;
+            const ervr::LogLevel xrLevel = s_loudBeats > 0 ? ervr::LogLevel::Info : ervr::LogLevel::Debug;
+            if (s_loudBeats > 0) --s_loudBeats;
+            ervr::Log(xrLevel, "hb: xr: addon %d d3d12 %d bound %d | 5s: presents %ld, submitted %ld (stereo %ld), submitFails %ld, blitFails %ld | back buffer %ux%u fmt %u | crop %.0f%%x%.0f%% | submit %.2f ms | pump: %.0f Hz, %.1f ms, sync %.1f ms | igt x%.2f",
+                      rs.registered, rs.d3d12, ss.graphicsBound, rs.presents, ss.frames, ss.stereoFrames, ss.submitFails, ss.blitFails,
+                      rs.width, rs.height, (unsigned)rs.format, ss.cropU * 100.f, ss.cropV * 100.f, ss.lastSubmitMs,
+                      pumpHz, FramePumpLastMs(), FramePumpGpuSyncLastMs(), igtRate);
             if (ss.eyeBlitL || ss.eyeBlitR || ss.eyeDesync || ss.lateDrops || ss.monoStalls)
                 LOGD("hb: eyes: L %ld / R %ld blits, desync %ld, late-drop %ld, flat frames (no second pass) %ld",
                      ss.eyeBlitL, ss.eyeBlitR, ss.eyeDesync, ss.lateDrops, ss.monoStalls);
@@ -253,10 +262,10 @@ DWORD WINAPI Worker(LPVOID) {
                 // "captures 0 / misses high" means the UI draws are not where detection
                 // expects them; [HUD] Probe prints the census that says where they are.
                 HudStats hs = HudGetStats();
-                LOGD("hb: hud: layers %ld | 5s: captures %ld, misses %ld, redirected draws %ld | "
-                     "draws into the frame's final target %d (first %d kept), capture target %d",
-                     ss.hudFrames, hs.captures, hs.misses, hs.redirects, hs.lastDrawsIntoTarget,
-                     hs.firstDraw, (int)hs.targetFound);
+                ervr::Log(xrLevel, "hb: hud: layers %ld | 5s: captures %ld, misses %ld, redirected draws %ld | "
+                          "draws into the frame's final target %d (first %d kept), capture target %d",
+                          ss.hudFrames, hs.captures, hs.misses, hs.redirects, hs.lastDrawsIntoTarget,
+                          hs.firstDraw, (int)hs.targetFound);
             }
             // Where a stereo pair's time goes: the two engine passes, and inside them our present
             // work, the DXGI Present block and the runtime's xrWaitFrame.

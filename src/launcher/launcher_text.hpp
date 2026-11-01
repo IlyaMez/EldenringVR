@@ -32,6 +32,14 @@ inline std::string_view trim(std::string_view s) {
 
 inline bool startsWith(std::string_view s, std::string_view prefix) { return s.substr(0, prefix.size()) == prefix; }
 
+// "a", "a and b", "a, b and c".
+inline std::string listed(const std::vector<std::string>& items) {
+    std::string out;
+    for (size_t i = 0; i < items.size(); ++i)
+        out += (i == 0 ? "" : i + 1 == items.size() ? " and " : ", ") + items[i];
+    return out;
+}
+
 // ---- ERVR.ini ----------------------------------------------------------------------------------------------
 // ERVR reads it with GetPrivateProfileString: [Section] and Key without regard to case, the first section of
 // that name and the first key in it, the value the rest of the line, trimmed.
@@ -158,6 +166,89 @@ inline std::string iniSet(std::string_view text, std::string_view section, std::
         out += eol;
     out += "[" + std::string(section) + "]" + eol + entry;
     return out;
+}
+
+// ---- ELDEN RING's GraphicsConfig.xml -----------------------------------------------------------------------
+// The game's own graphics settings, %APPDATA%\EldenRing\GraphicsConfig.xml: UTF-16LE text (a byte order mark, if
+// any, is part of it), one <Tag>VALUE</Tag> a setting. The game reads it as it starts and writes its settings back
+// as it closes. Tags and values are ASCII.
+
+// The effects START VR turns off: each blurs the picture or costs more in a headset than it gives.
+struct GameEffect {
+    std::string_view tag;
+    const char* name; // for people: "depth of field"
+};
+inline constexpr std::array<GameEffect, 3> kVrEffects{{
+    {"DepthOfField", "depth of field"},
+    {"MotionBlur", "motion blur"},
+    {"RaytracingQuality", "ray tracing"},
+}};
+// The game's word for an effect switched off, as its own menu writes it (LOW to MAX are the others).
+inline constexpr std::string_view kEffectOff = "DISABLE";
+// Which of kVrEffects to turn off, in its order.
+using EffectsOff = std::array<bool, kVrEffects.size()>;
+inline constexpr EffectsOff allEffects() {
+    EffectsOff all{};
+    for (bool& on : all)
+        on = true;
+    return all;
+}
+
+namespace detail {
+inline std::wstring wide(std::string_view ascii) { return std::wstring(ascii.begin(), ascii.end()); }
+
+// Where <tag>'s value starts in the text, and its length.
+inline std::optional<std::pair<size_t, size_t>> xmlValue(std::wstring_view xml, std::string_view tag) {
+    const std::wstring open = L"<" + wide(tag) + L">", close = L"</" + wide(tag) + L">";
+    const size_t at = xml.find(open);
+    if (at == std::wstring_view::npos)
+        return std::nullopt;
+    const size_t start = at + open.size();
+    const size_t end = xml.find(close, start);
+    if (end == std::wstring_view::npos)
+        return std::nullopt;
+    return std::pair{start, end - start};
+}
+} // namespace detail
+
+// <tag>'s value, trimmed ("MAX"); none when the file has no such tag.
+inline std::optional<std::string> xmlGet(std::wstring_view xml, std::string_view tag) {
+    const auto value = detail::xmlValue(xml, tag);
+    if (!value)
+        return std::nullopt;
+    std::string out;
+    for (const wchar_t c : xml.substr(value->first, value->second))
+        out += c < 0x80 ? static_cast<char>(c) : '?';
+    return std::string(trim(out));
+}
+
+// <tag>'s value replaced, every other character as it was; false when the file has no such tag.
+inline bool xmlSet(std::wstring& xml, std::string_view tag, std::string_view value) {
+    const auto at = detail::xmlValue(xml, tag);
+    if (!at)
+        return false;
+    xml.replace(at->first, at->second, detail::wide(value));
+    return true;
+}
+
+// The effects `which` names switched off in the file's text. When one changes, the quality preset becomes CUSTOM
+// and auto-detect OFF, as the game's own menu writes them when a single setting changes; a named preset or
+// auto-detect could pick the effect again. A missing tag is left missing. Returns what changed, as
+// "depth of field (was MAX)".
+inline std::vector<std::string> turnEffectsOff(std::wstring& xml, const EffectsOff& which) {
+    std::vector<std::string> changed;
+    for (size_t i = 0; i < kVrEffects.size(); ++i) {
+        const auto value = which[i] ? xmlGet(xml, kVrEffects[i].tag) : std::nullopt;
+        if (!value || sameText(*value, kEffectOff))
+            continue;
+        xmlSet(xml, kVrEffects[i].tag, kEffectOff);
+        changed.push_back(std::string(kVrEffects[i].name) + " (was " + (value->empty() ? "empty" : *value) + ")");
+    }
+    if (!changed.empty()) {
+        xmlSet(xml, "QualitySetting", "CUSTOM");
+        xmlSet(xml, "Auto-detectBestRenderingSettings", "OFF");
+    }
+    return changed;
 }
 
 // ---- ERVR.log ----------------------------------------------------------------------------------------------

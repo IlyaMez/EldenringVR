@@ -76,6 +76,10 @@ bool HudEnabled();
 // submit it just loses the HUD, which is exactly what an unattended flat run does
 // (measured 2026-08-21: 170 s of play with the headset not streaming and no HUD anywhere).
 void HudNoteSubmitLive();
+// Render thread, after an XR frame went out as a stereo pair. The redirect also follows
+// this: flat frames (title, loading, the map) go onto the cinema screen whole, UI and all,
+// and at the title the UI IS the whole picture - lifted out, the frame was pure black.
+void HudNoteStereoFrame();
 
 // This pass's UI image, or valid=false when the pass drew no UI (loading, a cutscene with
 // the HUD off, or detection that has not caught yet). Owned by the HUD module and stable

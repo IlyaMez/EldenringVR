@@ -209,6 +209,25 @@ std::string join(const std::vector<std::string>& items, const char* separator) {
     return out;
 }
 
+// One of the game's quality words as people say it: "max", "high", "off".
+std::string effectWord(const std::string& value) {
+    if (text::sameText(value, text::kEffectOff))
+        return "off";
+    std::string out = value;
+    for (char& c : out)
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+    return out;
+}
+
+// What each of text::kVrEffects is called in Options, and why VR is better without it.
+constexpr std::array<std::pair<const char*, const char*>, text::kVrEffects.size()> kEffectRows{{
+    {"Turn off depth of field", "The game blurs the distance and what it guesses you are not looking at; in a "
+                                "headset your eyes do the focusing."},
+    {"Turn off motion blur", "It smears the picture whenever the view moves, and in VR your head moves it all the time."},
+    {"Turn off ray tracing", "The costliest setting the game has, and ERVR draws every frame twice."},
+}};
+
 } // namespace
 
 void theme(ImGuiStyle& style) {
@@ -444,6 +463,13 @@ void App::apply(const Change& change, const char* what) {
     rescan();
 }
 
+void App::turnOffEffects() {
+    const Change change = turnOffGameEffects(scan_, settings_.effectsOff);
+    for (const auto& line : change.lines)
+        note(change.ok ? LineKind::normal : LineKind::error, line);
+    scan_.graphics = readGameGraphics();
+}
+
 void App::start() {
     startError_.clear();
     administratorError_.clear();
@@ -495,6 +521,10 @@ void App::begin(bool switchFirst, bool attach) {
             refreshInstall(scan_);
             loadIni();
         }
+        // The game's effects that work against VR, off before the game reads its settings.
+        const Change graphics = turnOffGameEffects(scan_, settings_.effectsOff);
+        plan.before.insert(plan.before.end(), graphics.lines.begin(), graphics.lines.end());
+        scan_.graphics = readGameGraphics();
     }
     log_.clear();
     logCount_ = 0;
@@ -1547,6 +1577,49 @@ void App::setupCard(float width) {
         });
     }
 
+    // The game's own graphics settings.
+    {
+        const GameGraphics& graphics = scan_.graphics;
+        std::vector<std::string> chosen, on;
+        for (size_t i = 0; i < text::kVrEffects.size(); ++i) {
+            if (!settings_.effectsOff[i])
+                continue;
+            chosen.push_back(text::kVrEffects[i].name);
+            if (!graphics.values[i].empty() && !text::sameText(graphics.values[i], text::kEffectOff))
+                on.push_back(std::string(text::kVrEffects[i].name) + " (" + effectWord(graphics.values[i]) + ")");
+        }
+        Mark mark = Mark::busy;
+        std::string detail = "Checking...";
+        if (scan_.done && chosen.empty()) {
+            mark = Mark::info;
+            detail = "Left as the game's own menu sets them (Options > Game graphics).";
+        } else if (scan_.done && graphics.files.empty()) {
+            mark = Mark::info;
+            detail = "ELDEN RING writes its graphics settings on its first start: from the next one, START VR turns "
+                     "off " + text::listed(chosen) + ".";
+        } else if (scan_.done && on.empty()) {
+            mark = Mark::ok;
+            detail = "Off in the game's own settings: " + text::listed(chosen) + ".";
+        } else if (scan_.done) {
+            mark = Mark::info;
+            detail = "On in the game's own settings: " + text::listed(on) + ". START VR turns " +
+                     (on.size() > 1 ? "them" : "it") + " off (Options > Game graphics).";
+        }
+        const bool turnOff = !on.empty();
+        setupRow(mark, "Game graphics", detail, actionWidth, [&] {
+            ImGui::BeginDisabled(!scan_.done || (turnOff && changing));
+            if (button(turnOff ? "Turn off" : "Options", actionWidth)) {
+                if (turnOff)
+                    turnOffEffects();
+                else
+                    tab_ = Tab::options;
+            }
+            ImGui::EndDisabled();
+            if (turnOff && changing && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                tip("ELDEN RING writes its settings back as it closes: START VR turns these off next time.");
+        });
+    }
+
     // What else is in the game folder.
     {
         Mark mark = Mark::busy;
@@ -1820,6 +1893,43 @@ void App::options(ImVec2 origin, ImVec2 size) {
         option("Big screen width", "Its width; with the distance, how much of your view it fills.", gauge,
                [&] { amount("##cinemaWidth", "VR", "CinemaWidth", 4.f, 1, 10, 1, 0.1f, "%.1f m", 2); });
     });
+    // The game's own settings, kept in the launcher's: no ERVR.ini needed.
+    ImGui::EndDisabled();
+    group(0, "Game graphics", [&] {
+        const GameGraphics& graphics = scan_.graphics;
+        std::string words = "ELDEN RING's own settings, not ERVR's: switched off in its GraphicsConfig.xml now and "
+                            "at every START VR. Off here leaves one as the game's menu sets it.";
+        if (gameRunning_)
+            words = "ELDEN RING is running: it writes its settings back as it closes, so START VR switches these off "
+                    "next time.";
+        else if (scan_.done && graphics.files.empty())
+            words = "ELDEN RING writes its graphics settings on its first start: from the next one, START VR switches "
+                    "these off.";
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const float wrap = ImGui::GetContentRegionAvail().x;
+        ImGui::GetWindowDrawList()->AddText(fonts_.body, S(13.5f), at, col(gameRunning_ ? kAmber : kPaperDim),
+                                            words.c_str(), nullptr, wrap);
+        ImGui::Dummy(ImVec2(wrap, measure(fonts_.body, S(13.5f), words.c_str(), wrap).y + S(12)));
+        firstOption_ = false; // a rule under the words
+        for (size_t i = 0; i < kEffectRows.size(); ++i) {
+            const std::string& value = graphics.values[i];
+            const std::string help = std::string(kEffectRows[i].second) +
+                                     (value.empty() ? ""
+                                      : text::sameText(value, text::kEffectOff)
+                                          ? " Off in the game now."
+                                          : " The game has it at " + effectWord(value) + " now.");
+            option(kEffectRows[i].first, help.c_str(), flip, [&] {
+                bool on = settings_.effectsOff[i];
+                if (toggle("##off", &on)) {
+                    settings_.effectsOff[i] = on;
+                    save();
+                    if (on && !gameRunning_)
+                        turnOffEffects();
+                }
+            });
+        }
+    });
+    ImGui::BeginDisabled(!ini_);
     group(0, "HUD", [&] {
         option("HUD", "On a floating panel of its own, sharp and where you can read it; or left in the picture, "
                       "stretched across its edges. Takes effect the next time the game starts.",

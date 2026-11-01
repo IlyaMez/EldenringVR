@@ -716,7 +716,10 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
         if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
         else {
             g_frames.fetch_add(1, std::memory_order_relaxed);
-            if (didStereo) g_stereoFrames.fetch_add(1, std::memory_order_relaxed);
+            if (didStereo) {
+                g_stereoFrames.fetch_add(1, std::memory_order_relaxed);
+                HudNoteStereoFrame();
+            }
         }
         g_frameOpen = false;
     }
@@ -806,7 +809,10 @@ void StereoOnPresent(const Dx12Frame& f) {
     if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
     else {
         g_frames.fetch_add(1, std::memory_order_relaxed);
-        if (didStereo) g_stereoFrames.fetch_add(1, std::memory_order_relaxed);
+        if (didStereo) {
+            g_stereoFrames.fetch_add(1, std::memory_order_relaxed);
+            HudNoteStereoFrame();
+        }
     }
 
     g_lastSubmitMs.store((float)(NowMs() - t0), std::memory_order_relaxed);

@@ -62,15 +62,19 @@ anywhere and start **`ERVR Launcher.exe`**:
 * **Play** checks this PC: the game in your Steam libraries and whether its patch has a verified address map,
   the OpenXR runtimes (Automatic picks Virtual Desktop while its streamer runs, SteamVR while it runs, else
   Windows' active one), the headset (*Check* asks the runtime), ERVR in the game folder, and flat mods in VR's way.
-  **START VR** then installs or updates ERVR, parks those mods, starts Steam if needed and starts the game with
-  EAC off (or through Seamless Co-op when it is installed), and shows `ERVR.log` live as it plays.
+  **START VR** then installs or updates ERVR, parks those mods, turns off the game's depth of field, motion blur
+  and ray tracing, starts Steam if needed and starts the game with EAC off (or through Seamless Co-op when it is
+  installed), and shows `ERVR.log` live as it plays.
 * **Options** edits the game folder's `ERVR.ini` in place (view, resolution, HUD panel, turning, combat, log
-  level...), and ERVR takes each change within a second, mid-game too.
+  level...), and ERVR takes each change within a second, mid-game too. Its *Game graphics* card picks which of
+  those three effects START VR turns off (all three by default).
 * **Controls** lists the default bindings; **About** has *Play flat* (park ERVR, restore the flat mods) and
   *Remove ERVR*.
 
-The launcher changes only the files listed below and the mods it parks (renamed to `*.ervr-off`, never deleted),
-and like ERVR it has no network code: links open in your browser, updates are a new zip. Unpacking the zip straight
+The launcher changes only the files listed below, the mods it parks (renamed to `*.ervr-off`, never deleted) and
+those three values in the game's own `%APPDATA%\EldenRing\GraphicsConfig.xml` (the original kept beside it as
+`GraphicsConfig_ervr_backup.xml`, the backup ERVR.dll makes too), and like ERVR it has no network code: links open in
+your browser, updates are a new zip. Unpacking the zip straight
 into `ELDEN RING\Game`, next to `eldenring.exe`, works as before; the launcher then finds itself in place.
 
 ```

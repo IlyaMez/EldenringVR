@@ -110,6 +110,8 @@ std::atomic<bool> g_dualUsed{false};   // the pair really was captured this pass
 std::atomic<bool> g_recenter{false};
 // Last tick at which the stereo path had a live session to submit a layer into.
 std::atomic<unsigned long long> g_lastLive{0};
+// Last tick at which an XR frame went out as a stereo pair (a projection layer).
+std::atomic<unsigned long long> g_lastStereo{0};
 
 // The UI is only worth taking out of the frame if something is going to put it back on
 // screen. One second of grace, so a dropped frame or a session state blip does not flicker
@@ -118,6 +120,21 @@ bool SubmitLive() {
     if (Cfg().hudRedirectWithoutVR) return true;   // test switch, see config.h
     const unsigned long long t = g_lastLive.load(std::memory_order_relaxed);
     return t && GetTickCount64() - t <= 1000;
+}
+
+// ...and only while the eyes are crops of a stereo frame. A flat frame goes onto the cinema
+// screen WHOLE, its UI already where it belongs - and at the title screen, the boot screens
+// and the loading screens that UI is the entire picture: the title is 7 draws onto the UI
+// target over a black clear, nothing of it world. Lifted out there, the frame is pure black
+// (measured flat, 2026-10-31) and the picture rests on the HUD layer alone; that day three
+// VR boots in a row showed the player nothing but black at the title until they quit. Half a
+// second of grace: pairs run at 40+ Hz, so a gap that long - on top of the pump's own 120 ms
+// stall test - is a real flat stretch (the map, a load, a cutscene), not a hitch.
+constexpr unsigned long long kStereoHoldMs = 500;
+bool StereoLive() {
+    if (Cfg().hudRedirectWithoutVR) return true;   // test switch, see config.h
+    const unsigned long long t = g_lastStereo.load(std::memory_order_relaxed);
+    return t && GetTickCount64() - t <= kStereoHoldMs;
 }
 
 // ---- the render-target census ----------------------------------------------------------
@@ -520,23 +537,35 @@ void HudMirrorPanel(const Dx12Frame& f) {
 }
 
 void HudNoteSubmitLive() { g_lastLive.store(GetTickCount64(), std::memory_order_relaxed); }
+void HudNoteStereoFrame() { g_lastStereo.store(GetTickCount64(), std::memory_order_relaxed); }
 
 void HudRequestRecenter() { g_recenter.store(true); LOGI("[hud] panel re-centred on the current view"); }
 bool HudTakeRecenter() { return g_recenter.exchange(false); }
 
 void HudOnPresent(void* reshadeSwapchain) {
     if (!g_events) return;    // hooks never installed: nothing to close, nothing to arm
-    const bool want = HudEnabled(), live = SubmitLive();
+    const bool want = HudEnabled(), live = SubmitLive(), stereo = StereoLive();
+    // The setting this pass's draws ran under (armed by the previous present), before it moves.
+    const bool wasRedirecting = g_redirect.load(std::memory_order_relaxed);
     g_active.store(want, std::memory_order_relaxed);
-    g_redirect.store(want && live, std::memory_order_relaxed);
+    g_redirect.store(want && live && stereo, std::memory_order_relaxed);
     if (want) {
         static bool s_live = true;
         if (s_live != live) {
             s_live = live;
             LOGI("[hud] %s", live
-                 ? "VR session live again - the UI goes back onto its own layer"
+                 ? "VR session live again - the UI goes onto its own layer whenever the eyes are stereo"
                  : "no VR session to submit a layer into (headset not streaming?) - leaving "
                    "the UI in the frame, where it is at least visible");
+        }
+        // Flips with every map, load and cutscene, so only the first few say so out loud.
+        static int s_stereo = -1, s_told = 0;
+        if (live && s_stereo != (int)stereo) {
+            s_stereo = (int)stereo;
+            Log(s_told++ < 4 ? LogLevel::Info : LogLevel::Debug, "[hud] %s", stereo
+                ? "stereo frames: the UI goes onto its own layer"
+                : "flat frames (title, loading, map, cutscene): the UI stays in the frame, which "
+                  "the cinema screen shows whole");
         }
     }
     if (auto* sc = reinterpret_cast<rs::swapchain*>(reshadeSwapchain)) {
@@ -563,12 +592,18 @@ void HudOnPresent(void* reshadeSwapchain) {
         g_runCount = g_runHead = g_runTotal = g_drawTotal = 0;
         return;
     }
-    if (captured) {
-        g_captures.fetch_add(1, std::memory_order_relaxed);
+    // Flat frames leave the UI where it is but still watch for it, so the target keeps
+    // following the game (it moves when a save loads) and the first stereo pair after a load
+    // or the map lifts the HUD at once instead of after a relearn.
+    const bool found = captured || (!wasRedirecting && draws > FirstDrawCfg());
+    if (found) {
         g_missStreak.store(0, std::memory_order_relaxed);
-        if (!g_announced.exchange(true))
-            LOGI("[hud] UI redirected onto its own layer (%d draws into the frame's final "
-                 "target, the first %d kept)", draws, FirstDrawCfg());
+        if (captured) {
+            g_captures.fetch_add(1, std::memory_order_relaxed);
+            if (!g_announced.exchange(true))
+                LOGI("[hud] UI redirected onto its own layer (%d draws into the frame's final "
+                     "target, the first %d kept)", draws, FirstDrawCfg());
+        }
     } else {
         g_misses.fetch_add(1, std::memory_order_relaxed);
         const int streak = g_missStreak.fetch_add(1, std::memory_order_relaxed) + 1;

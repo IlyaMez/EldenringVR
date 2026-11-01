@@ -577,6 +577,70 @@ std::optional<Change> refuseWhileRunning(const Scan& scan) {
     return std::nullopt;
 }
 
+// `bytes` written whole beside `path`, then put in its place, so that no reader sees half a file.
+bool replaceWhole(const std::wstring& path, std::string_view bytes) {
+    const std::wstring written = path + L".new";
+    {
+        std::ofstream file(fs::path(written), std::ios::binary | std::ios::trunc);
+        file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!file) {
+            file.close();
+            DeleteFileW(written.c_str());
+            return false;
+        }
+    }
+    if (!MoveFileExW(written.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(written.c_str());
+        return false;
+    }
+    return true;
+}
+
+// --- ELDEN RING's graphics settings ---------------------------------------------------------------------------
+
+// launcher.ini's key for one of text::kVrEffects: "turn_off_depth_of_field".
+std::string effectKey(const text::GameEffect& effect) {
+    std::string key = std::string("turn_off_") + effect.name;
+    std::replace(key.begin(), key.end(), ' ', '_');
+    return key;
+}
+
+std::vector<std::wstring> graphicsConfigFiles() {
+    std::vector<std::wstring> files;
+    const std::wstring appData = knownFolder(FOLDERID_RoamingAppData);
+    if (appData.empty())
+        return files;
+    const fs::path root = fs::path(appData) / L"EldenRing";
+    if (isFile(root / L"GraphicsConfig.xml"))
+        files.push_back((root / L"GraphicsConfig.xml").wstring());
+    std::error_code error;
+    for (const auto& entry : fs::directory_iterator(root, error))
+        if (entry.is_directory(error) && isFile(entry.path() / L"GraphicsConfig.xml"))
+            files.push_back((entry.path() / L"GraphicsConfig.xml").wstring());
+    return files;
+}
+
+// "GraphicsConfig.xml", or "<Steam account>\GraphicsConfig.xml" for one in an account's folder.
+std::string graphicsConfigName(const fs::path& file) {
+    const fs::path folder = file.parent_path().filename();
+    return narrow((_wcsicmp(folder.c_str(), L"EldenRing") == 0 ? file.filename() : folder / file.filename()).wstring());
+}
+
+// UTF-16LE. The game writes it without a byte order mark (ERVR.dll's edits add one); a mark there stays in the
+// text, so that the file is written back as it was but for the values changed.
+std::optional<std::wstring> readUtf16(const fs::path& path) {
+    const std::string bytes = readText(path, 1 << 20);
+    if (bytes.size() < 2)
+        return std::nullopt;
+    std::wstring text(bytes.size() / sizeof(wchar_t), L'\0');
+    std::memcpy(text.data(), bytes.data(), text.size() * sizeof(wchar_t));
+    return text;
+}
+
+bool writeUtf16(const std::wstring& path, const std::wstring& text) {
+    return replaceWhole(path, std::string_view(reinterpret_cast<const char*>(text.data()), text.size() * sizeof(wchar_t)));
+}
+
 } // namespace
 
 // --- Text ------------------------------------------------------------------------------------------------------
@@ -617,6 +681,9 @@ Settings loadSettings() {
         else if (key == "xr_runtime") settings.runtime = value.empty() ? kAutoRuntime : widen(value);
         else if (key == "mode") settings.mode = value == "coop" ? StartMode::coop : StartMode::offline;
         else if (key == "shortcuts_asked") settings.shortcutsAsked = value == "1";
+        for (size_t i = 0; i < text::kVrEffects.size(); ++i)
+            if (key == effectKey(text::kVrEffects[i]))
+                settings.effectsOff[i] = value != "0";
     }
     return settings;
 }
@@ -631,6 +698,8 @@ void saveSettings(const Settings& settings) {
     file << "game=" << narrow(settings.gameExe) << "\nxr_runtime=" << narrow(settings.runtime)
          << "\nmode=" << (settings.mode == StartMode::coop ? "coop" : "offline")
          << "\nshortcuts_asked=" << (settings.shortcutsAsked ? 1 : 0) << "\n";
+    for (size_t i = 0; i < text::kVrEffects.size(); ++i)
+        file << effectKey(text::kVrEffects[i]) << "=" << (settings.effectsOff[i] ? 1 : 0) << "\n";
 }
 
 // --- Scanner -------------------------------------------------------------------------------------------------------
@@ -699,6 +768,7 @@ void Scanner::run(Settings settings) {
         scan.install = scanInstall(scan.gameDir, scan.payload, scan.payloadVersion);
         scan.payloadInGame = sameFolder(scan.payload, scan.gameDir);
     }
+    scan.graphics = readGameGraphics();
     scan.runtimes = openXrRuntimes();
     scan.virtualDesktop = processRunning(L"VirtualDesktop.Streamer.exe");
     scan.steamVr = processRunning(L"vrserver.exe");
@@ -859,6 +929,46 @@ Change restoreDefaultIni(const Scan& scan) {
     return c.change;
 }
 
+// --- ELDEN RING's graphics settings ---------------------------------------------------------------------------
+
+GameGraphics readGameGraphics() {
+    GameGraphics graphics;
+    graphics.files = graphicsConfigFiles();
+    if (!graphics.files.empty())
+        if (const auto xml = readUtf16(graphics.files.front()))
+            for (size_t i = 0; i < text::kVrEffects.size(); ++i)
+                graphics.values[i] = text::xmlGet(*xml, text::kVrEffects[i].tag).value_or("");
+    return graphics;
+}
+
+Change turnOffGameEffects(const Scan& scan, const text::EffectsOff& which) {
+    // Any ELDEN RING: every install shares these files.
+    if (processRunning(L"eldenring.exe") || (!scan.gameDir.empty() && gameRunning(scan.gameDir)))
+        return {false, false, {"ELDEN RING is running: it writes its graphics settings back as it closes, so they "
+                               "change at the next START VR."}};
+    Change change;
+    for (const auto& path : graphicsConfigFiles()) {
+        auto xml = readUtf16(path);
+        if (!xml) {
+            change.lines.push_back("Could not read " + graphicsConfigName(path) + ": the game's graphics stay as they are.");
+            continue;
+        }
+        const auto changed = text::turnEffectsOff(*xml, which);
+        if (changed.empty())
+            continue;
+        const std::wstring backup = path.substr(0, path.size() - 4) + L"_ervr_backup.xml";
+        if (!isFile(backup))
+            CopyFileW(path.c_str(), backup.c_str(), TRUE);
+        if (!writeUtf16(path, *xml)) {
+            change.ok = false;
+            change.lines.push_back("Windows refused " + graphicsConfigName(path) + ": the game's graphics stay as they are.");
+            continue;
+        }
+        change.lines.push_back(graphicsConfigName(path) + ": turned off " + text::listed(changed) + ".");
+    }
+    return change;
+}
+
 // --- ERVR.ini -------------------------------------------------------------------------------------------------------
 
 uint64_t writeTime(const std::wstring& path) {
@@ -876,20 +986,8 @@ std::optional<IniFile> readIni(const std::wstring& path) {
 }
 
 bool writeIni(IniFile& ini) {
-    const std::wstring written = ini.path + L".new";
-    {
-        std::ofstream file(fs::path(written), std::ios::binary | std::ios::trunc);
-        file.write(ini.text.data(), static_cast<std::streamsize>(ini.text.size()));
-        if (!file) {
-            file.close();
-            DeleteFileW(written.c_str());
-            return false;
-        }
-    }
-    if (!MoveFileExW(written.c_str(), ini.path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DeleteFileW(written.c_str());
+    if (!replaceWhole(ini.path, ini.text))
         return false;
-    }
     ini.stamp = writeTime(ini.path);
     return true;
 }

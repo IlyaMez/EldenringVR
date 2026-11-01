@@ -69,6 +69,15 @@ struct Install {
     std::vector<ModFile> flat; // flat-only render mods and R.E.A.L. VR's files
 };
 
+// ELDEN RING's own graphics settings: every GraphicsConfig.xml under %APPDATA%\EldenRing (directly there, or in a
+// folder per Steam account; ERVR.dll edits the same files).
+struct GameGraphics {
+    std::vector<std::wstring> files;
+    // Each of text::kVrEffects as the first file has it ("MAX", "DISABLE"); empty when it lacks the tag.
+    std::array<std::string, text::kVrEffects.size()> values;
+};
+GameGraphics readGameGraphics();
+
 struct Scan {
     bool done{};
     // This launcher's ERVR: the zip's files beside it, or build\dist in a checkout.
@@ -86,6 +95,7 @@ struct Scan {
     bool coop{};            // ersc_launcher.exe in the game folder
     bool writable = true;   // the launcher can change files in the game folder
     Install install;
+    GameGraphics graphics;
     // VR.
     std::vector<Runtime> runtimes;
     bool virtualDesktop{}, steamVr{}; // their streamer / server runs now
@@ -95,6 +105,8 @@ struct Settings {
     std::wstring gameExe, runtime = kAutoRuntime;
     StartMode mode = StartMode::offline;
     bool shortcutsAsked{};
+    // The game's effects (text::kVrEffects) the launcher turns off; the rest stay as the game's menu sets them.
+    text::EffectsOff effectsOff = text::allEffects();
 };
 Settings loadSettings();
 void saveSettings(const Settings& settings);
@@ -141,6 +153,10 @@ Change switchToFlat(const Scan& scan);
 Change uninstallErvr(const Scan& scan);
 // The game folder's ERVR.ini replaced by this launcher's, the old one kept beside it.
 Change restoreDefaultIni(const Scan& scan);
+// The effects `which` names switched off in every GraphicsConfig.xml, each file first kept once as
+// GraphicsConfig_ervr_backup.xml (ERVR.dll's backup, the same rule). Refused while the game runs: it writes the
+// file back as it closes. A line a file changed; none when nothing needed changing.
+Change turnOffGameEffects(const Scan& scan, const text::EffectsOff& which);
 
 // ERVR.ini as the Options tab edits it.
 struct IniFile {
