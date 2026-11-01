@@ -307,6 +307,17 @@ void Config::Load(const std::wstring& path) {
     castAimForceLock = GetB(ini, L"Combat", L"CastAimForceLock", castAimForceLock);
     castAimWeaponTypes = GetS(ini, L"Combat", L"CastAimWeaponTypes", castAimWeaponTypes);
 
+    wheelEnabled       = GetB(ini, L"WeaponWheel", L"Enabled", wheelEnabled);
+    wheelHands         = GetS(ini, L"WeaponWheel", L"Hands", wheelHands);
+    wheelHoldSeconds   = GetF(ini, L"WeaponWheel", L"HoldSeconds", wheelHoldSeconds);
+    wheelStillSpeed    = GetF(ini, L"WeaponWheel", L"StillSpeed", wheelStillSpeed);
+    wheelSize          = GetF(ini, L"WeaponWheel", L"Size", wheelSize);
+    wheelDeadZone      = GetF(ini, L"WeaponWheel", L"DeadZone", wheelDeadZone);
+    wheelOpacity       = GetF(ini, L"WeaponWheel", L"Opacity", wheelOpacity);
+    wheelHaptics       = GetB(ini, L"WeaponWheel", L"Haptics", wheelHaptics);
+    wheelSwitchTimeout = GetF(ini, L"WeaponWheel", L"SwitchTimeout", wheelSwitchTimeout);
+    wheelSwitch        = GetS(ini, L"WeaponWheel", L"Switch", wheelSwitch);
+
     fpEnabled = GetB(ini, L"FirstPerson", L"Enabled", fpEnabled);
     fpEyeHeight = GetF(ini, L"FirstPerson", L"EyeHeight", fpEyeHeight);
     fpCameraAnchor = GetS(ini, L"FirstPerson", L"CameraAnchor", fpCameraAnchor);

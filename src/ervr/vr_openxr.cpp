@@ -189,6 +189,9 @@ public:
     DXGI_FORMAT EyeFormat() const override { return (DXGI_FORMAT)eyeFormat_; }
     DXGI_FORMAT QuadFormat() const override { return (DXGI_FORMAT)quad_.format; }
     DXGI_FORMAT HudFormat() const override { return (DXGI_FORMAT)hud_.format; }
+    DXGI_FORMAT OverlayFormat(int which) const override {
+        return which >= 0 && which < OverlayCount ? (DXGI_FORMAT)overlays_[which].format : DXGI_FORMAT_UNKNOWN;
+    }
 
     bool EnsureEyeSwapchains(uint32_t w, uint32_t h) override {
         std::lock_guard<std::recursive_mutex> g(g_mtx);
@@ -249,6 +252,23 @@ public:
         if (fmt == 0) { LOGE("[xr] runtime offers no usable HUD format"); return false; }
         if (!CreateSwap(hud_, w, h, fmt)) return false;
         LOGI("[xr] HUD swapchain %ux%u fmt %lld", w, h, (long long)fmt);
+        return true;
+    }
+
+    bool EnsureOverlaySwapchain(int which, uint32_t w, uint32_t h) override {
+        std::lock_guard<std::recursive_mutex> g(g_mtx);
+        if (!bound_ || which < 0 || which >= OverlayCount || w == 0 || h == 0) return false;
+        Swap& s = overlays_[which];
+        if (s.handle != XR_NULL_HANDLE && s.w == w && s.h == h) return true;
+        s.Destroy();
+        // Alpha-blended like the HUD. The image is composed on the CPU in 8-bit sRGB, so those
+        // formats take a straight copy; the others are converted on upload.
+        int64_t fmt = PickFormat({DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+                                  DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                  DXGI_FORMAT_B8G8R8A8_UNORM});
+        if (fmt == 0) { LOGE("[xr] runtime offers no usable overlay format"); return false; }
+        if (!CreateSwap(s, w, h, fmt)) return false;
+        LOGI("[xr] overlay %d swapchain %ux%u fmt %lld", which, w, h, (long long)fmt);
         return true;
     }
 
@@ -317,6 +337,10 @@ public:
     void ReleaseQuadImage() override { ReleaseTo(quad_); }
     ID3D12Resource* AcquireHudImage() override { return AcquireFrom(hud_); }
     void ReleaseHudImage() override { ReleaseTo(hud_); }
+    ID3D12Resource* AcquireOverlayImage(int which) override {
+        return which >= 0 && which < OverlayCount ? AcquireFrom(overlays_[which]) : nullptr;
+    }
+    void ReleaseOverlayImage(int which) override { if (which >= 0 && which < OverlayCount) ReleaseTo(overlays_[which]); }
 
     // Places a quad layer in space.
     //
@@ -396,7 +420,8 @@ public:
         XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad hudQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-        const XrCompositionLayerBaseHeader* layers[3]{};
+        XrCompositionLayerQuad overlayQuad[OverlayCount]{};
+        const XrCompositionLayerBaseHeader* layers[3 + OverlayCount]{};
         uint32_t count = 0;
 
         if (layer.projectionValid && eyes_[0].handle != XR_NULL_HANDLE) {
@@ -444,6 +469,22 @@ public:
                       layer.hudFollowDeg, layer.hudFollowRadiusM, layer.hudHeightOffsetM,
                       layer.hudYawDeg, layer.hudPitchDeg, layer.hudRecenter);
             layers[count++] = (const XrCompositionLayerBaseHeader*)&hudQuad;
+        }
+        // The overlays carry their own stage-space pose: they belong to the hands, not the view.
+        for (int i = 0; i < OverlayCount; ++i) {
+            const VROverlayQuad& o = layer.overlays[i];
+            if (!o.valid || overlays_[i].handle == XR_NULL_HANDLE || o.widthM <= 0.f || o.heightM <= 0.f) continue;
+            XrCompositionLayerQuad& q = overlayQuad[i];
+            q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+            q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;   // premultiplied, as the HUD
+            q.space = appSpace_;
+            q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            q.subImage.swapchain = overlays_[i].handle;
+            q.subImage.imageArrayIndex = 0;
+            q.subImage.imageRect = {{0, 0}, {(int32_t)overlays_[i].w, (int32_t)overlays_[i].h}};
+            q.pose = FromPose(o.pose);
+            q.size = {o.widthM, o.heightM};
+            layers[count++] = (const XrCompositionLayerBaseHeader*)&q;
         }
 
         XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};
@@ -1026,6 +1067,7 @@ private:
         for (auto& e : eyes_) e.Destroy();
         quad_.Destroy();
         hud_.Destroy();
+        for (auto& o : overlays_) o.Destroy();
         cinemaAnchor_ = Anchor{};
         hudAnchor_ = Anchor{};
         for (auto& s : actions_.handSpace) if (s) { xrDestroySpace(s); s = XR_NULL_HANDLE; }
@@ -1047,7 +1089,7 @@ private:
     XrSpace     appSpace_ = XR_NULL_HANDLE, viewSpace_ = XR_NULL_HANDLE;
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     std::vector<XrViewConfigurationView> viewConfig_;
-    Swap        eyes_[2], quad_, hud_;
+    Swap        eyes_[2], quad_, hud_, overlays_[OverlayCount];
     // The HUD quad keeps its own anchor: it follows on a different (tighter) leash than the
     // cinema screen, and in World lock it must not be dragged along by the cinema quad.
     Anchor      cinemaAnchor_, hudAnchor_;

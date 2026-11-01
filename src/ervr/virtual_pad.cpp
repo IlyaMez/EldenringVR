@@ -7,6 +7,7 @@
 #include "config.h"
 #include "log.h"
 #include "game_memory.h"
+#include "weapon_wheel.h"
 #include <mutex>
 #include <cmath>
 #include <cstring>
@@ -140,7 +141,7 @@ void VirtualPadUpdate(double now) {
     bool lGrip = in.handTrigger[HandLeft]  >= c.gripThreshold;
     bool rGrip = in.handTrigger[HandRight] >= c.gripThreshold;
     mapHeld(g_map.ltrig, lTrig); mapHeld(g_map.rtrig, rTrig);
-    mapHeld(g_map.lgrip, lGrip); mapHeld(g_map.rgrip, rGrip);
+    // The grips are mapped after the weapon wheel has seen them (below): it may hold one back.
 
     // ---- Menu: tap = START, hold = BACK (map) ---------------------------------
     bool menuDown = (in.buttons & VRB_Menu) != 0;
@@ -369,6 +370,19 @@ void VirtualPadUpdate(double now) {
         if (sr == Swing::Heavy) fire(g_map.heavy, HandRight, 1.0f);
         if (sl == Swing::LeftSwing) fire(g_map.leftSwing, HandLeft, 0.6f);
     }
+
+    // ---- weapon wheel ------------------------------------------------------------
+    // A grip held still opens that hand's weapon wheel, so a squeeze the wheel may still claim stays
+    // off the pad; a quick one comes back as a single tap of the grip's mapping. After combat, whose
+    // two-hand grab and swing state the wheel's gate reads.
+    const WheelPadOut wheel = WeaponWheelUpdate(tr, in, now, anyMenu || CombatMenuOpen());
+    mapHeld(g_map.lgrip, lGrip && !wheel.holdGrip[HandLeft]);
+    mapHeld(g_map.rgrip, rGrip && !wheel.holdGrip[HandRight]);
+    if (wheel.tapGrip[HandLeft]) AddPulse(g_map.lgrip, now, c.gesturePressDuration);
+    if (wheel.tapGrip[HandRight]) AddPulse(g_map.rgrip, now, c.gesturePressDuration);
+    held |= wheel.buttons;   // the game's own weapon-switch presses (D-pad left/right)
+    for (int h = 0; h < 2; ++h)
+        if (wheel.hapticAmp[h] > 0.f) Haptic((Hand)h, wheel.hapticAmp[h], now, wheel.hapticSec[h]);
 
     // ---- pulses -> outputs ----------------------------------------------------
     uint16_t pulses = ActivePulses(now);

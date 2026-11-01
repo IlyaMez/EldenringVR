@@ -5,6 +5,26 @@ release workflow and published on GitHub Releases and Nexus Mods.
 
 ## Unreleased
 
+### Weapon wheel
+* Hold a grip with that hand still and a wheel of the hand's three weapon slots opens around it, with
+  the game's own item icons; move over a weapon and let go to switch to it (let go in the middle to
+  switch nothing). A hand with a single weapon opens too.
+* The switch is the game's: ERVR presses D-pad right / left until ChrAsm's active slot reads the slot
+  picked, so the game's animation and rules apply and a refused switch buzzes. A weapon two presses
+  away (`Switch=jump`) first gets the active slot moved to the slot before it, in the save's and the
+  character's equipment alike after checking they match, so one switch takes it straight there
+  instead of passing through the weapon in between; `Switch=cycle` presses once per slot.
+* The grip keeps its other jobs: closed at the other weapon's hilt it is the two-hand grab, and while
+  two-handing or in a menu the wheel stays shut; a moving hand never opens it. A squeeze shorter than
+  `HoldSeconds` is passed on as one tap of the grip's `[Buttons]` mapping. A long squeeze that does
+  not open the wheel says why in ERVR.log.
+* Icons are read from the game's own archive in the background (`menu/hi/00_solo`, the inventory's
+  item pictures: the RSA-keyed index decrypted with the executable's own keys, Oodle via the game's
+  DLL), shrunk from 1024 to 128 px, about 10 ms each. Nothing is extracted to disk.
+* `[WeaponWheel]` in ERVR.ini (`Hands`, `HoldSeconds`, `Switch`, `Size`, ...). Regression tests
+  `weapon_wheel` (layout, picking, the game's slot cycle, the press-until-switched loop) and
+  `icon_decode` (BC1/BC2/BC3/BC7 bit-exact against Pillow, the TPF walk, the shrink).
+
 ### Launcher
 * `ERVR Launcher.exe` in the zip: unpack anywhere and press START VR. It finds the game in the Steam
   libraries and checks its patch against ERVR's verified address maps, lists the OpenXR runtimes
@@ -102,6 +122,17 @@ release workflow and published on GitHub Releases and Nexus Mods.
   `xrWaitFrame` and the headset refresh (`hb: timing`).
 
 ### Fixes
+* View suddenly near the ground, or stuck crouched, until you happened to stand still. The VR body is
+  a snapshot of the game's own pose and the camera rides its head bone, and two snapshot paths could
+  take a pose that was not a stance: after every respawn, warp or area load the snapshot was retaken
+  ~3 s in with no checks at all (catching the respawn kneel, a roll, a stride), and the stand-still
+  re-snapshot accepted any pose held still, a knockdown included. Now the standing snapshot is kept
+  across reloads of the same character, every snapshot is judged by its head height against the
+  skeleton's reference pose (a body on the ground is never taken, a first snapshot must be standing),
+  and a low one (crouch) is left the moment the game's own animation stands back up, walking or not.
+  The eye-height calibration comes from the standing body only. Logged per snapshot
+  (`[skel] pose template captured (...): head X m above the feet = N% of the reference pose`), and the
+  5 s `[body]` line now shows the camera's height above the feet.
 * Black headset from boot through the title screen. Once the render size was exact 16:9 the HUD
   layer found the title screen's UI target, and at the title that UI is the whole picture (logo,
   ring, menu: 7 draws over a black clear), so the frame on the cinema screen came out pure black

@@ -83,10 +83,14 @@ add_library(ERVR SHARED
   src/ervr/patches_er.cpp
   src/ervr/combat.cpp
   src/ervr/params_er.cpp
+  src/ervr/weapon_wheel.cpp
+  src/ervr/item_icons.cpp
+  src/ervr/icon_decode.cpp
+  src/ervr/game_archive.cpp
   src/ervr/crashlog.cpp
   ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
 target_include_directories(ERVR PRIVATE src/ervr ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
-target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi)
+target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi bcrypt)
 target_compile_definitions(ERVR PRIVATE ERVR_VERSION="${PROJECT_VERSION}")
 set_target_properties(ERVR PROPERTIES OUTPUT_NAME "ERVR" PREFIX "")
 
@@ -140,12 +144,13 @@ endif()
 option(ERVR_BUILD_REGRESSION_TESTS "Build camera, pose, input, and action-queue regression tests" OFF)
 if(ERVR_BUILD_REGRESSION_TESTS)
   enable_testing()
-  foreach(_test head_anchor action_queue pose_frame two_hand_aim two_hand_grip weapon_motion weapon_contact body_pose virtual_pad movement_facing ride_state mounted_rider game_version game_res)
+  foreach(_test head_anchor action_queue pose_frame two_hand_aim two_hand_grip weapon_motion weapon_contact body_pose virtual_pad movement_facing ride_state mounted_rider game_version game_res icon_decode weapon_wheel)
     add_executable(test_${_test} tools/test_${_test}.cpp)
     target_include_directories(test_${_test} PRIVATE src/ervr)
     add_test(NAME ${_test} COMMAND test_${_test})
   endforeach()
   target_sources(test_virtual_pad PRIVATE src/ervr/virtual_pad.cpp src/ervr/gestures.cpp src/ervr/config.cpp)
+  target_sources(test_icon_decode PRIVATE src/ervr/icon_decode.cpp)
   # The launcher's ERVR.ini edits, log reading and Steam parsing.
   add_executable(test_launcher_text tools/test_launcher_text.cpp)
   target_include_directories(test_launcher_text PRIVATE src/launcher src/ervr)

@@ -5,6 +5,7 @@
 #include "combat.h"
 #include "config.h"
 #include "log.h"
+#include "weapon_wheel.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -50,6 +51,8 @@ uint32_t CombatTakeHapticRequests() { return 0; }
 uint16_t CombatBlockedButtons() { return combatMenu ? 0 : VP_RT; }
 uint16_t CombatHeldButtons() { return 0; }
 uint16_t CombatForcedButtons(double) { return 0; }
+WheelPadOut wheelOut;
+WheelPadOut WeaponWheelUpdate(const VRTracking&, const VRInputState&, double, bool) { return wheelOut; }
 }
 
 int main() {
@@ -136,5 +139,23 @@ int main() {
     input.controllerConnected[0] = input.controllerConnected[1] = false;
     VirtualPadUpdate(now += 0.02);
     Check(!VirtualPadGetMove().valid && !VirtualPadGetMove().sprint, "disconnect must clear stale held dash intent");
+
+    // The weapon wheel's say over the grips: a grip it holds back never reaches the game, a quick
+    // squeeze arrives as one tap of the grip's mapping, and its switch presses reach the D-pad.
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    input.handTrigger[HandLeft] = 1.f;   // LeftGrip=LT
+    wheelOut = {};
+    Check(Poll().bLeftTrigger == 255, "a grip the wheel does not claim sends its mapping as before");
+    wheelOut.holdGrip[HandLeft] = true;
+    Check(Poll().bLeftTrigger == 0, "a grip the wheel may still claim stays off the pad");
+    input.handTrigger[HandLeft] = 0.f;
+    wheelOut = {}; wheelOut.tapGrip[HandLeft] = true;
+    Check(Poll().bLeftTrigger == 255, "a quick squeeze comes back as a tap of the grip's mapping");
+    wheelOut = {};
+    for (int i = 0; i < 10; ++i) Poll();
+    Check(Poll().bLeftTrigger == 0, "the tap ends");
+    wheelOut.buttons = XINPUT_GAMEPAD_DPAD_RIGHT;
+    Check((Poll().wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0, "the wheel's switch press reaches the game");
+    wheelOut = {};
     std::puts("Virtual pad/map zoom and directional dash/roll regression checks passed.");
 }

@@ -47,6 +47,9 @@ uint16_t CombatForcedButtons(double now);
 // the controller orientation captured at the grab. game_er applies it. False otherwise.
 bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool* handleAxis,
                       TwoHandGripOrientation* grip = nullptr);
+// The weapon wheel's gate, worker thread, after CombatPollHands: this hand is at the other weapon's hilt
+// (a grip closed there is the two-hand grab), and *holding = it has taken that hilt.
+bool CombatTwoHandGrip(int hand, bool* holding);
 // Weight the hand is carrying (EquipParamWeapon weight; both hands share it when two-handing;
 // 0 = empty/unknown). Drives the inertial arm in game_er.
 float CombatHandWeight(int hand);

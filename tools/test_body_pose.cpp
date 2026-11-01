@@ -86,5 +86,61 @@ int main() {
               "VR pose suppression must preserve the original eye-to-head offset through menus, walking and rolling");
         Check(!anchor.riding, "on-foot menus must never select the mounted head-anchor path");
     }
+
+    // Stance judge (2026-11-01, "dropped to the ground / became really short"): the camera rides the template's
+    // head, and a template could be any pose - a post-respawn retry, a knockdown held still. Rig as in c0000:
+    // Master -> RootPos (hip height) -> Spine -> Head.
+    struct Bone { float t[4]; float q[4]; float s[4]; };
+    const std::array<int16_t, 4> parents{-1, 0, 1, 2};
+    auto rig = [](float hip, Quat rootPosQ) {
+        std::array<Bone, 4> p{};
+        for (Bone& b : p) { b.q[3] = 1.f; b.s[0] = b.s[1] = b.s[2] = 1.f; }
+        p[1].t[1] = hip; p[1].q[0] = rootPosQ.x; p[1].q[1] = rootPosQ.y; p[1].q[2] = rootPosQ.z; p[1].q[3] = rootPosQ.w;
+        p[2].t[1] = 0.30f; p[3].t[1] = 0.25f;
+        return p;
+    };
+    auto height = [&](const std::array<Bone, 4>& p) { return BoneHeight<Bone>(p, parents, 3); };
+    const float reference = height(rig(1.05f, Quat{}));
+    const auto standing = rig(1.0f, Quat{}), crouch = rig(0.60f, Quat{});
+    const auto lying = rig(0.25f, Quat::AxisAngle({1.f, 0.f, 0.f}, 1.5708f));
+    Check(std::fabs(reference - 1.60f) < 1e-4f && std::fabs(height(standing) - 1.55f) < 1e-4f,
+          "head height walks the parent chain from the rig root");
+    Check(std::fabs(height(lying) - 0.25f) < 0.01f, "a rotated hip folds the chain flat onto the ground");
+    Check(JudgeStance(height(standing), reference) == BodyStance::Standing &&
+          JudgeStance(height(crouch), reference) == BodyStance::Low &&
+          JudgeStance(height(lying), reference) == BodyStance::Down,
+          "standing, crouch and a body on the ground are told apart by head height");
+    Check(JudgeStance(0.3f, 0.05f) == BodyStance::Standing && JudgeStance(0.3f, 9.f) == BodyStance::Standing,
+          "an implausible reference pose judges nothing (old behaviour)");
+    Check(JudgeTemplate(BodyStance::Down, false, false) == TemplateVerdict::Rejected,
+          "a knockdown held still is never captured as the stance");
+    Check(JudgeTemplate(BodyStance::Low, true, false) == TemplateVerdict::Rejected &&
+          JudgeTemplate(BodyStance::Standing, true, false) == TemplateVerdict::Standing,
+          "a post-load retry waits for a standing pose instead of snapshotting the respawn kneel");
+    Check(JudgeTemplate(BodyStance::Low, false, false) == TemplateVerdict::Low,
+          "an in-game crouch held still still reaches the VR body");
+    Check(JudgeTemplate(BodyStance::Down, true, true) == TemplateVerdict::Low &&
+          JudgeTemplate(BodyStance::Standing, true, true) == TemplateVerdict::Standing,
+          "a misread reference cannot keep VR posing off once the wait is overdue");
+
+    StandUpWatch watch;
+    Check(!watch.Update(true, false, 10.0) && !watch.Update(true, true, 10.1) && !watch.Update(false, false, 10.2),
+          "standing up needs time, and echo frames do not reset it");
+    Check(!watch.Update(true, true, 10.30) && watch.Update(true, true, 10.36), "0.25 s of fresh standing frames ends a low stance");
+    watch.Reset();
+    Check(!watch.Update(true, true, 20.0) && !watch.Update(true, false, 20.2) && !watch.Update(true, true, 20.3) &&
+          !watch.Update(true, true, 20.5) && watch.Update(true, true, 20.56),
+          "a dip back down (getting-up animation) restarts the stand-up timer");
+
+    // Eye height through the reported sequence. The calibration is preset from the standing template before a
+    // low template is seen; calibrating from the low head instead put the eye 0.5 m too high after standing up.
+    HeadAnchorState eyeAnchor;
+    const Vec3 feet{2.f, 7.f, -1.f};
+    eyeAnchor.restHeight = height(standing);
+    const Vec3 low = eyeAnchor.Update(feet, feet + Vec3{0.f, height(crouch), 0.f}, 1.60f, 1.f, 0.06f, true, 30.0, 300);
+    Check(std::fabs(low.y - feet.y - (1.60f - (height(standing) - height(crouch)))) < 1e-4f,
+          "a low template takes the camera down by exactly the head's drop");
+    const Vec3 up = eyeAnchor.Update(feet, feet + Vec3{0.f, height(standing), 0.f}, 1.60f, 1.f, 0.06f, true, 30.1, 301);
+    Check(std::fabs(up.y - feet.y - 1.60f) < 1e-4f, "restoring the standing template puts the eye back at EyeHeight");
     std::puts("Body/finger pose regression checks passed.");
 }

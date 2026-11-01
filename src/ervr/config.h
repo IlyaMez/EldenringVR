@@ -395,6 +395,22 @@ struct Config {
     std::string castAimWeaponTypes = "50,51,53,55,56,57,61,89,91";   // wepTypes that make a hand the passive aim hand (bows, staffs, seals, perfumes, throwing blades); their attack buttons pass the physical block
     std::wstring iniPath;                 // where Load() read from (for SaveLearned)
 
+    // [WeaponWheel]  hold a grip with that hand still: a wheel of the hand's three weapon slots opens at the
+    // hand, with the game's own item icons; move over one and let go to switch to it (weapon_wheel.h).
+    bool  wheelEnabled = true;
+    std::string wheelHands = "both";      // both | right | left | off
+    float wheelHoldSeconds = 0.35f;       // grip held with the hand still this long opens the wheel; a shorter squeeze is a tap of the grip's [Buttons] mapping
+    float wheelStillSpeed = 0.8f;         // m/s: a hand moving faster restarts the hold (a swing with the grip squeezed, reaching for the other hilt)
+    float wheelSize = 0.30f;              // m across; the weapons sit 0.3 x this from the centre
+    float wheelDeadZone = 0.035f;         // m from the centre: letting go inside it switches nothing
+    float wheelOpacity = 1.0f;            // 0..1
+    bool  wheelHaptics = true;
+    float wheelSwitchTimeout = 1.0f;      // s the game gets to answer each D-pad press before it counts as ignored
+    // jump  = a weapon more than one press away: the active slot is first moved to the slot before it, so the
+    //         game's own switch runs once (no weapon in between shows up)
+    // cycle = press the game's switch once per slot in between, as a gamepad would
+    std::string wheelSwitch = "jump";
+
     // [Cheats]  offline convenience for testing (writes the save's PlayerGameData)
     int   cheatSetAllStats = 0;           // >0: set every stat to exactly this value (level adjusted); 0 = off
     int   cheatSetLevel = 0;              // >0: reach exactly this level (points off the highest stats / onto the lowest), once - the key clears itself

@@ -5,6 +5,7 @@
 #include "hud.h"
 #include "reshade_addon.h"
 #include "vr_backend.h"
+#include "weapon_wheel.h"
 #include "config.h"
 #include "log.h"
 #include <windows.h>
@@ -201,6 +202,7 @@ Crop MakeCrop(const FrameTans& ft, const VRFov& want) {
 void ReleaseLocked() {
     FramePumpSetGpuQueue(nullptr);
     g_blit.Release();
+    WeaponWheelReleaseGpu();
     g_bound = false;
     g_boundDevice = nullptr;
     g_frameOpen = false;
@@ -551,6 +553,12 @@ void ComposeHud(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& layer) {
     g_hudFrames.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Everything that rides on top of the world: the HUD, then the weapon wheel (weapon_wheel.h).
+void ComposeLayers(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& layer) {
+    ComposeHud(vr, f, layer);
+    WeaponWheelCompose(vr, f, layer);
+}
+
 // ---- full stereo: two engine passes, two presents, one XR frame ------------------------
 // The frame pump runs a draw-only second engine pass after each real frame; Present is
 // synchronous with each pass (measured), so pass 1's present carries the LEFT eye and
@@ -621,7 +629,7 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
             if (BlitQuad(vr, f, bp)) layer.quadValid = true;
             layer.quadDistanceM = Cfg().vrCinemaDistance;
             layer.quadWidthM = Cfg().vrCinemaWidth;
-            ComposeHud(vr, f, layer);
+            ComposeLayers(vr, f, layer);
             if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
             else g_frames.fetch_add(1, std::memory_order_relaxed);
             g_frameOpen = false;
@@ -654,7 +662,7 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
             if (fi.shouldRender && BlitQuad(vr, f, bp)) layer.quadValid = true;
             layer.quadDistanceM = Cfg().vrCinemaDistance;
             layer.quadWidthM = Cfg().vrCinemaWidth;
-            ComposeHud(vr, f, layer);
+            ComposeLayers(vr, f, layer);
             if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
             else g_frames.fetch_add(1, std::memory_order_relaxed);
         }
@@ -690,7 +698,7 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
                 if (fi.shouldRender && BlitQuad(vr, f, bp)) layer.quadValid = true;
                 layer.quadDistanceM = Cfg().vrCinemaDistance;
                 layer.quadWidthM = Cfg().vrCinemaWidth;
-                ComposeHud(vr, f, layer);
+                ComposeLayers(vr, f, layer);
                 if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
                 else g_frames.fetch_add(1, std::memory_order_relaxed);
                 g_lastSubmitMs.store((float)(NowMs() - t0), std::memory_order_relaxed);
@@ -712,7 +720,7 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
             layer.quadDistanceM = Cfg().vrCinemaDistance;
             layer.quadWidthM = Cfg().vrCinemaWidth;
         }
-        ComposeHud(vr, f, layer);
+        ComposeLayers(vr, f, layer);
         if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
         else {
             g_frames.fetch_add(1, std::memory_order_relaxed);
@@ -805,7 +813,7 @@ void StereoOnPresent(const Dx12Frame& f) {
         layer.quadWidthM = Cfg().vrCinemaWidth;
     }
 
-    ComposeHud(vr, f, layer);
+    ComposeLayers(vr, f, layer);
     if (!vr->EndFrame(layer)) g_submitFails.fetch_add(1, std::memory_order_relaxed);
     else {
         g_frames.fetch_add(1, std::memory_order_relaxed);

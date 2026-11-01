@@ -38,6 +38,7 @@
 // CSGaitem, else the weapon's own). Event ids: DSAnimStudio TAE.Template.ER.xml.
 #include "combat.h"
 #include "config.h"
+#include "equipment_layout.h"
 #include "game_er.h"
 #include "game_memory.h"
 #include "game_version.h"
@@ -48,6 +49,7 @@
 #include "params_er.h"
 #include "log.h"
 #include "rtti.h"
+#include "weapon_wheel.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -99,15 +101,7 @@ constexpr uint32_t EV_AttackBehavior = 1;
 constexpr uint32_t EV_BulletBehavior = 2, EV_CommonBehavior = 5;   // the other slot-3 (behavior) events; everything else is slot 2
 constexpr uint32_t EV_AddSpEffectWeaponArts = 331;                 // {SpEffectID_EnoughFP, SpEffectID_NotEnoughFP, 0, 0}: an Ash of War's effect
 
-// PlayerIns -> ChrAsm (fromsoftware-rs PlayerIns @0x638; ChrAsm: arm_style @8, selected slots
-// left/right @0xC/0x10, equipment_param_ids[22] @0x7C in ChrAsmEquipEntries order:
-// 0 primary-left, 1 primary-right, 2 secondary-left, 3 secondary-right, 4/5 tertiary).
-constexpr size_t Player_ChrAsm   = 0x638;
-constexpr size_t Asm_ArmStyle    = 0x08;   // 0 empty, 1 one-handed, 2 left both hands, 3 right both hands
-constexpr size_t Asm_LeftSlot    = 0x0C;
-constexpr size_t Asm_RightSlot   = 0x10;
-constexpr size_t Asm_GaitemHandles = 0x24; // GaitemHandle[22], same order (bit 23 = indexed, bits 0-15 = CSGaitemImp table index)
-constexpr size_t Asm_ParamIds    = 0x7C;
+// PlayerIns -> ChrAsm and the EQUIP_PARAM_WEAPON_ST fields the weapon wheel shares: equipment_layout.h.
 // EQUIP_PARAM_WEAPON_ST
 constexpr size_t   Wep_VariationId   = 0x04;   // i32 behaviorVariationId
 constexpr size_t   Wep_Weight        = 0x10;   // f32
@@ -115,7 +109,6 @@ constexpr size_t   Wep_GuardCut      = 0x34;   // f32 x4: phys, mag, fire, thun 
 constexpr size_t   Wep_StaminaGuardDef = 0xD8; // i16 stability
 constexpr size_t   Wep_DarkGuardCut  = 0x188;  // f32
 constexpr size_t   Wep_SwordArtsId   = 0x198;  // i32 swordArtsParamId: the weapon's own skill (an applied Ash of War overrides it through the gem)
-constexpr size_t   Wep_Type          = 0x1A6;  // u16 wepType (65 small / 67 medium / 69 great shield)
 constexpr uint32_t Wep_RowSize       = 0x298;
 // EQUIP_PARAM_GEM_ST (the applied Ash of War) and SWORD_ARTS_PARAM_ST (its per-button costs)
 constexpr size_t   Gem_SwordArtsId   = 0x18;   // i32
@@ -1789,6 +1782,8 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
         bool zoneNow = false;
         for (int w = HandRight; w >= HandLeft && !s.want; --w) {
             float along = 0.f, perp = 0.f;
+            // A hand choosing on its weapon wheel is not grabbing: the right hand's inward slot lies toward the left hilt.
+            if (WeaponWheelOwnsHand(1 - w)) continue;
             if (!g_wepPresent[w].load() || !geometry(w, &along, &perp)) continue;
             if (!(along >= c.twoHandGrabMin && along <= c.twoHandGrabMax && perp <= c.twoHandGrabRadius)) continue;
             zoneNow = true; s.pinHand = 1 - w; s.weaponHand = w;
@@ -2208,6 +2203,13 @@ bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool*
     return true;
 }
 
+bool CombatTwoHandGrip(int hand, bool* holding) {
+    std::lock_guard<std::mutex> g(g_mtx);
+    const bool mine = g_two.pinHand == hand;
+    if (holding) *holding = mine && g_two.want;
+    return mine && (g_two.want || g_two.inZone);
+}
+
 float CombatHandWeight(int hand) { return hand == HandLeft || hand == HandRight ? g_wepWeight[hand].load() : 0.f; }
 int CombatTwoHandWeaponHand() { const int style = g_armStyleShared.load(); return TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : -1; }
 float CombatHandReach(int hand) {
@@ -2261,7 +2263,9 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         HandSM& s = g_sm[h];
         const Pose& p = tr.hand[h];
         bool grip = in.handTrigger[h] >= c.gripThreshold;   // analog in VRInputState; VRB_*Grip is never set by the backend
-        bool allowed = p.valid && in.controllerConnected[h] && h != freeHand && (h == HandRight || (c.combatLeftHand && !leftShield)) && (!c.gestureRequiresGrip || grip);
+        // A hand choosing on the weapon wheel is not swinging, however fast it moves onto a weapon.
+        bool allowed = p.valid && in.controllerConnected[h] && h != freeHand && (h == HandRight || (c.combatLeftHand && !leftShield)) &&
+                       (!c.gestureRequiresGrip || grip) && !WeaponWheelOwnsHand(h);
         if (!allowed) {
             // Also cancel an undelivered short contact while already cooling
             // down; tracking loss or taking the support grip must never replay it.

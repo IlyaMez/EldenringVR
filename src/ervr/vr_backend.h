@@ -69,8 +69,18 @@ struct VRFrameInfo {
 //   World - anchored once and left there, until the player recentres it.
 enum VRQuadLock { QuadLockBody = 0, QuadLockHead, QuadLockWorld };
 
+// Small quads ERVR draws itself, placed in stage space by their owner - the weapon wheel at the
+// hand that opened it, and the cursor showing where that hand is over it. Alpha-blended like the
+// HUD (premultiplied), submitted after it in this order.
+enum VROverlay { OverlayWheel = 0, OverlayWheelCursor, OverlayCount };
+struct VROverlayQuad {
+    bool  valid = false;
+    Pose  pose;                     // centre and orientation; the image faces +Z
+    float widthM = 0.f, heightM = 0.f;
+};
+
 // What EndFrame composes. A frame may carry a projection layer, the flat cinema/menu quad,
-// the HUD quad, or any combination - they are submitted in that order, back to front.
+// the HUD quad, the overlays, or any combination - submitted in that order, back to front.
 struct VRSubmitLayer {
     bool projectionValid = false;   // stereo: views[] are the poses/fovs the eyes were RENDERED with
     VREyeView views[2];
@@ -90,6 +100,8 @@ struct VRSubmitLayer {
     float hudFollowDeg = 25.f;      // Body lock: head turn that re-anchors the quad
     float hudFollowRadiusM = 0.5f;  // Body lock: head travel that re-anchors it
     bool  hudRecenter = false;      // one-shot: drop the anchor where the head is looking now
+
+    VROverlayQuad overlays[OverlayCount];
 };
 
 class IVRBackend {
@@ -127,6 +139,10 @@ public:
     // (the cinema quad during a menu-only mono frame, the HUD quad over the world).
     virtual bool EnsureHudSwapchain(uint32_t w, uint32_t h) = 0;
     virtual DXGI_FORMAT HudFormat() const = 0;
+    // Overlay quads (VROverlay). 8-bit sRGB preferred, so an image composed on the CPU copies
+    // straight in; OverlayFormat says what the runtime actually gave.
+    virtual bool EnsureOverlaySwapchain(int which, uint32_t w, uint32_t h) = 0;
+    virtual DXGI_FORMAT OverlayFormat(int which) const = 0;
 
     // -- frame loop (render thread only; stereo.cpp is the sole caller) --
     virtual bool WaitBeginFrame(VRFrameInfo& out) = 0;                       // xrWaitFrame + xrBeginFrame + event pump
@@ -146,6 +162,8 @@ public:
     virtual void ReleaseQuadImage() = 0;
     virtual ID3D12Resource* AcquireHudImage() = 0;
     virtual void ReleaseHudImage() = 0;
+    virtual ID3D12Resource* AcquireOverlayImage(int which) = 0;
+    virtual void ReleaseOverlayImage(int which) = 0;
     virtual bool EndFrame(const VRSubmitLayer& layer) = 0;
 
     // -- pose/input plane (worker thread; unchanged, consumers untouched) --

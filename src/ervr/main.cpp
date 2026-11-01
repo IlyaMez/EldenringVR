@@ -22,6 +22,8 @@
 #include "frame_probe.h"
 #include "cam_watch.h"
 #include "hud.h"
+#include "item_icons.h"
+#include "weapon_wheel.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -294,6 +296,13 @@ DWORD WINAPI Worker(LPVOID) {
                  cs.paramsReady, cs.lastQuality, cs.lastMult, cs.shield, cs.guarding, cs.blockQuality,
                  cs.armStyle, cs.twoHandWanted, cs.skill, cs.skillsRecorded, cs.fp,
                  cs.castAimHand < 0 ? "head" : cs.castAimHand == 1 ? "right hand" : "left hand", cs.casting ? " (cast live)" : "");
+            if (Cfg().wheelEnabled) {
+                const WheelStats ws = WeaponWheelGetStats();
+                const ItemIconStats is = ItemIconsGetStats();
+                LOGD("hb: wheel: open %s | 5s: opened %ld, switched %ld, failed %ld | icons read %ld, unavailable %ld",
+                     ws.openHand < 0 ? "-" : ws.openHand == 1 ? "right" : "left", ws.opens, ws.switches, ws.failed,
+                     is.loaded, is.failed);
+            }
         }
         double spent = Now() - t;
         DWORD sleepMs = (DWORD)((period - spent) * 1000.0);

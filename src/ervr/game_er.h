@@ -94,6 +94,8 @@ int GameERPlayerLevel();
 uint8_t* GameERWorldChrMan();
 // The main player ChrIns (null between worlds). Any thread; every read through it must be a SafeRead.
 uint8_t* GameERMainPlayer();
+// The save's PlayerGameData (GameDataMan+0x8), null before one is loaded. SafeRead/SafeWrite only.
+uint8_t* GameERPlayerGameData();
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

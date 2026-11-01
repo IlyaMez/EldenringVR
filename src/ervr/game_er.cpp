@@ -24,10 +24,12 @@
 #include "combat.h"
 #include "frame_probe.h"
 #include "stereo.h"
+#include "weapon_wheel.h"
 #include <windows.h>
 #include <MinHook.h>
 #include "virtual_pad.h"
 #pragma comment(lib, "version.lib")
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <mutex>
@@ -245,6 +247,7 @@ volatile LONG g_finalYawForeign = 0, g_finalPosForeign = 0;
 // matrix the rig actually renders with, same frame. Nonzero while moving = our lag; zero = the lag is R.E.A.L.'s.
 Vec3 g_lastCamRoot{}; float g_skewMax = 0.f;
 float g_bodyCamLat = 0.f, g_bodyCamFwd = 0.f, g_bodyCamUp = 0.f;   // rendered head vs written eye, view axes
+float g_camHMin = 1e9f, g_camHMax = -1e9f;   // camera anchor height above the feet (the template's part of eye height)
 volatile LONGLONG g_hkTicks = 0, g_camTicks = 0;
 uint32_t g_lastArmFrame = 0xFFFFFFFF;
 struct ScopedTicks { volatile LONGLONG* acc; LARGE_INTEGER t0; ScopedTicks(volatile LONGLONG* a) : acc(a) { QueryPerformanceCounter(&t0); } ~ScopedTicks() { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); InterlockedExchangeAdd64(acc, t1.QuadPart - t0.QuadPart); } };
@@ -591,7 +594,35 @@ Vec3 g_statPos{}; double g_statSince = 0; double g_templLastCapture = 0;
 // Stance re-capture settle guard: candidate snapshot of a pose that differs from the template, only promoted to
 // template once it has held still for a while (see UpdateArms) - a transient animation must never become the template.
 std::vector<HkQsTransform> g_templCand; double g_templCandAt = 0, g_templCheckAt = 0;
-bool CaptureTemplate(uint8_t* chr, const char* why);
+// Stance bookkeeping (JudgeStance): the camera rides the template's head, so each template is judged by that
+// head's height against the skeleton's reference pose. The last standing template is kept apart so a low one
+// (crouch) is left the moment the game stands back up, and so a reload of the same character keeps the body it
+// had instead of snapshotting whatever the respawn shows.
+std::vector<HkQsTransform> g_standTemplate;
+float g_refHead = -1.f, g_standHead = -1.f, g_templHead = -1.f;
+bool g_templLow = false;
+const char* g_templWhy = "";
+std::wstring g_templOwner;
+double g_firstRejectSince = 0, g_rejectLogAt = 0;
+StandUpWatch g_standUp;
+bool CaptureTemplate(uint8_t* chr, const char* why, bool firstTemplate);
+// Whose templates they are: PlayerGameData::character_name (fromsoftware-rs: u16[17] at +0x9C).
+std::wstring PlayerCharacterName() {
+    uint8_t* pgd = GameERPlayerGameData(); if (!pgd) return {};
+    wchar_t name[17]{};
+    if (!SafeRead(pgd + 0x9C, name, sizeof(name))) return {};
+    name[16] = 0;
+    return name;
+}
+float TemplateHead(const std::vector<HkQsTransform>& t) {
+    if (g_skel.head < 0 || (int)t.size() != g_skel.boneCount) return -1.f;
+    return BoneHeight<HkQsTransform>(t, g_skel.parents, g_skel.head);
+}
+// Replace a template's contents in place when the size allows: the camera hooks read g_poseTemplate from other
+// threads, and a move-assign frees the buffer they may be walking.
+void SetTemplate(std::vector<HkQsTransform>& dst, const std::vector<HkQsTransform>& src) {
+    if (dst.size() == src.size()) std::copy(src.begin(), src.end(), dst.begin()); else dst = src;
+}
 bool OursBone(int i);
 namespace posescan { void Disarm(const char* why); void MarkPhase(int bit); void Drive(void* pose, size_t bytes); }
 // Per-root-bone bookkeeping for the BodyFollowsHead shift, so applying it twice in a frame is a no-op.
@@ -678,6 +709,12 @@ bool BuildSkeleton(uint8_t* chr) {
         if (!all.empty()) LOGI("[skel] %s", all.c_str());
     }
     LOGI("[skel] player skeleton: %d bones, hkbCharacter %p; arms L(%d,%d,%d) R(%d,%d,%d)", s.boneCount, (void*)s.hkb, s.L_ua, s.L_fa, s.L_hand, s.R_ua, s.R_fa, s.R_hand);
+    // A respawn, warp or area load rebuilds the skeleton of the same character. Keep the standing body it had:
+    // a fresh snapshot here caught whatever the reload showed - the respawn kneel, a roll, the first steps of a
+    // run - and the camera rides that template's head ("dropped to the ground after dying", 2026-11-01).
+    const std::wstring owner = PlayerCharacterName();
+    const bool carry = !g_standTemplate.empty() && !owner.empty() && owner == g_templOwner &&
+        g_skel.boneCount == s.boneCount && g_skel.names == s.names && g_skel.parents == s.parents;
     g_skel = std::move(s);
     g_rootShiftBase.clear(); g_rootShiftWritten.clear(); g_rootShiftHas.clear(); g_rootRotBase.clear(); g_rootRotWritten.clear();
     ResetRecenter();   // new character / area load: start centred on wherever you are standing now
@@ -695,7 +732,20 @@ bool BuildSkeleton(uint8_t* chr) {
         if (g_skel.names[i].find("Twist") != std::string::npos) { addProbe(i); ++twists; }
     g_probeLastQ.assign(g_probeBones.size(), {}); g_probeHas.assign(g_probeBones.size(), 0); g_probeMaxDeg.assign(g_probeBones.size(), 0.f);
     g_probeLastPoint = -1;
-    CaptureTemplate(chr, "skeleton build");   // pose buffer is untouched by us at this point
+    g_refHead = g_skel.head >= 0 ? BoneHeight<HkQsTransform>(g_skel.refPoseCopy, g_skel.parents, g_skel.head) : -1.f;
+    if (StanceReferencePlausible(g_refHead))
+        LOGI("[skel] reference pose head %.2f m above the feet: a template reads standing from %.2f m, on the ground under %.2f m",
+             g_refHead, g_refHead * kStanceStandingRatio, g_refHead * kStanceDownRatio);
+    else
+        LOGW("[skel] reference pose head reads %.2f m above the feet - implausible, so templates are not judged by height", g_refHead);
+    g_standUp.Reset(); g_firstRejectSince = 0;
+    if (carry) {
+        g_poseTemplate = g_standTemplate; g_templHead = g_standHead; g_templLow = false; g_templWhy = "kept across a reload";
+        LOGI("[skel] pose template kept across the reload (same character): standing, head %.2f m above the feet", g_standHead);
+    } else {
+        g_standTemplate.clear(); g_standHead = g_templHead = -1.f; g_templLow = false; g_templWhy = "";
+        CaptureTemplate(chr, "skeleton build", true);   // pose buffer is untouched by us at this point
+    }
     return true;
 }
 
@@ -1108,6 +1158,11 @@ void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
         const bool templatePose = haveHb;
         if (!haveHb) haveHb = HeadBoneWorld(player, root, rootQ, hb);
         if (haveHb) {
+            // EyeHeight belongs to the STANDING body. After a reset the anchor would otherwise calibrate from the
+            // first head it sees - a live pose mid-reload, or a crouch template - and every later standing frame
+            // would sit that difference too high or too low.
+            if (!f.riding && c.fpPoseMode == "vr" && g_headAnchor.restHeight < 0.f && g_standHead > 0.f)
+                g_headAnchor.restHeight = g_standHead;
             f.anchor = g_headAnchor.Update(root, hb, c.fpEyeHeight, c.fpCameraBob,
                                           c.fpCameraAnchorSmoothing, templatePose, NowSec(), g_frame, f.riding);
         }
@@ -1712,7 +1767,8 @@ bool OursBone(int i) {
 }
 // Snapshot the animation's current pose as the PoseMode=vr template. Only ever called when the pose buffer
 // holds the game's own output (skeleton build, or a fresh buffer while standing still), never our writes.
-bool CaptureTemplate(uint8_t* chr, const char* why) {
+// `firstTemplate`: the body has no template yet (skeleton build, post-load retry), so only a standing pose will do.
+bool CaptureTemplate(uint8_t* chr, const char* why, bool firstTemplate) {
     if (FramePumpCurrentPass() == 2 || !g_poseCaptureGuard.CanCapture(reinterpret_cast<uintptr_t>(chr)) ||
         ReadRideState(chr, SafeRead).NativeBody()) return false;
     if (g_skel.boneCount <= 0 || !SkeletonCurrent(chr)) return false;
@@ -1727,12 +1783,35 @@ bool CaptureTemplate(uint8_t* chr, const char* why) {
     // template's values loses nothing.
     if ((int)g_poseTemplate.size() == g_skel.boneCount)
         for (int i = 0; i < g_skel.boneCount; ++i) if (OursBone(i)) t[i] = g_poseTemplate[i];
-    g_poseTemplate = std::move(t);
+    // Judge it by the head height first: the camera rides this template's head until the next one.
+    const float head = TemplateHead(t);
+    const double now = NowSec();
+    const bool overdue = firstTemplate && g_firstRejectSince > 0 && now - g_firstRejectSince > 15.0;
+    const BodyStance stance = JudgeStance(head, g_refHead);
+    const TemplateVerdict verdict = JudgeTemplate(stance, firstTemplate, overdue);
+    const float pct = StanceReferencePlausible(g_refHead) ? head / g_refHead * 100.f : 0.f;
+    if (verdict == TemplateVerdict::Rejected) {
+        if (firstTemplate && g_firstRejectSince <= 0) g_firstRejectSince = now;
+        if (now - g_rejectLogAt > 5.0) {
+            g_rejectLogAt = now;
+            LOGI("[skel] pose not taken as the template (%s): head %.2f m above the feet = %.0f%% of the reference pose - %s", why, head, pct,
+                 stance == BodyStance::Down ? "a body on the ground (knockdown, roll) is never a stance"
+                                            : "the first template has to be a standing one, retrying");
+        }
+        return false;
+    }
+    SetTemplate(g_poseTemplate, t);
+    g_templHead = head; g_templLow = verdict == TemplateVerdict::Low; g_templWhy = why;
+    g_firstRejectSince = 0; g_standUp.Reset();
+    if (!g_templLow) { SetTemplate(g_standTemplate, g_poseTemplate); g_standHead = head; }
+    g_templOwner = PlayerCharacterName();
     Vec3 rp; Quat rq;   // shoulder flip must be calibrated on the game's own (facing-aligned) pose
     if (PlayerRoot(chr, rp, rq)) { WorldPose w; WorldFromLocal(g_skel, g_poseTemplate, rp, rq, w); CalibrateShoulderFlip(rq, w); }
     // Keep the initial eye-to-head calibration. Re-basing it here pins the camera to
     // EyeHeight while the new template moves the body up/down, leaving a permanent gap.
-    LOGI("[skel] pose template captured (%s)", why);
+    LOGI("[skel] pose template captured (%s): head %.2f m above the feet = %.0f%% of the reference pose - %s%s", why, head, pct,
+         g_templLow ? "low stance, the camera goes down with it until the game stands back up" : "standing",
+         overdue ? " (nothing standing for 15 s, taken anyway)" : "");
     return true;
 }
 
@@ -1785,7 +1864,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
         double nowT = NowSec();
         if (nowT - g_templLastCapture > 2.0) {
             g_templLastCapture = nowT;
-            if (CaptureTemplate(player, "retry")) {
+            if (CaptureTemplate(player, "retry", true)) {
                 const Vec3 oldAnchor = f.anchor;
                 BuildCameraAnchor(player, f);
                 f.eye = f.eye + (f.anchor - oldAnchor);
@@ -1854,6 +1933,26 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
         // back as the template we wrote, which looked like "stance returned to normal" and kept clearing the
         // candidate a real stance change had just planted.
         double nowT = NowSec();
+        // Leaving a low stance does not wait for standing still: once the game's own pose reads standing again
+        // (fresh frames for 0.25 s - you stood up from the crouch, the kneel or the held wind-up ended), the
+        // standing template comes back, walking or not. Before, a low template stayed until you happened to
+        // stand still for 1.4 s, and the camera rode it ("stuck crouching", "became really short").
+        if (g_templLow && (int)g_standTemplate.size() == g_skel.boneCount && FramePumpCurrentPass() != 2) {
+            // The game's pose, with the template's root bones: ours carry the body-follow shift, vertical included.
+            std::vector<HkQsTransform> probe = local;
+            for (int i = 0; i < g_skel.boneCount; ++i) { int p = g_skel.parents[i]; if (p < 0 || p >= i) probe[i] = g_poseTemplate[i]; }
+            const float liveHead = TemplateHead(probe);
+            if (g_standUp.Update(poseForeign, JudgeStance(liveHead, g_refHead) == BodyStance::Standing, nowT)) {
+                LOGI("[skel] the game stood back up (head %.2f m above the feet) - standing template restored, the low one from \"%s\" dropped", liveHead, g_templWhy);
+                SetTemplate(g_poseTemplate, g_standTemplate);
+                g_templHead = g_standHead; g_templLow = false; g_templWhy = "restored on standing up";
+                g_templCandAt = 0; g_standUp.Reset();
+                const Vec3 oldAnchor = f.anchor;
+                BuildCameraAnchor(player, f);
+                f.eye = f.eye + (f.anchor - oldAnchor);
+                eyeW = f.eye; headOff = eyeW - f.anchor;
+            }
+        }
         // A planted root also occurs during rest/stand-up. Discard any candidate
         // through the menu and exit cooldown, without changing the pose we render.
         if (!f.capturePose || (f.root - g_statPos).Length() > 0.03f) {
@@ -1875,7 +1974,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             else if (!haveCand || cand > 0.1f) { g_templCand = local; g_templCandAt = nowT; }   // new or still-moving pose: wait
             else if (nowT - g_templCandAt > 0.4) {
                 g_templLastCapture = nowT; g_templCandAt = 0;
-                if (CaptureTemplate(player, "standing still, pose settled")) {
+                if (CaptureTemplate(player, "standing still, pose settled", false)) {
                     // BuildFrame measured the old template. Move the eye and hand anchor
                     // together before solving the new pose and publishing this frame's camera.
                     const Vec3 oldAnchor = f.anchor;
@@ -2439,12 +2538,21 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
             if (std::fabs(fwd) > std::fabs(g_bodyCamFwd)) g_bodyCamFwd = fwd;
             if (std::fabs(d.y) > std::fabs(g_bodyCamUp)) g_bodyCamUp = d.y;
         }
+        // Eye height is the camera anchor over the feet: the probe above cannot see a template that took the camera
+        // down WITH the body (it stays a constant few cm under the eye), this can.
+        const float camH = f.anchor.y - f.root.y;
+        if (camH < g_camHMin) g_camHMin = camH;
+        if (camH > g_camHMax) g_camHMax = camH;
         static double s_bc = 0; double nb = NowSec();
         if (nb - s_bc > 5.0) {
             s_bc = nb;
-            if (std::fabs(g_bodyCamLat) > 0.02f || std::fabs(g_bodyCamFwd) > 0.02f || std::fabs(g_bodyCamUp) > 0.02f)
-                LOGI("[body] rendered head vs camera eye (5 s max): lateral %+.0f mm, forward %+.0f mm, vertical %+.0f mm", g_bodyCamLat * 1000.f, g_bodyCamFwd * 1000.f, g_bodyCamUp * 1000.f);
+            const bool lowCam = g_camHMin < Cfg().fpEyeHeight - 0.15f;
+            if (std::fabs(g_bodyCamLat) > 0.02f || std::fabs(g_bodyCamFwd) > 0.02f || std::fabs(g_bodyCamUp) > 0.02f || lowCam)
+                LOGI("[body] rendered head vs camera eye (5 s max): lateral %+.0f mm, forward %+.0f mm, vertical %+.0f mm | camera %.2f-%.2f m above the feet, template %s (head %.2f m, %s)",
+                     g_bodyCamLat * 1000.f, g_bodyCamFwd * 1000.f, g_bodyCamUp * 1000.f, g_camHMin, g_camHMax,
+                     f.riding ? "unused (riding)" : g_templLow ? "LOW" : "standing", g_templHead, g_templWhy);
             g_bodyCamLat = g_bodyCamFwd = g_bodyCamUp = 0.f;
+            g_camHMin = 1e9f; g_camHMax = -1e9f;
         }
         g_vrCycle.fetch_add(1, std::memory_order_relaxed);   // next cycle takes a fresh head sample
     }
@@ -2621,6 +2729,7 @@ void HkHandler(MidHookRegs*, void*) {
         const int pass = FramePumpCurrentPass();
         uint8_t* player = MainPlayer();
         if (pass != 2) CombatGameFrame(player, g_frame);
+        if (pass != 2) WeaponWheelGameFrame(player);   // the slots and icons the weapon wheel shows
         CombatActionDiag(player, pass, g_frame);   // both passes: the press-vs-pass picture is the point
     }
 }
@@ -2954,6 +3063,11 @@ void ApplyLevelCheat() {
     const std::wstring& ini = Cfg().iniPath;
     if (!ini.empty() && WritePrivateProfileStringW(L"Cheats", L"SetLevel", L"0", ini.c_str()))
         LOGI("[cheat] [Cheats] SetLevel set back to 0 in ERVR.ini (applied once)");
+}
+
+uint8_t* GameERPlayerGameData() {
+    uint8_t* gdm = g_gameDataManPtr ? Deref(g_gameDataManPtr) : nullptr;
+    return gdm ? Deref(gdm + 0x8) : nullptr;
 }
 
 // In-game time in ms (GameDataMan+0xA0, the community IGT offset speedrun timers use). IGT
