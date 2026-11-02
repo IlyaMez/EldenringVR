@@ -580,7 +580,7 @@ struct ReportFacts {
     std::string lastLine, lastError; // the session's
 };
 
-// A fenced block for an issue or a Discussions post: "ERVR <version> report", then one "Label: value" line
+// A fenced block for an issue or a Discord post: "ERVR <version> report", then one "Label: value" line
 // each, values without line ends, code fences or the Windows user name.
 inline std::string reportSummary(const ReportFacts& facts) {
     const auto value = [](std::string_view text, size_t limit) {

@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         I develop against Quest 3 on the Oculus path. Anything else depends on reports like this
-        one — and even more on pull requests. If you can build, a PR beats an issue.
+        one, and even more on pull requests. If you can build, a PR beats an issue.
 
   - type: input
     id: hardware

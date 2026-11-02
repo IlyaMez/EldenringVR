@@ -953,14 +953,14 @@ void App::header() {
         openUrl(kKofiUrl);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
         tip("ERVR is free, every build, always. A tip keeps the updates coming; it unlocks nothing.");
-    const float githubWidth = stickerWidth("GitHub", nullptr);
-    buttonX -= githubWidth + S(14);
+    const float discordWidth = stickerWidth("Join the Discord", nullptr);
+    buttonX -= discordWidth + S(14);
     ImGui::SetCursorScreenPos(ImVec2(buttonX, buttonY));
-    if (sticker("##github", nullptr, "GitHub", "Help \xC2\xB7 bugs \xC2\xB7 source", ImVec2(githubWidth, buttonHeight),
-                {col(kSurfaceHigh), col(kSurfaceHover), col(kPaper), col(kLine), 0}))
-        openUrl(kDiscussionsUrl);
+    if (sticker("##discord", nullptr, "Join the Discord", "News \xC2\xB7 help \xC2\xB7 clips",
+                ImVec2(discordWidth, buttonHeight), {col(kSurfaceHigh), col(kSurfaceHover), col(kPaper), col(kLine), 0}))
+        openUrl(kDiscordUrl);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-        tip("ERVR's Discussions: questions and tuning help. Bugs go to its Issues, with a log (Copy report helps).");
+        tip("Release news first, and help in #ervr-help: paste Copy report there with what happened.");
 }
 
 void App::tabs() {
@@ -2070,7 +2070,7 @@ void App::controls(ImVec2 origin, ImVec2 size) {
           {"Right stick", "Turn smoothly, or in snaps"},
           {"Your head", "The camera: look around, lean, duck"},
           {"B", "Dodge; hold to sprint"},
-          {"A", "Interact, confirm"},
+          {"A", "Jump; confirm in menus"},
           {"Left stick click", "Crouch"},
           {"Left stick click held + tilt", "D-pad: switch spells, items and weapons"},
           {"Right stick click", "Lock on"}}},
@@ -2083,8 +2083,9 @@ void App::controls(ImVec2 origin, ImVec2 size) {
           {"Free hand on the hilt, squeeze", "Two-hand the weapon; open the grip to let go"},
           {"Right trigger, two-handing", "The weapon's skill (Ash of War), without its animation"},
           {"Left grip", "Skill"},
+          {"A grip held, hand still", "Weapon wheel: that hand's weapons; let go over one to switch to it"},
           {"Cast with a staff, seal or bow", "It flies where the casting hand points; the trigger casts"},
-          {"X  /  Y", "Use the item in the quick slot  /  event action"}}},
+          {"X  /  Y", "Use the item in the quick slot  /  interact (the event action)"}}},
         {"Menus",
          {{"\xE2\x89\xA1 menu button", "Tap: the menu. Hold: the map"},
           {"Left stick, in a menu", "Moves the cursor like a D-pad; keep it tilted to repeat"},
@@ -2255,7 +2256,7 @@ void App::about(ImVec2 origin, ImVec2 size) {
         ImGui::Dummy(ImVec2(0, S(2)));
     }
     endCard();
-    // Right: the tip jar and GitHub.
+    // Right: the tip jar and the Discord, as the README has them.
     ImGui::SetCursorScreenPos(ImVec2(base.x + leftWidth + gap, base.y));
     ImGui::BeginGroup();
     supportCards(rightWidth);
@@ -2278,9 +2279,8 @@ void App::supportCards(float width) {
     const Card cards[] = {
         {"##kofiCard", kGoldLift, "ERVR is free. Every build, always.", {"Buy me", "a coffee"},
          "A tip keeps the updates coming.", "Nothing is or will be paywalled.", "ko-fi.com/ilyamezerowsky", kKofiUrl, true},
-        {"##githubCard", kPaper, "Help, bugs and the source", {"ERVR on", "GitHub"},
-         "Questions and tuning help go to Discussions.", "Bugs to Issues, with ERVR.log attached.",
-         "github.com/IlyaMez/EldenringVR", kDiscussionsUrl, false},
+        {"##discordCard", kPaper, "Where the players are", {"Join the", "Discord"},
+         "Release news, help in #ervr-help, and clips.", "Come say hi.", "discord.gg/x27ZXDpdNt", kDiscordUrl, false},
     };
     for (const auto& card : cards) {
         auto* draw = ImGui::GetWindowDrawList();

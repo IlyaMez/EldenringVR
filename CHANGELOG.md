@@ -3,7 +3,28 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## Unreleased
+## 0.6.0 (2026-11-02): first public release
+
+ERVR's first download for everyone: the launcher, Seamless Co-op, game patch 1.17.2, the weapon wheel and
+body haptics on top of everything 0.4.0 prepared (0.4.0 was never published). Offline or Seamless Co-op
+only, never with Easy Anti-Cheat.
+
+### Body haptics (bHaptics)
+* bHaptics TactSuit, TactSleeves and TactVisor through the bHaptics Player (`[bHaptics]` in
+  ERVR.ini): blows taken on the side the attacker stands (the game's own `last_hit_by`, the vest
+  facing the body, not the head), blows landed, blocks, deflects, the two-hand grab and casts in the
+  arm that made them, heals, death, the heart below 30% HP, the wind of a fall and the landing (the
+  physics module's `is_falling`), and the game's rumble on the vest. `Level` sets the strength (0 =
+  off), `Combat` / `Damage` / `Movement` / `Rumble` switch the groups; all hot-reload.
+* Ported from Spidy's body haptics: bHaptics' own C/C++ SDK 2.7.1, its `bhaptics_library.dll`
+  shipped unmodified beside ERVR.dll and loaded only while `Level` > 0, the patterns made in code
+  and streamed to each device every 40 ms on a thread of their own. The Developer Portal app comes
+  from the `ERVR_BHAPTICS_APP_ID` / `_API_KEY` secrets (or `bhaptics-app.local`).
+* ERVR still has no network code of its own; bHaptics' library talks to the bHaptics Player on the
+  PC. README, THIRD_PARTY.md and the Nexus texts say so.
+* `ervr_haptics_test.exe`: every pattern and a motor-by-motor map without the game (`--dry` prints
+  them as text). Regression test `body_haptics`. Launcher and `install.ps1` install and remove the
+  library with ERVR.dll. Untested on a suit.
 
 ### Weapon wheel
 * Hold a grip with that hand still and a wheel of the hand's three weapon slots opens around it, with
@@ -165,7 +186,18 @@ release workflow and published on GitHub Releases and Nexus Mods.
   accepts 2.7.2.0.
 * `xrprobe` lists every extension the OpenXR runtime advertises.
 
-## 0.4.0 — 2026-09-10 — second public release
+### Help, docs and the page
+* The launcher's help button and its About card open the Discord (`#ervr-help`) instead of GitHub
+  Discussions, which the repository does not have; the Controls tab lists the weapon wheel.
+* README rebuilt as the landing page, in Spidy's layout and ERVR's own look: download, Discord and
+  Ko-fi up front, a gameplay reel, the controls and actions infographics, community and support.
+  The players' guide (`docs/PLAYERS.md`, shipped in the zip as `ERVR\README.md`) has setup, every
+  control, settings, co-op, body haptics and fixes; the modder internals moved to
+  `docs/DEVELOPMENT.md`.
+* Nexus description, release notes, issue forms and funding link point to the launcher, the
+  Discord and Ko-fi.
+
+## 0.4.0 (2026-09-10, never published; it ships in 0.6.0)
 
 Native VR for ELDEN RING as a ReShade add-on with its own OpenXR session. Offline / EAC-disabled
 only. Verified on exe 2.6.2.0 (patch 1.16.2) and 2.7.1.0 (patch 1.17.1).

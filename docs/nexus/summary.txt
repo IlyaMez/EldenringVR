@@ -1,1 +1,1 @@
-Native VR for ELDEN RING: true stereo in any OpenXR headset, first person, hand-tracked weapons, physical melee with the game's own hitboxes, motion controllers, HUD on its own layer. Offline / EAC off only. Open source (GPL-3.0), no telemetry.
+Native VR for ELDEN RING: full stereo in any OpenXR headset, first person, weapons in your hands, melee where your swing is the attack, Seamless Co-op, one launcher. Offline or Seamless Co-op only. From the maker of Spidy. GPL-3.0, no telemetry.

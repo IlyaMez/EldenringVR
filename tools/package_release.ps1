@@ -14,6 +14,8 @@
     LICENSE-ReShade.txt
     ERVR\ERVR.dll
     ERVR\ERVR.ini
+    ERVR\bhaptics_library.dll     bHaptics SDK 2.7.1 library (unmodified, a bHaptics Redistributable), body haptics
+    ERVR\LICENSE-bHaptics.txt  ERVR\bHaptics-THIRD_PARTY_NOTICES.txt
     ERVR\README.md  ERVR\CHANGELOG.md  ERVR\LICENSE.txt  ERVR\THIRD_PARTY.md
 .PARAMETER Version   Version string for the file name (default: read from CMakeLists.txt).
 .PARAMETER OutDir    Where to put the zip (default build\release).
@@ -40,7 +42,8 @@ if (-not $Version) {
     $Version = $m.Groups[1].Value
 }
 
-$required = @("ERVR Launcher.exe", "dxgi.dll", "ReShade.ini", "dinput8.dll", "LICENSE-ReShade.txt", "ERVR\ERVR.dll", "ERVR\ERVR.ini")
+$required = @("ERVR Launcher.exe", "dxgi.dll", "ReShade.ini", "dinput8.dll", "LICENSE-ReShade.txt", "ERVR\ERVR.dll", "ERVR\ERVR.ini",
+               "ERVR\bhaptics_library.dll", "ERVR\LICENSE-bHaptics.txt", "ERVR\bHaptics-THIRD_PARTY_NOTICES.txt")
 $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
 if ($missing) { throw "missing from build\dist: $($missing -join ', ') - run .\build.ps1" }
 
@@ -58,7 +61,8 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force (Join-Path $stage "ERVR") | Out-Null
 
 foreach ($f in $required) { Copy-Item (Join-Path $dist $f) (Join-Path $stage $f) }
-Copy-Item (Join-Path $root "README.md")       (Join-Path $stage "ERVR\README.md")
+# The repository README is the landing page, all pictures; the zip gets the players' guide under its name.
+Copy-Item (Join-Path $root "docs\PLAYERS.md") (Join-Path $stage "ERVR\README.md")
 Copy-Item (Join-Path $root "CHANGELOG.md")    (Join-Path $stage "ERVR\CHANGELOG.md")
 Copy-Item (Join-Path $root "THIRD_PARTY.md")  (Join-Path $stage "ERVR\THIRD_PARTY.md")
 Copy-Item (Join-Path $root "LICENSE")         (Join-Path $stage "ERVR\LICENSE.txt")

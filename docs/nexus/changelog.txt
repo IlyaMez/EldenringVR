@@ -1,4 +1,15 @@
-0.4.0 (2026-09-10) - second public release
+0.6.0 (2026-11-02) - first public release
+
+- ERVR Launcher: unpack anywhere, press START VR. It finds the game, checks its patch, the VR runtime and the headset, installs ERVR, parks flat render mods, turns off depth of field, motion blur and ray tracing, and starts the game with EAC off or through Seamless Co-op
+- Seamless Co-op: partners play the ordinary game; your hits count only your own damage; deaths, joins and leaves no longer crash or break the view
+- Game patch 1.17.2 (exe 2.7.2.0) next to 1.16.2 and 1.17.1
+- Weapon wheel: hold a grip with the hand still, let go over a weapon to switch, with the game's own icons
+- Body haptics on bHaptics TactSuit, TactSleeves and TactVisor through the bHaptics Player
+- Combat: one hit per swing scaled by its quality; swings no longer stop registering after a spent swing
+- Frame rate follows the headset (no more half-rate 45 Hz under Virtual Desktop); exact 16:9 render sizes keep menus and the map on the HUD panel
+- Fixes: view near the ground or stuck crouched, black headset at the title screen, a pickup dialog that ignored every button, a long-session co-op crash
+
+0.4.0 (2026-09-10) - never published; everything in it ships in 0.6.0
 
 - Own OpenXR session (Oculus / VDXR / SteamVR), true stereo with both eyes at the same simulation instant, cinema fallback for menus and cutscenes
 - HUD lifted out of the frame onto its own floating panel at headset resolution

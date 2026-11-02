@@ -15,11 +15,12 @@ without a log get closed. The log answers, in about five lines, questions that o
 dozen back-and-forth messages: which VR backend attached, whether the XInput hook is on the game's
 call path, and what your actual swing speeds are.
 
-Check the pinned "Known issues" discussion first — a good fraction of reports are already there.
+Check the pinned Known issues in `#ervr-help` on the [Discord](https://discord.gg/x27ZXDpdNt) first: a good
+fraction of reports are already there, and setup questions get answered there fastest.
 
 These are out of scope and will be closed:
 
-* Anything involving EAC, online play, or multiplayer. Offline only, permanently. See the
+* Anything involving EAC or FromSoftware's online play. Offline or Seamless Co-op only, permanently. See the
   disclaimer in the README.
 * Anything about R.E.A.L. VR. ERVR does not use it; remove its files before installing.
 * Requests for game files, save editing, or anything that isn't VR input.
@@ -31,7 +32,7 @@ These are out of scope and will be closed:
 Welcome, especially:
 
 * Controller bindings and quirks for hardware I don't own (Index, WMR, Pico, Vive wands).
-* Offsets and AOBs for game versions past 2.7.1.0 — with the `verify_signatures.py` output showing
+* Offsets and AOBs for game versions past 2.7.2.0, with the `verify_signatures.py` output showing
   the pattern is unique.
 * Judge ids for stances I haven't covered (two-handing, power stance, specific weapon classes).
 
@@ -68,7 +69,7 @@ Stated plainly so we can skip the debate later:
 ## Licensing
 
 ERVR is GPL-3.0-or-later. By submitting a pull request you agree your contribution is licensed the
-same way. There is no CLA and I am not asking for copyright assignment — you keep your copyright.
+same way. There is no CLA and I am not asking for copyright assignment: you keep your copyright.
 
 If you fork this and distribute your fork, GPL-3.0 requires you to publish your source too. That
 requirement is the reason for the license choice: it keeps derivative builds of this work

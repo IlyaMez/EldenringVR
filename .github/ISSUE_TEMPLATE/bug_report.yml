@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         **Before filing:** set `LogLevel=debug` in `ERVR\ERVR.ini`, reproduce the problem, then
-        attach `Game\ERVR\ERVR.log`. Reports without a debug log will be closed — the log answers
+        attach `Game\ERVR\ERVR.log`. Reports without a debug log will be closed: the log answers
         most of what I would otherwise have to ask you one message at a time.
 
   - type: checkboxes
@@ -16,17 +16,17 @@ body:
       options:
         - label: "`Game\\ReShade.log` starts with `Initializing crosire's ReShade version '6.8.0.2155'` (the bundled dxgi.dll is loading)."
           required: true
-        - label: I am playing offline with EAC disabled.
+        - label: I am playing offline with EAC disabled, or in Seamless Co-op.
           required: true
-        - label: I searched existing issues and the pinned Known Issues discussion.
+        - label: I searched existing issues and the pinned Known issues in #ervr-help on the Discord.
           required: true
 
   - type: input
     id: ervr-version
     attributes:
       label: ERVR version
-      description: From the first line of the log, e.g. "ERVR 0.4.0 starting".
-      placeholder: "0.4.0"
+      description: From the first line of the log, e.g. "ERVR 0.6.0 starting".
+      placeholder: "0.6.0"
     validations:
       required: true
 

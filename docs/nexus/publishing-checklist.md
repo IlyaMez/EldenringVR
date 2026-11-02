@@ -13,15 +13,20 @@ are the source of truth; edit them here, then paste.
 
 ## Cutting the release
 
-1. Make sure `main` is what you want to ship and CI is green.
+1. Make sure `main` is what you want to ship and CI is green, and before the first tag:
+   * the repository is **public**: the release workflow's provenance attestation is refused on a
+     private repository on this plan, and every Releases link in the README and the launcher 404s
+     while it is private;
+   * the `ERVR_BHAPTICS_APP_ID` and `ERVR_BHAPTICS_API_KEY` repository secrets are set (see Body
+     haptics below), or the release copy leaves body haptics out.
 2. Tag and push. The release workflow builds, attests and publishes the GitHub release:
    ```powershell
-   git tag v0.4.0
-   git push origin v0.4.0
+   git tag v0.6.0
+   git push origin v0.6.0
    ```
-3. Download `ERVR-v0.4.0.zip` from the GitHub release, or build the identical file locally:
+3. Download `ERVR-v0.6.0.zip` from the GitHub release, or build the identical file locally:
    ```powershell
-   .\tools\package_release.ps1 -Build      # -> build\release\ERVR-v0.4.0.zip + .sha256
+   .\tools\package_release.ps1 -Build      # -> build\release\ERVR-v0.6.0.zip + .sha256
    ```
    Upload the **same zip** to Nexus that is on GitHub, so the SHA256 and the attestation in the
    release notes apply to both downloads.
@@ -38,7 +43,8 @@ are the source of truth; edit them here, then paste.
 * **Adult content**: no.
 * **Requirements**
   * Off-site: "An OpenXR runtime (Meta Link / Air Link, Virtual Desktop VDXR, or SteamVR)".
-  * Off-site: "ELDEN RING patch 1.16.2 or 1.17.1 (exe 2.6.2.0 / 2.7.1.0), played offline with EAC disabled".
+  * Off-site: "ELDEN RING patch 1.16.2, 1.17.1 or 1.17.2 (exe 2.6.2.0 / 2.7.1.0 / 2.7.2.0), played offline
+    with EAC off (the launcher starts it that way) or in Seamless Co-op".
   * No Nexus mod requirements. ReShade is bundled; R.E.A.L. VR is not used.
 * **Mirrors**: link the GitHub Releases page.
 * **Source**: `https://github.com/IlyaMez/EldenringVR`.
@@ -60,21 +66,25 @@ are the source of truth; edit them here, then paste.
 * Asset use permission in mods/files that earn donation points: allowed.
 * Donation Points: your call. The README already says every feature is and stays free; DP does
   not change that. Consistent with the GitHub tip jar, opting in is fine.
-* Author notes: "Offline / EAC-disabled only. No telemetry, no network code. Bugs go to GitHub
-  with a debug log."
+* Author notes: "Offline or Seamless Co-op only, never with EAC. No telemetry, no network code of its own
+  (body haptics use bHaptics' SDK library, which talks to the bHaptics Player). Help and bugs: #ervr-help
+  on the Discord (discord.gg/x27ZXDpdNt) or GitHub issues, with ERVR.log."
+* Body haptics: the release workflow needs the `ERVR_BHAPTICS_APP_ID` and `ERVR_BHAPTICS_API_KEY`
+  repository secrets (the Developer Portal app's workspace ID and API key, the app deployed with at
+  least one event); without them the zip's ERVR.dll logs `no app` and plays no body haptics.
 
 ## Files tab
 
-* Main file: `ERVR-v0.4.0.zip`, version `0.4.0`, "Main Files" category.
+* Main file: `ERVR-v0.6.0.zip`, version `0.6.0`, "Main Files" category.
 * File description: paste the Install section from `description.bbcode` plus the two verification
-  lines (SHA256 from the `.sha256` file, `gh attestation verify ERVR-v0.4.0.zip --repo IlyaMez/EldenringVR`).
+  lines (SHA256 from the `.sha256` file, `gh attestation verify ERVR-v0.6.0.zip --repo IlyaMez/EldenringVR`).
 * Tick "This file is a new version of an existing file" only for updates.
 * Do not upload a separate ReShade or config file; the zip is complete.
 
 ## Images (needed before the page can go live)
 
-Nexus requires at least one image. Suggested set, captured on the monitor mirror or via the
-headset's own capture:
+Nexus requires at least one image. Ready in the repository: `docs/images/readme/hero.jpg` (the
+README's banner), `controls-quest3.jpg` and `controls-actions.jpg`. More, captured in the headset:
 1. A first-person in-game shot with a weapon in hand (hero image).
 2. The stereo pair or the cinema screen, to show what "true stereo" means.
 3. The HUD panel floating in front of a scene.
@@ -84,9 +94,8 @@ Every image must show the game offline. Avoid images with any online UI element.
 
 ## After posting
 
-* Add the Nexus URL to the README's Download section (it currently says "the same file is
-  published on Nexus Mods" without a link) and to `.github/ISSUE_TEMPLATE/config.yml` if you want
-  Nexus users routed to GitHub for bugs.
+* Add the Nexus URL to the README's Install and play section and the players' guide, and to
+  `.github/ISSUE_TEMPLATE/config.yml` if you want Nexus users routed to GitHub for bugs.
 * Pin a "Known issues / read before posting" sticky in the Nexus Posts tab that repeats the EAC
-  warning, the log requirement, and the R.E.A.L. removal step.
+  warning and the log requirement, and sends help questions to #ervr-help on the Discord.
 * Consider locking the Bugs tab on Nexus and pointing it at GitHub, so reports arrive with logs.

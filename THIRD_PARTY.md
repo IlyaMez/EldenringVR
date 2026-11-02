@@ -1,8 +1,9 @@
 # Third-party components
 
-ERVR itself is licensed under GPL-3.0-or-later (see [LICENSE](LICENSE)). It redistributes one
-third-party binary, links against a few libraries fetched at configure time, and derives knowledge
-from published research. All of the licenses below are permissive and GPL-3.0-compatible.
+ERVR itself is licensed under GPL-3.0-or-later (see [LICENSE](LICENSE)). It redistributes two
+third-party binaries, links against a few libraries fetched at configure time, and derives knowledge
+from published research. The licenses of everything ERVR links are permissive and GPL-3.0-compatible;
+bHaptics' library is loaded at run time under its own agreement, below.
 
 ## Redistributed in the release zip
 
@@ -15,6 +16,21 @@ SHA256 `0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7`. It li
 [`third_party/reshade/`](third_party/reshade/) together with its license, which the release zip
 carries as `LICENSE-ReShade.txt`. The add-on build is unsigned by design (it is the variant
 anti-cheat vendors do not whitelist); ERVR is offline/EAC-off only, so that costs nothing.
+
+### bHaptics C/C++ SDK (body haptics)
+
+| Component | Version | License | How it is used |
+|---|---|---|---|
+| [bHaptics C/C++ SDK](https://github.com/bhaptics/tact-cpp2) (`bhaptics_library.dll`, `bhaptics.h`) | 2.7.1, commit `d016a3f22a4c1e5b6b2192e3ed2224512a045a19` | [bHaptics SDK agreement](https://bhaptics.gitbook.io/license-sdk/) (proprietary; a bHaptics Redistributable) | Shipped **unmodified** as `ERVR\bhaptics_library.dll` and loaded at run time by `src/ervr/bhaptics_output.cpp` while `[bHaptics] Level` > 0; the header, fetched by CMake, only names its functions. Nothing of it is linked into ERVR.dll or kept in this repository. |
+
+`bhaptics_library` and `bhaptics.h` are © bHaptics Inc. and distributed under the bHaptics SDK
+agreement, not under ERVR's license. The x64 library's SHA256 is
+`399992988dc899173e921be23409bed6dc8e7e0cbe78f505452f311fead06b26` (CMake refuses any other). The
+release zip carries the SDK's `LICENSE` as `ERVR\LICENSE-bHaptics.txt` and the notices of the
+open-source components inside the library as `ERVR\bHaptics-THIRD_PARTY_NOTICES.txt`. The library
+talks to the bHaptics Player on the same PC; the Player is not bundled - players install it from
+bHaptics. ERVR is an independent project, not made, sponsored or endorsed by bHaptics. The body
+haptics' patterns and output thread are ported from the author's own Spidy (GPL-3.0).
 
 ## Linked at build time
 
@@ -37,24 +53,24 @@ The OpenXR loader is also linked into the launcher, for its headset check.
 No source from the following is copied into this repository. They are credited because ERVR's
 memory layouts and event templates were derived from their published research:
 
-* [DSAnimStudio](https://github.com/Meowmaritus/DSAnimStudio) (Meowmaritus) — TAE event templates,
+* [DSAnimStudio](https://github.com/Meowmaritus/DSAnimStudio) (Meowmaritus): TAE event templates,
   specifically the `AttackBehavior` argument layout in `TAE.Template.ER.xml`.
-* [fromsoftware-rs](https://github.com/vswarte/fromsoftware-rs) and erfps2 (Dasaav) —
+* [fromsoftware-rs](https://github.com/vswarte/fromsoftware-rs) and erfps2 (Dasaav):
   `CSChrTaeAnimEvent` and `ChrIns` module layouts, camera step and head-hiding chains.
-* Souls Modding wiki (Muffin and contributors) — `BehaviorParam` row scheme.
+* Souls Modding wiki (Muffin and contributors): `BehaviorParam` row scheme.
 * [Halo-MCC-VR](https://github.com/pancreations/Halo-MCC-VR),
-  [cyberpunk-vr-port](https://github.com/dariulone/cyberpunk-vr-port) — structural inspiration.
+  [cyberpunk-vr-port](https://github.com/dariulone/cyberpunk-vr-port): structural inspiration.
 
 ## Provided by the user's system
 
-An **OpenXR runtime** — Meta's (Quest Link / Air Link), Virtual Desktop's VDXR, or SteamVR — is
+An **OpenXR runtime** (Meta's for Quest Link / Air Link, Virtual Desktop's VDXR, or SteamVR) is
 required and not shipped. ERVR talks to whichever is the active system OpenXR runtime.
 
 ## Not used: R.E.A.L. VR
 
 Early ERVR versions were a companion to Luke Ross's R.E.A.L. VR and attached to the session it
 opened. Since the OpenXR rewrite ERVR renders on its own and **R.E.A.L. is neither required nor
-compatible** — both install as `dxgi.dll`. Remove R.E.A.L.'s files (`dxgi.dll`, `RealVR64.dll`,
+compatible**: both install as `dxgi.dll`. Remove R.E.A.L.'s files (`dxgi.dll`, `RealVR64.dll`,
 `openvr_api.dll`, `cudart64_12.dll`, `RealVR.ini`) before installing ERVR. This repository has never
 contained R.E.A.L. code, headers, binaries, or decompiled output.
 

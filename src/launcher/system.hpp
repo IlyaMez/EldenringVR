@@ -23,7 +23,8 @@ inline constexpr const char* kVersion = ERVR_VERSION;
 inline constexpr const char* kAuthor = "Ilya Mezerowsky";
 inline constexpr const char* kRepoUrl = "https://github.com/IlyaMez/EldenringVR";
 inline constexpr const char* kIssuesUrl = "https://github.com/IlyaMez/EldenringVR/issues";
-inline constexpr const char* kDiscussionsUrl = "https://github.com/IlyaMez/EldenringVR/discussions";
+// The Discord server ERVR shares with Spidy: release news, help (#ervr-help) and clips (the README's invite).
+inline constexpr const char* kDiscordUrl = "https://discord.gg/x27ZXDpdNt";
 inline constexpr const char* kReleasesUrl = "https://github.com/IlyaMez/EldenringVR/releases";
 inline constexpr const char* kKofiUrl = "https://ko-fi.com/ilyamezerowsky";
 inline constexpr const char* kCoopUrl = "https://www.nexusmods.com/eldenring/mods/510";
