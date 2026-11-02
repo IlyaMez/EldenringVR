@@ -1,4 +1,4 @@
-0.6.1 (2026-11-02)
+0.6.5 (2026-11-02)
 
 - Doors, levers, lifts and new graces open again (0.6.0 showed the prompt and ignored Y, which kept new characters in the first room). An ERVR.ini carrying 0.6.0's value, or the 16-25 workaround, is corrected at load
 - Valve Index: the left trackpad is the menu button (tap: menu, hold: map), the right trackpad's edges are the D-pad, and the grips count when squeezed instead of when touched (no more weapon wheel from resting fingers)

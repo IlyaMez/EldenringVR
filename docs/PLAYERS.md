@@ -233,7 +233,7 @@ in this release and not yet tried on a suit: tell us in `#ervr-help` if a side f
 | Low frame rate, or play feels sluggish | Lower *Resolution* in Options and the game's own graphics settings. In Virtual Desktop pick 72, 80 or 90 Hz yourself: games only get its current rate. *Big screen* is the cheap fallback. |
 | The stick does nothing in a menu | Hold the left stick click for half a second: menu navigation by hand turns on for menus ERVR did not notice. |
 | A swing does nothing | Swing faster: a slow push is not an attack. In a menu, combat stands down on purpose. |
-| A door, lever, lift or new grace ignores Y | That was 0.6.0: update to 0.6.1 or later. ERVR corrects 0.6.0's `Pass2FullFrameKeep` / `Pass2SafeKeep` lines in your `ERVR.ini` by itself; if you typed other values there, delete both lines. |
+| A door, lever, lift or new grace ignores Y | That was 0.6.0: update to 0.6.5 or later. ERVR corrects 0.6.0's `Pass2FullFrameKeep` / `Pass2SafeKeep` lines in your `ERVR.ini` by itself; if you typed other values there, delete both lines. |
 | The weapon points too far up, or you bend your wrist to hold it upright | Options > Body > *Weapon angle*. |
 | Your antivirus removes `dxgi.dll` or `ERVR.dll` | See below; restore the file and allow the folder. |
 | Anything else | Ask in `#ervr-help` with what happened and your `ERVR.log`. |

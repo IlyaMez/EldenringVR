@@ -3,7 +3,7 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## 0.6.1 (2026-11-02)
+## 0.6.5 (2026-11-02)
 
 Doors, levers, lifts and new graces open again; Valve Index controls; the belt; Torrent rework.
 
