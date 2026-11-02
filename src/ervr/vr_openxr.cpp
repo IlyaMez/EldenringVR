@@ -107,6 +107,9 @@ struct Anchor {
 struct Actions {
     XrActionSet set = XR_NULL_HANDLE;
     XrAction pose[2]{}, trigger[2]{}, squeeze[2]{}, stick[2]{}, stickClick[2]{}, haptic[2]{};
+    // Valve Index only: the trackpads (where the thumb is, how hard it presses) and the grip's
+    // squeeze force. No other profile binds them, so they read zero / inactive elsewhere.
+    XrAction trackpad[2]{}, trackpadForce[2]{}, squeezeForce[2]{};
     XrAction btnA = XR_NULL_HANDLE, btnB = XR_NULL_HANDLE, btnX = XR_NULL_HANDLE,
              btnY = XR_NULL_HANDLE, btnMenu = XR_NULL_HANDLE;
     XrSpace  handSpace[2]{};
@@ -523,6 +526,16 @@ public:
             tr.hand[h] = LocateSpace(actions_.handSpace[h], t);
             in.indexTrigger[h] = GetFloat(actions_.trigger[h]);
             in.handTrigger[h]  = GetFloat(actions_.squeeze[h]);
+            // Valve Index: squeeze/value is the grip's touch sensor, which reads closed as soon as the
+            // fingers rest on the handle - "only touching the grip brings up the weapon swap" (2026-11-02
+            // report). The squeeze FORCE is what a deliberate grip is; IndexGripForce reads as a full one.
+            bool forceBound = false;
+            const float force = GetFloat(actions_.squeezeForce[h], &forceBound);
+            if (forceBound && Cfg().indexGripForce > 0.f) in.handTrigger[h] = std::min(1.f, force / Cfg().indexGripForce);
+            const XrVector2f pad = GetVec2(actions_.trackpad[h]);
+            in.pad[h][0] = pad.x;
+            in.pad[h][1] = pad.y;
+            in.padForce[h] = GetFloat(actions_.trackpadForce[h]);
             XrVector2f v = GetVec2(actions_.stick[h]);
             in.thumb[h][0] = v.x;
             in.thumb[h][1] = v.y;
@@ -550,13 +563,15 @@ public:
             in.handTrigger[0] > 0.1f || in.handTrigger[1] > 0.1f ||
             std::fabs(in.thumb[0][0]) > 0.1f || std::fabs(in.thumb[0][1]) > 0.1f ||
             std::fabs(in.thumb[1][0]) > 0.1f || std::fabs(in.thumb[1][1]) > 0.1f;
-        if (tr.time - s_lastDump > (anyInput ? 0.25 : 2.0)) {
+        const bool anyPad = in.padForce[0] > 0.1f || in.padForce[1] > 0.1f;
+        if (tr.time - s_lastDump > (anyInput || anyPad ? 0.25 : 2.0)) {
             s_lastDump = tr.time;
             LOGD("[xr] raw: state %d conn(%d,%d) btn 0x%04x trig(%.2f,%.2f) grip(%.2f,%.2f) "
-                 "stick L(%.2f,%.2f) R(%.2f,%.2f) head(%.2f,%.2f,%.2f)",
+                 "stick L(%.2f,%.2f) R(%.2f,%.2f) pad L(%.2f,%.2f %.2f) R(%.2f,%.2f %.2f) head(%.2f,%.2f,%.2f)",
                  (int)sessionState_, in.controllerConnected[0], in.controllerConnected[1], b,
                  in.indexTrigger[0], in.indexTrigger[1], in.handTrigger[0], in.handTrigger[1],
                  in.thumb[0][0], in.thumb[0][1], in.thumb[1][0], in.thumb[1][1],
+                 in.pad[0][0], in.pad[0][1], in.padForce[0], in.pad[1][0], in.pad[1][1], in.padForce[1],
                  tr.head.pos.x, tr.head.pos.y, tr.head.pos.z);
         }
         return true;
@@ -623,17 +638,24 @@ private:
         const bool lc = boolAct(actions_.stickClick[0]), rc = boolAct(actions_.stickClick[1]);
         const bool ba = boolAct(actions_.btnA), bb = boolAct(actions_.btnB);
         const bool bx = boolAct(actions_.btnX), by = boolAct(actions_.btnY), bm = boolAct(actions_.btnMenu);
+        const bool lp = floatAct(actions_.trackpadForce[0]), rp = floatAct(actions_.trackpadForce[1]);
+        const bool lf = floatAct(actions_.squeezeForce[0]), rf = floatAct(actions_.squeezeForce[1]);
         const uint32_t mask = (uint32_t)ls | (rs << 1) | (lt << 2) | (rt << 3) | (lg << 4) |
                               (rg << 5) | (lc << 6) | (rc << 7) | (ba << 8) | (bb << 9) |
-                              (bx << 10) | (by << 11) | (bm << 12);
+                              (bx << 10) | (by << 11) | (bm << 12) | (lp << 13) | (rp << 14) |
+                              (lf << 15) | (rf << 16);
         if (mask == lastCensusMask_) return;
         lastCensusMask_ = mask;
         LOGI("[xr] input sources bound: L(stick %d trig %d grip %d click %d) "
              "R(stick %d trig %d grip %d click %d) A %d B %d X %d Y %d menu %d | "
-             "profile L=\"%s\" R=\"%s\"%s",
-             ls, lt, lg, lc, rs, rt, rg, rc, ba, bb, bx, by, bm,
+             "trackpad L %d R %d, grip force L %d R %d | profile L=\"%s\" R=\"%s\"%s",
+             ls, lt, lg, lc, rs, rt, rg, rc, ba, bb, bx, by, bm, lp, rp, lf, rf,
              ProfileFor("/user/hand/left").c_str(), ProfileFor("/user/hand/right").c_str(),
              (!ls || !rs) ? "  <-- A THUMBSTICK HAS NO BOUND SOURCE (menu/movement will be dead)" : "");
+        if (lf || rf)
+            LOGI("[xr] Valve Index: the grips read their squeeze force (full at %.2f, [Buttons] IndexGripForce), "
+                 "the trackpads press as LeftPad=%s / RightPad=%s", Cfg().indexGripForce,
+                 Cfg().btnLeftPad.c_str(), Cfg().btnRightPad.c_str());
     }
 
     bool LocateIn(XrSpace space, int64_t displayTimeNs, VREyeView out[2]) {
@@ -788,6 +810,9 @@ private:
             sprintf_s(n, "stick_%s", side[h]);       if (!MakeAction(actions_.stick[h], n, n, XR_ACTION_TYPE_VECTOR2F_INPUT)) return false;
             sprintf_s(n, "stick_click_%s", side[h]); if (!MakeAction(actions_.stickClick[h], n, n, XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
             sprintf_s(n, "haptic_%s", side[h]);      if (!MakeAction(actions_.haptic[h], n, n, XR_ACTION_TYPE_VIBRATION_OUTPUT)) return false;
+            sprintf_s(n, "trackpad_%s", side[h]);    if (!MakeAction(actions_.trackpad[h], n, n, XR_ACTION_TYPE_VECTOR2F_INPUT)) return false;
+            sprintf_s(n, "trackpad_force_%s", side[h]); if (!MakeAction(actions_.trackpadForce[h], n, n, XR_ACTION_TYPE_FLOAT_INPUT)) return false;
+            sprintf_s(n, "squeeze_force_%s", side[h]);  if (!MakeAction(actions_.squeezeForce[h], n, n, XR_ACTION_TYPE_FLOAT_INPUT)) return false;
         }
         if (!MakeAction(actions_.btnA, "btn_a", "A", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
         if (!MakeAction(actions_.btnB, "btn_b", "B", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
@@ -857,7 +882,15 @@ private:
             {actions_.btnY, Path("/user/hand/left/input/b/click")},
             {actions_.btnA, Path("/user/hand/right/input/a/click")},
             {actions_.btnB, Path("/user/hand/right/input/b/click")},
-            {actions_.btnMenu, Path("/user/hand/left/input/system/click")},
+            // No Menu here: the Index's only candidate, system/click, is SteamVR's dashboard button and
+            // never reaches an app ("the menu button doesn't work", 2026-11-02 report). The left trackpad
+            // press is the menu button instead ([Buttons] LeftPad=MENU in the virtual pad).
+            {actions_.trackpad[0], Path("/user/hand/left/input/trackpad")},
+            {actions_.trackpad[1], Path("/user/hand/right/input/trackpad")},
+            {actions_.trackpadForce[0], Path("/user/hand/left/input/trackpad/force")},
+            {actions_.trackpadForce[1], Path("/user/hand/right/input/trackpad/force")},
+            {actions_.squeezeForce[0], Path("/user/hand/left/input/squeeze/force")},
+            {actions_.squeezeForce[1], Path("/user/hand/right/input/squeeze/force")},
             {actions_.haptic[0], Path("/user/hand/left/output/haptic")},
             {actions_.haptic[1], Path("/user/hand/right/output/haptic")},
         });
@@ -959,12 +992,15 @@ private:
         XrActionStateBoolean s{XR_TYPE_ACTION_STATE_BOOLEAN};
         return XR_SUCCEEDED(xrGetActionStateBoolean(session_, &gi, &s)) && s.isActive && s.currentState;
     }
-    float GetFloat(XrAction a) {
+    // `bound` (optional) says whether the action has a source at all in the current profile.
+    float GetFloat(XrAction a, bool* bound = nullptr) {
+        if (bound) *bound = false;
         if (!a) return 0.f;
         XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
         gi.action = a;
         XrActionStateFloat s{XR_TYPE_ACTION_STATE_FLOAT};
         if (XR_FAILED(xrGetActionStateFloat(session_, &gi, &s)) || !s.isActive) return 0.f;
+        if (bound) *bound = true;
         return s.currentState;
     }
     XrVector2f GetVec2(XrAction a) {

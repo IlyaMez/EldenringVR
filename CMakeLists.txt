@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EldenRingVR VERSION 0.6.0 LANGUAGES C CXX RC)
+project(EldenRingVR VERSION 0.6.1 LANGUAGES C CXX RC)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "ELDEN RING is 64-bit; configure with a 64-bit toolchain (e.g. -A x64).")
@@ -212,6 +212,11 @@ if(ERVR_BUILD_REGRESSION_TESTS)
     add_test(NAME ${_test} COMMAND test_${_test})
   endforeach()
   target_sources(test_virtual_pad PRIVATE src/ervr/virtual_pad.cpp src/ervr/gestures.cpp src/ervr/config.cpp)
+  # ERVR.ini loading: retired defaults replaced, the shipped ini's keys.
+  add_executable(test_config tools/test_config.cpp src/ervr/config.cpp)
+  target_include_directories(test_config PRIVATE src/ervr)
+  target_compile_definitions(test_config PRIVATE ERVR_TEST_INI="${CMAKE_SOURCE_DIR}/config/ERVR.ini")
+  add_test(NAME config COMMAND test_config)
   target_sources(test_icon_decode PRIVATE src/ervr/icon_decode.cpp)
   target_sources(test_body_haptics PRIVATE src/ervr/body_haptics.cpp)
   # The launcher's ERVR.ini edits, log reading and Steam parsing.

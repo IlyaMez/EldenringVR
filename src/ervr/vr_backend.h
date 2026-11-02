@@ -31,6 +31,10 @@ struct VRInputState {
     float indexTrigger[2]{};   // 0..1
     float handTrigger[2]{};    // grip 0..1
     float thumb[2][2]{};       // [hand][x,y] -1..1
+    // Trackpads (Valve Index): where the thumb is ([hand][x,y] -1..1) and how hard it presses (0..1).
+    // Zero on controllers without one; what counts as a press is the virtual pad's call ([Buttons] PadForce).
+    float pad[2][2]{};
+    float padForce[2]{};
     bool  controllerConnected[2]{};
 };
 

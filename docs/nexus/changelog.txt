@@ -1,3 +1,12 @@
+0.6.1 (2026-11-02)
+
+- Doors, levers, lifts and new graces open again (0.6.0 showed the prompt and ignored Y, which kept new characters in the first room). An ERVR.ini carrying 0.6.0's value, or the 16-25 workaround, is corrected at load
+- Valve Index: the left trackpad is the menu button (tap: menu, hold: map), the right trackpad's edges are the D-pad, and the grips count when squeezed instead of when touched (no more weapon wheel from resting fingers)
+- Launcher Options: Weapon angle (how the weapon sits in your hand) and Index grip squeeze
+- The belt: the four pouch shortcut items hang at your waist; grab one and press X to use it
+- Torrent: found again on 1.17.2, seated rider pose, smoothed gallop camera, 45-degree free look that does not steer
+- A D3D11 device from an overlay or the VR runtime no longer logs that ERVR stays idle
+
 0.6.0 (2026-11-02) - first public release
 
 - ERVR Launcher: unpack anywhere, press START VR. It finds the game, checks its patch, the VR runtime and the headset, installs ERVR, parks flat render mods, turns off depth of field, motion blur and ray tracing, and starts the game with EAC off or through Seamless Co-op

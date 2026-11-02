@@ -3,7 +3,48 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## Unreleased
+## 0.6.1 (2026-11-02)
+
+Doors, levers, lifts and new graces open again; Valve Index controls; the belt; Torrent rework.
+
+### Fixes
+* Doors, levers, lifts and undiscovered graces answer the interact button again. In 0.6.0 the prompt showed
+  and Y did nothing, which kept new characters in the first room. 0.6.0 stopped the second eye's pass from
+  re-running the event manager (task group 25) along with the event scripts (22-24); the event manager is
+  back in that pass and the scripts stay out of it, so the pickup dialog that ignored every button stays
+  fixed. Found by a player's bisect on 0.6.0 (16-21,25 opens the doors with no stuck popup; 16-25 opens
+  them and brings the popup back).
+* An installed `ERVR.ini` keeps its values across updates, and 0.6.0's spelled both keep sets out. ERVR now
+  replaces 0.6.0's value, and the 16-25 workaround posted for it, when it loads the ini (ERVR.log says so);
+  any other value there is yours and stays. The shipped ini leaves `Pass2FullFrameKeep` and `Pass2SafeKeep`
+  commented out, so ERVR's own sets follow its updates.
+* A D3D11 device made by an overlay or by the VR runtime (Meta Quest Link makes one as its session starts)
+  is ignored. It used to clear ERVR's D3D12 flag for a frame and log that ERVR would stay idle, which it
+  did not.
+
+### Valve Index
+* The left trackpad, pressed, is the menu button (tap: the menu, hold: the map). The Index's own menu button
+  is SteamVR's system button, which never reaches a game, so 0.6.0 could not open the menu at all.
+* The right trackpad, pressed at its top, bottom, left or right edge, is the D-pad. The direction is the one
+  the press started in until you let go; the middle third is no direction. `[Buttons] LeftPad` / `RightPad`
+  take `MENU`, `DPAD`, a button name or `none`; `PadForce` sets how hard a press is.
+* The grips read how hard you squeeze (`squeeze/force`) instead of the touch sensor, which reads fully
+  closed as soon as your fingers rest on the handle: resting fingers no longer open the weapon wheel or tap
+  the grip's button (the skill on the left grip). `[Buttons] IndexGripForce` (0.5: a full grip at half
+  force; 0: the touch sensor, as before), also Options > Body > Index grip squeeze in the launcher.
+* ERVR.log names the Index sources the runtime bound (`trackpad L 1 R 1, grip force L 1 R 1`), and the
+  debug `[xr] raw` line carries the trackpads. Built from the OpenXR Valve Index profile; not yet tried on
+  an Index.
+
+### Launcher
+* Options > Body > Weapon angle (`[FirstPerson] HandRotOffsetX`, 45 by default): how the weapon sits in your
+  hand, for anyone who has to bend the wrist to hold the blade upright. And Index grip squeeze.
+* The Controls tab lists the Index trackpads.
+
+### Tests
+* `config`: ERVR.ini loading (retired keep sets replaced, anything else kept, the shipped ini's keys).
+  `virtual_pad` checks the trackpads: the menu button's tap and hold, the D-pad direction latched at the
+  press, the middle, the force threshold, other mappings.
 
 ### Belt
 * The four pouch items the game gives a shortcut hang around the waist as objects, with the game's own

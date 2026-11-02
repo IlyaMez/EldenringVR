@@ -10,6 +10,7 @@
 #include "belt.h"
 #include "weapon_wheel.h"
 #include <mutex>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 
@@ -32,7 +33,32 @@ GestureDetector g_gest;
 // Config-derived button masks (resolved once at init / reload).
 struct Map {
     uint16_t a, b, x, y, lthumb, rthumb, menu, ltrig, rtrig, lgrip, rgrip, light, heavy, leftSwing;
+    int      padRole[2];     // PadRole, per hand
+    uint16_t padButton[2];   // PadButton: the XInput mask
 } g_map;
+
+// What a pressed trackpad (Valve Index) is: [Buttons] LeftPad / RightPad.
+enum PadRole { PadNone = 0, PadMenu, PadDpad, PadButton };
+struct PadPress { bool down = false; int dir = 0; } g_padPress[2];
+const uint16_t kDpadMask[] = {0, XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT};
+
+int ParsePadRole(const std::string& raw, uint16_t& button) {
+    std::string n = raw;
+    for (auto& ch : n) ch = (char)toupper((unsigned char)ch);
+    button = 0;
+    if (n == "MENU") return PadMenu;
+    if (n == "DPAD") return PadDpad;
+    button = ParseXInputButton(raw);
+    return button ? PadButton : PadNone;
+}
+
+// The D-pad direction a press on the pad's edge means (0 none, 1 up, 2 down, 3 left, 4 right). The middle
+// third is no direction: a press there is ambiguous, and guessing would switch the wrong slot.
+int PadDirection(float x, float y) {
+    const float ax = std::fabs(x), ay = std::fabs(y);
+    if (ax < 0.3f && ay < 0.3f) return 0;
+    return ax > ay ? (x > 0 ? 4 : 3) : (y > 0 ? 1 : 2);
+}
 
 // Timed pulses (gesture attacks, tap-vs-hold buttons, snap turns).
 constexpr int kMaxPulses = 16;
@@ -102,6 +128,8 @@ void VirtualPadInit() {
     g_map.light = ParseXInputButton(c.lightAttackButton);
     g_map.heavy = ParseXInputButton(c.heavyAttackButton);
     g_map.leftSwing = ParseXInputButton(c.leftSwingButton);
+    g_map.padRole[HandLeft] = ParsePadRole(c.btnLeftPad, g_map.padButton[HandLeft]);
+    g_map.padRole[HandRight] = ParsePadRole(c.btnRightPad, g_map.padButton[HandRight]);
     g_gest.Reset();
     LOGI("Virtual pad map: A=%s B=%s X=%s Y=%s LS=%s RS=%s Menu=%s LTrig=%s RTrig=%s LGrip=%s RGrip=%s | swings: light=%s heavy=%s left=%s",
          XInputButtonName(g_map.a), XInputButtonName(g_map.b), XInputButtonName(g_map.x), XInputButtonName(g_map.y),
@@ -141,8 +169,22 @@ void VirtualPadUpdate(double now) {
     mapHeld(g_map.ltrig, lTrig); mapHeld(g_map.rtrig, rTrig);
     // The grips are mapped after the weapon wheel has seen them (below): it may hold one back.
 
+    // ---- trackpads (Valve Index) -----------------------------------------------
+    // Pressed = the pad's force past PadForce, released below 0.6x of it. The D-pad direction is the one
+    // the press started in, so the thumb rolling on the pad mid-press cannot switch it.
+    bool padMenu = false;
+    for (int h = 0; h < 2; ++h) {
+        PadPress& p = g_padPress[h];
+        if (!p.down && c.padForce > 0.f && in.padForce[h] >= c.padForce) p = {true, PadDirection(in.pad[h][0], in.pad[h][1])};
+        else if (p.down && in.padForce[h] < c.padForce * 0.6f) p.down = false;
+        if (!p.down) continue;
+        if (g_map.padRole[h] == PadMenu) padMenu = true;
+        else if (g_map.padRole[h] == PadDpad) held |= kDpadMask[p.dir];
+        else mapHeld(g_map.padButton[h], true);
+    }
+
     // ---- Menu: tap = START, hold = BACK (map) ---------------------------------
-    bool menuDown = (in.buttons & VRB_Menu) != 0;
+    bool menuDown = (in.buttons & VRB_Menu) != 0 || padMenu;
     if (menuDown && !g_menuHold.down) { g_menuHold = {true, now, false}; }
     bool pressedStart = false, pressedBack = false;
     if (menuDown && !g_menuHold.consumed && now - g_menuHold.since >= c.menuHoldForBack) {

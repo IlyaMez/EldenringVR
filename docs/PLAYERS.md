@@ -131,6 +131,20 @@ are and which hands take them are in `[Belt]` in `ERVR.ini`.
 While a game menu is open, combat stands down: no swings, no injected attacks, and the left stick moves the
 cursor.
 
+### Valve Index
+
+Everything above, with these differences:
+
+| Control | What it does |
+|---|---|
+| Left trackpad, pressed | The menu button: tap for the menu, hold for the map (the Index's own menu button belongs to SteamVR) |
+| Right trackpad, pressed at an edge | The D-pad in that direction: switch spells, items and weapons |
+| A / B on the left controller | X / Y |
+| A grip | Counts when you squeeze it, not when your fingers rest on it |
+
+How hard a grip squeeze must be is Options > Body > *Index grip squeeze* (`[Buttons] IndexGripForce`). What
+each trackpad does is `[Buttons] LeftPad` / `RightPad` (`MENU`, `DPAD`, a button name or `none`).
+
 ## Settings
 
 The launcher's Options tab covers the settings players change most. Everything else is in
@@ -148,6 +162,9 @@ The launcher's Options tab covers the settings players change most. Everything e
   the panel off and on, and Numpad . re-centres it where you look.
 - **Turning and moving** (`[Movement]`): smooth or snap turns, turn speed, and what forward is (where you look,
   where the left hand points, or the body).
+- **Weapon angle** (`[FirstPerson] HandRotOffsetX`, 45 by default): how the weapon sits in your hand. If you
+  have to bend your wrist forward to hold the blade upright, raise it; if the blade leans too far forward,
+  lower it. Options > Body has it as a slider.
 - **Combat** (`[Combat]`): physical melee, speed-scaled damage, weapon weight, two-handing, blocking, cast aim.
 - `[General] LogLevel=debug` writes much more to `ERVR.log`: use it when you report a bug.
 
@@ -216,6 +233,8 @@ in this release and not yet tried on a suit: tell us in `#ervr-help` if a side f
 | Low frame rate, or play feels sluggish | Lower *Resolution* in Options and the game's own graphics settings. In Virtual Desktop pick 72, 80 or 90 Hz yourself: games only get its current rate. *Big screen* is the cheap fallback. |
 | The stick does nothing in a menu | Hold the left stick click for half a second: menu navigation by hand turns on for menus ERVR did not notice. |
 | A swing does nothing | Swing faster: a slow push is not an attack. In a menu, combat stands down on purpose. |
+| A door, lever, lift or new grace ignores Y | That was 0.6.0: update to 0.6.1 or later. ERVR corrects 0.6.0's `Pass2FullFrameKeep` / `Pass2SafeKeep` lines in your `ERVR.ini` by itself; if you typed other values there, delete both lines. |
+| The weapon points too far up, or you bend your wrist to hold it upright | Options > Body > *Weapon angle*. |
 | Your antivirus removes `dxgi.dll` or `ERVR.dll` | See below; restore the file and allow the folder. |
 | Anything else | Ask in `#ervr-help` with what happened and your `ERVR.log`. |
 

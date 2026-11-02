@@ -132,6 +132,7 @@ DWORD WINAPI Worker(LPVOID) {
     MoveFileW((dir + L"\\ERVR.log").c_str(), (dir + L"\\ERVR.log.prev").c_str());
     LogInit(dir + L"\\ERVR.log", ParseLevel(Cfg().logLevel));
     LOGI("ERVR %s starting (pid %lu) in %S", ERVR_VERSION, GetCurrentProcessId(), dir.c_str());
+    ConfigLogNotes();
     if (!Cfg().enabled) { LOGI("Disabled via ERVR.ini; exiting worker"); return 0; }
     // Before the game creates its window and measures the desktop: DPI virtualization is
     // what caps the windowed resolution list (and therefore the VR image) at 1680x945.
@@ -213,6 +214,7 @@ DWORD WINAPI Worker(LPVOID) {
                 VirtualPadInit();
                 PatchesApplyGameResolution();   // GameRes/GameResScale hot-edit
                 LOGI("ERVR.ini reloaded");
+                ConfigLogNotes();
             }
         }
         BackendsTick();

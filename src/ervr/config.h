@@ -148,6 +148,11 @@ struct Config {
     float gripThreshold = 0.60f;
     float menuHoldForBack = 0.45f;         // hold Menu this long -> BACK (map) instead of START
     bool  leftGripPlusStickIsDpad = true;  // hold left grip: left stick acts as D-pad (quick slots)
+    // Valve Index trackpads, pressed: MENU (the Touch menu button: tap START, hold BACK), DPAD (the D-pad
+    // in the direction pressed), any button name, or none.
+    std::string btnLeftPad = "MENU", btnRightPad = "DPAD";
+    float padForce = 0.5f;                 // trackpad force that counts as a press (released below 0.6x)
+    float indexGripForce = 0.5f;           // Index grip squeeze force that reads as a full grip; 0 = its touch sensor
 
     // [Sticks]
     float stickDeadzone = 0.15f;
@@ -591,10 +596,18 @@ struct Config {
     // 137-140 GameFlowFrpgNet_*. Idle offline, so the offline crash hunts never caught them,
     // but in a session every connect state machine and packet flush ran twice per pair - a
     // connect crashed at the transition null-call site with no other guard holding.
-    // EVENT stepping gated too (2026-10-31): 22-24 EmkSystem_Pre/ConditionStatus/Post and 25
-    // EventMan - the event-script VM ran twice per stereo pair, and a centre dialog raised
-    // after an item pickup stayed on screen ignoring every button and menu until a respawn.
-    std::string vrPass2FullFrameKeep = "0-7,10-14,16-21,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168";
+    // EVENT SCRIPTS gated too (2026-10-31): 22-24 EmkSystem_Pre/ConditionStatus/Post, the
+    // event-script VM - run twice per stereo pair, a centre dialog raised after an item pickup
+    // stayed on screen ignoring every button and menu until a respawn.
+    // 25 EventMan is KEPT (2026-11-02): 0.6.0 gated it with the scripts, and doors, levers,
+    // lifts and undiscovered graces stopped answering the interact button (several players:
+    // the prompt shows, the press does nothing). A player's bisect on 0.6.0: 16-21,25 opens
+    // the doors with no stuck popup; 16-25 opened them but brought the popup back. Likely
+    // mechanism, not traced: CSEventManImp holds the object-action executor (doors, levers,
+    // chests; fromsoftware-rs event_man.rs), and the player code that reads the action
+    // button (it references CSActionButtonMan) runs in both passes, so a press handled in
+    // pass 2 found no request from EventMan to act on.
+    std::string vrPass2FullFrameKeep = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168";
     // SAFE variant, active during the settle window after any pass-2 guard releases (and
     // whenever a guard holds, trivially). Differs from the full set by gating ONLY the
     // GameFlowInGame_MoveMap_PostPhysics family (118, 123-125): measured 2026-08-22, that
@@ -603,7 +616,9 @@ struct Config {
     // crasher (it walks the WorldBlockChr grid and task lists, which teardown/arrival
     // rebuilds under it - the whole exe+0xc7f88b/0x3f9b2b/0x513baa/0x32b04a family).
     // Steady-state play needs it for stereo depth; the settle window must not run it.
-    std::string vrPass2SafeKeep = "0-7,10-14,16-21,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168";
+    std::string vrPass2SafeKeep = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168";
+    // Set by Load when the ini still carried a retired keep set it replaced (logged by ConfigLogNotes).
+    std::string pass2KeepNote;
     // Seconds of SAFE keep set after the last guard releases. Was 20 (timer-guess era),
     // then 8; now 1.5 (2026-08-24 pt2, user asked for 1-2 s transitions): post-load
     // streaming is not a special state for full-set pass 2 - the open world streams
@@ -774,4 +789,7 @@ struct Config {
 };
 
 Config& Cfg();
+// What the last Load changed in the player's values (a retired default it replaced), for the log:
+// Load runs before the log is open at startup.
+void ConfigLogNotes();
 }

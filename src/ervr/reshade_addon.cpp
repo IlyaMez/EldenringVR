@@ -81,12 +81,14 @@ void OnFinishPresent(reshade::api::command_queue*, reshade::api::swapchain* sc) 
 }
 
 void OnInitDevice(reshade::api::device* dev) {
-    const bool d12 = dev->get_api() == reshade::api::device_api::d3d12;
-    g_isD3D12.store(d12);
-    if (!d12) {
-        LOGW("[reshade] device is not D3D12 (api=%d); ERVR rendering stays idle", (int)dev->get_api());
+    // Only the game's D3D12 device counts. Others come and go in the game process: overlays, and the
+    // VR runtime itself (Meta Quest Link's made a D3D11 device as its session started, 2026-11-02 log) -
+    // one of those used to clear the flag and log that ERVR would stay idle, which it did not.
+    if (dev->get_api() != reshade::api::device_api::d3d12) {
+        LOGI("[reshade] ignoring a device that is not D3D12 (api 0x%x: an overlay's or the VR runtime's)", (unsigned)dev->get_api());
         return;
     }
+    g_isD3D12.store(true);
     auto* native = reinterpret_cast<ID3D12Device*>(dev->get_native());
     g_device.store(native);
     LOGI("[reshade] D3D12 device %p", (void*)native);

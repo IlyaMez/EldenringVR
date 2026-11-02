@@ -2004,6 +2004,12 @@ void App::options(ImVec2 origin, ImVec2 size) {
                flip, [&] { onOff("##fp", "FirstPerson", "Enabled", true); });
         option("Hand-tracked arms", "The character's arms and weapons follow your controllers.", flip,
                [&] { onOff("##hands", "FirstPerson", "HandTracking", true); });
+        option("Weapon angle", "How the weapon sits in your hand. Higher tips the blade forward, away from you; lower "
+                               "stands it back toward you. Set it so you can hold the controller naturally.",
+               gauge, [&] { amount("##weaponAngle", "FirstPerson", "HandRotOffsetX", 45, 0, 120, 1, 5, "%.0f\xC2\xB0", 0); });
+        option("Index grip squeeze", "Valve Index only: how hard to squeeze a grip for it to count (the weapon wheel, "
+                                     "two-handing, the belt). Lower it if grabbing tires your hand.",
+               gauge, [&] { amount("##indexGrip", "Buttons", "IndexGripForce", 0.5f, 10, 100, 100, 5, "%.0f%%", 2); });
         option("Hide your head", "Keeps hair, hoods and helmets out of your eyes.", flip,
                [&] { onOff("##head", "FirstPerson", "HideHead", true); });
         option("Follow you around the room", "The view's centre slowly follows your head: leaning and ducking still "
@@ -2073,6 +2079,7 @@ void App::controls(ImVec2 origin, ImVec2 size) {
           {"A", "Jump; confirm in menus"},
           {"Left stick click", "Crouch"},
           {"Left stick click held + tilt", "D-pad: switch spells, items and weapons"},
+          {"Valve Index: right trackpad", "Press its top, bottom, left or right edge: the D-pad"},
           {"Right stick click", "Lock on"}}},
         {"Fighting",
          {{"Swing the right hand", "Attack with the right weapon. The swing is the hitbox: faster hits harder, a full "
@@ -2089,6 +2096,7 @@ void App::controls(ImVec2 origin, ImVec2 size) {
           {"X  /  Y", "Use the quick item, or the belt item in hand  /  interact (the event action)"}}},
         {"Menus",
          {{"\xE2\x89\xA1 menu button", "Tap: the menu. Hold: the map"},
+          {"Valve Index: left trackpad", "Press it: the menu button (the Index's own is SteamVR's)"},
           {"Left stick, in a menu", "Moves the cursor like a D-pad; keep it tilted to repeat"},
           {"A  /  B", "Confirm  /  back"},
           {"Left stick click held 0.5 s", "Menu navigation by hand on or off, for menus ERVR does not notice opening "
@@ -2151,6 +2159,10 @@ void App::controls(ImVec2 origin, ImVec2 size) {
         ImGui::Dummy(ImVec2(0, S(10)));
         ImGui::TextUnformatted("Every button is a key in ERVR.ini ([Buttons], [Gestures], [Combat]). The defaults are "
                                "made for Quest Touch controllers; Options has the settings players change most.");
+        ImGui::Dummy(ImVec2(0, S(10)));
+        ImGui::TextUnformatted("Valve Index: the A and B buttons are X and Y on the left hand, A and B on the right. A "
+                               "grip counts when you squeeze it, not when your fingers rest on it (Options > Body > "
+                               "Index grip squeeze).");
         ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, S(4)));

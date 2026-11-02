@@ -198,5 +198,50 @@ int main() {
     Check((Poll().wButtons & (XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_DPAD_RIGHT)) == (XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_DPAD_RIGHT),
           "the belt's pouch shortcut (Event Action + D-pad) reaches the game");
     beltOut = {};
+
+    // Valve Index trackpads (LeftPad=MENU, RightPad=DPAD by default): the left press is the menu button -
+    // tap START, hold the map - and the right press holds the D-pad in the direction it started in.
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    menu = 0;
+    input.padForce[HandLeft] = 0.8f;
+    Poll();
+    input.padForce[HandLeft] = 0.f;
+    bool start = false;
+    for (int i = 0; i < 3; ++i) start |= (Poll().wButtons & XINPUT_GAMEPAD_START) != 0;
+    Check(start, "a tap on the left trackpad is the menu button's tap: START");
+    for (int i = 0; i < 10; ++i) Poll();
+    input.padForce[HandLeft] = 0.8f;
+    bool back = false;
+    for (int i = 0; i < 40; ++i) back |= (Poll().wButtons & XINPUT_GAMEPAD_BACK) != 0;
+    Check(back, "holding the left trackpad is the menu button's hold: the map");
+    input.padForce[HandLeft] = 0.f;
+    for (int i = 0; i < 10; ++i) Poll();
+    input.pad[HandRight][0] = 0.1f; input.pad[HandRight][1] = -0.9f;
+    input.padForce[HandRight] = 0.6f;
+    Check((Poll().wButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0, "a press on the right trackpad's bottom edge holds D-pad down");
+    input.pad[HandRight][0] = 0.9f; input.pad[HandRight][1] = 0.f;
+    input.padForce[HandRight] = 0.35f;   // above the release point (0.6 x PadForce = 0.3): still pressed
+    const uint16_t rolled = Poll().wButtons;
+    Check((rolled & XINPUT_GAMEPAD_DPAD_DOWN) && !(rolled & XINPUT_GAMEPAD_DPAD_RIGHT),
+          "the direction stays the one the press started in while the thumb rolls on the pad");
+    input.padForce[HandRight] = 0.2f;
+    Check((Poll().wButtons & (XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_RIGHT)) == 0, "letting the pad up releases the D-pad");
+    input.pad[HandRight][0] = 0.1f; input.pad[HandRight][1] = 0.1f;
+    input.padForce[HandRight] = 0.9f;
+    Check((Poll().wButtons & 0x000F) == 0, "a press in the trackpad's middle is no direction");
+    input.padForce[HandRight] = 0.f; Poll();
+    input.pad[HandRight][0] = 0.f; input.pad[HandRight][1] = 0.9f;
+    input.padForce[HandRight] = 0.45f;
+    Check((Poll().wButtons & XINPUT_GAMEPAD_DPAD_UP) == 0, "a light touch below PadForce is not a press");
+    c.btnRightPad = "B"; VirtualPadInit();
+    input.padForce[HandRight] = 0.9f;
+    Check((Poll().wButtons & XINPUT_GAMEPAD_B) != 0, "RightPad takes any button name");
+    c.btnRightPad = "none"; VirtualPadInit();
+    input.padForce[HandRight] = 0.f; Poll();
+    input.padForce[HandRight] = 0.9f;
+    Check(Poll().wButtons == 0, "RightPad=none presses nothing");
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    c.btnRightPad = "DPAD"; VirtualPadInit();
+    Poll();
     std::puts("Virtual pad/map zoom and directional dash/roll regression checks passed.");
 }

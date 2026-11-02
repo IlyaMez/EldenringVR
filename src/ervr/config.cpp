@@ -108,6 +108,29 @@ void Config::Load(const std::wstring& path) {
     vrPass2Dt        = GetF(ini, L"VR", L"Pass2Dt", vrPass2Dt);
     vrPass2FullFrameKeep = GetS(ini, L"VR", L"Pass2FullFrameKeep", vrPass2FullFrameKeep);
     vrPass2SafeKeep = GetS(ini, L"VR", L"Pass2SafeKeep", vrPass2SafeKeep);
+    // An installed ERVR.ini outlives updates, and 0.6.0's spelled both keep sets out with the event
+    // manager (25) gated: doors, levers, lifts and new graces stopped answering the interact button.
+    // That value, and the 16-25 workaround posted for it (which brought the stuck popup back), give way
+    // to the current default; any other value written there is the player's own and stays.
+    {
+        static const char* const kRetiredFull[] = {
+            "0-7,10-14,16-21,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168",
+            "0-7,10-14,16-25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168",
+        };
+        static const char* const kRetiredSafe[] = {
+            "0-7,10-14,16-21,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168",
+            "0-7,10-14,16-25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168",
+        };
+        const Config defaults;
+        pass2KeepNote.clear();
+        for (const char* s : kRetiredFull)
+            if (vrPass2FullFrameKeep == s) { vrPass2FullFrameKeep = defaults.vrPass2FullFrameKeep; pass2KeepNote = "Pass2FullFrameKeep"; }
+        for (const char* s : kRetiredSafe)
+            if (vrPass2SafeKeep == s) {
+                vrPass2SafeKeep = defaults.vrPass2SafeKeep;
+                pass2KeepNote += pass2KeepNote.empty() ? "Pass2SafeKeep" : " and Pass2SafeKeep";
+            }
+    }
     vrPass2SafeSeconds = GetF(ini, L"VR", L"Pass2SafeSeconds", vrPass2SafeSeconds);
     vrPass2SpawnGraceSeconds = GetF(ini, L"VR", L"Pass2SpawnGraceSeconds", vrPass2SpawnGraceSeconds);
     vrPass2MenuGraceSeconds = GetF(ini, L"VR", L"Pass2MenuGraceSeconds", vrPass2MenuGraceSeconds);
@@ -156,6 +179,10 @@ void Config::Load(const std::wstring& path) {
     gripThreshold    = GetF(ini, L"Buttons", L"GripThreshold", gripThreshold);
     menuHoldForBack  = GetF(ini, L"Buttons", L"MenuHoldForBack", menuHoldForBack);
     leftGripPlusStickIsDpad = GetB(ini, L"Buttons", L"LeftGripPlusStickIsDpad", leftGripPlusStickIsDpad);
+    btnLeftPad  = GetS(ini, L"Buttons", L"LeftPad", btnLeftPad);
+    btnRightPad = GetS(ini, L"Buttons", L"RightPad", btnRightPad);
+    padForce    = GetF(ini, L"Buttons", L"PadForce", padForce);
+    indexGripForce = GetF(ini, L"Buttons", L"IndexGripForce", indexGripForce);
 
     stickDeadzone = GetF(ini, L"Sticks", L"Deadzone", stickDeadzone);
     swapSticks    = GetB(ini, L"Sticks", L"Swap", swapSticks);
@@ -476,4 +503,11 @@ void Config::Load(const std::wstring& path) {
 }
 
 Config& Cfg() { return g_cfg; }
+
+void ConfigLogNotes() {
+    if (!g_cfg.pass2KeepNote.empty())
+        LOGI("[config] %s in ERVR.ini is 0.6.0's value, which kept doors, levers and new graces from opening: "
+             "using ERVR's own (the event manager back in the second eye's pass). Delete the line to stop this note.",
+             g_cfg.pass2KeepNote.c_str());
+}
 }
