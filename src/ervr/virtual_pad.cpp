@@ -7,6 +7,7 @@
 #include "config.h"
 #include "log.h"
 #include "game_memory.h"
+#include "belt.h"
 #include "weapon_wheel.h"
 #include <mutex>
 #include <cmath>
@@ -129,11 +130,8 @@ void VirtualPadUpdate(double now) {
         if (mask == VP_LT) lt = 255; else if (mask == VP_RT) rt = 255; else held |= mask;
     };
 
-    // ---- face buttons ------------------------------------------------------
-    mapHeld(g_map.a, in.buttons & VRB_A);
-    mapHeld(g_map.b, in.buttons & VRB_B);
-    mapHeld(g_map.x, in.buttons & VRB_X);
-    mapHeld(g_map.rthumb, in.buttons & VRB_RThumb);
+    // The face buttons are mapped after the belt has seen them (below): its use button, pressed on an item in
+    // hand, is the belt's.
 
     // ---- triggers / grips ----------------------------------------------------
     bool lTrig = in.indexTrigger[HandLeft]  >= c.triggerThreshold;
@@ -154,10 +152,6 @@ void VirtualPadUpdate(double now) {
         if (!g_menuHold.consumed) { AddPulse(g_map.menu, now, c.gesturePressDuration); pressedStart = (g_map.menu == XINPUT_GAMEPAD_START); }
         g_menuHold.down = false;
     }
-
-    // ---- Y -----------------------------------------------------------------
-    bool yDown = (in.buttons & VRB_Y) != 0;
-    mapHeld(g_map.y, yDown);
 
     // ---- sticks -------------------------------------------------------------
     float lx = in.thumb[HandLeft][0],  ly = in.thumb[HandLeft][1];
@@ -339,6 +333,21 @@ void VirtualPadUpdate(double now) {
         lx = nx; ly = ny;
     }
 
+    // ---- belt ------------------------------------------------------------------
+    // The pouch's four shortcut items hang at the waist: a grip closed on one takes it, the use button uses it
+    // (the game's own Event Action + D-pad shortcut), an open hand puts it back. Before combat, so a grip closed
+    // on a belt item is never read as a two-hand grab, and the hand holding one never swings.
+    const BeltPadOut belt = BeltUpdate(tr, in, now, anyMenu || CombatMenuOpen());
+
+    // ---- face buttons ------------------------------------------------------
+    const uint32_t faces = in.buttons & ~belt.swallow;
+    mapHeld(g_map.a, faces & VRB_A);
+    mapHeld(g_map.b, faces & VRB_B);
+    mapHeld(g_map.x, faces & VRB_X);
+    mapHeld(g_map.rthumb, faces & VRB_RThumb);
+    const bool yDown = (faces & VRB_Y) != 0;
+    mapHeld(g_map.y, yDown);
+
     // ---- gestures ----------------------------------------------------------
     // Physical combat (swing -> game AttackBehavior event) takes over from button pulses when active.
     bool physical = CombatHandlesSwings();
@@ -355,8 +364,10 @@ void VirtualPadUpdate(double now) {
         if (hr & 256u) { Haptic(HandLeft, 0.7f, now, 0.15); Haptic(HandRight, 0.7f, now, 0.15); }   // two-handed: both hands close on the weapon
         else if (hr & 512u) { Haptic(HandLeft, 0.4f, now, 0.06); Haptic(HandRight, 0.4f, now, 0.06); }   // back to one hand
     }
-    Swing sr = g_gest.Update(HandRight, tr.hand[HandRight], rGrip, now);
-    Swing sl = g_gest.Update(HandLeft,  tr.hand[HandLeft],  lGrip, now);
+    // A hand holding a belt item is not swinging (its pose reads as untracked to the detector).
+    auto gesturePose = [&](int h) { Pose p = tr.hand[h]; if (BeltOwnsHand(h)) p.valid = false; return p; };
+    Swing sr = g_gest.Update(HandRight, gesturePose(HandRight), rGrip, now);
+    Swing sl = g_gest.Update(HandLeft,  gesturePose(HandLeft),  lGrip, now);
     auto fire = [&](uint16_t mask, Hand h, float amp) {
         if (mask == VP_LT || mask == VP_RT) {
             // analog pulse: represent as a pulse on the pseudo mask; resolved below
@@ -376,13 +387,17 @@ void VirtualPadUpdate(double now) {
     // off the pad; a quick one comes back as a single tap of the grip's mapping. After combat, whose
     // two-hand grab and swing state the wheel's gate reads.
     const WheelPadOut wheel = WeaponWheelUpdate(tr, in, now, anyMenu || CombatMenuOpen());
-    mapHeld(g_map.lgrip, lGrip && !wheel.holdGrip[HandLeft]);
-    mapHeld(g_map.rgrip, rGrip && !wheel.holdGrip[HandRight]);
+    // A grip holding a belt item is the belt's: its [Buttons] mapping stays off the pad too.
+    mapHeld(g_map.lgrip, lGrip && !wheel.holdGrip[HandLeft] && !belt.holdGrip[HandLeft]);
+    mapHeld(g_map.rgrip, rGrip && !wheel.holdGrip[HandRight] && !belt.holdGrip[HandRight]);
     if (wheel.tapGrip[HandLeft]) AddPulse(g_map.lgrip, now, c.gesturePressDuration);
     if (wheel.tapGrip[HandRight]) AddPulse(g_map.rgrip, now, c.gesturePressDuration);
     held |= wheel.buttons;   // the game's own weapon-switch presses (D-pad left/right)
-    for (int h = 0; h < 2; ++h)
+    held |= belt.buttons;    // the game's own pouch shortcut (Event Action + D-pad)
+    for (int h = 0; h < 2; ++h) {
         if (wheel.hapticAmp[h] > 0.f) Haptic((Hand)h, wheel.hapticAmp[h], now, wheel.hapticSec[h]);
+        else if (belt.hapticAmp[h] > 0.f) Haptic((Hand)h, belt.hapticAmp[h], now, belt.hapticSec[h]);
+    }
 
     // ---- pulses -> outputs ----------------------------------------------------
     uint16_t pulses = ActivePulses(now);

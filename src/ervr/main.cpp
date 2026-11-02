@@ -24,6 +24,7 @@
 #include "hud.h"
 #include "item_icons.h"
 #include "weapon_wheel.h"
+#include "belt.h"
 #include "body_haptics_er.h"
 #include <windows.h>
 #include <MinHook.h>
@@ -305,6 +306,11 @@ DWORD WINAPI Worker(LPVOID) {
                 LOGD("hb: wheel: open %s | 5s: opened %ld, switched %ld, failed %ld | icons read %ld, unavailable %ld",
                      ws.openHand < 0 ? "-" : ws.openHand == 1 ? "right" : "left", ws.opens, ws.switches, ws.failed,
                      is.loaded, is.failed);
+            }
+            if (Cfg().beltEnabled) {
+                const BeltStats bs = BeltGetStats();
+                LOGD("hb: belt: %d item%s | in hand L %d R %d (0 = none) | 5s: taken %ld, used %ld, confirmed %ld, refused %ld",
+                     bs.items, bs.items == 1 ? "" : "s", bs.held[0] + 1, bs.held[1] + 1, bs.grabs, bs.uses, bs.confirmed, bs.refused);
             }
         }
         double spent = Now() - t;

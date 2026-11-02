@@ -6,6 +6,7 @@
 #include "config.h"
 #include "log.h"
 #include "weapon_wheel.h"
+#include "belt.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -53,6 +54,9 @@ uint16_t CombatHeldButtons() { return 0; }
 uint16_t CombatForcedButtons(double) { return 0; }
 WheelPadOut wheelOut;
 WheelPadOut WeaponWheelUpdate(const VRTracking&, const VRInputState&, double, bool) { return wheelOut; }
+BeltPadOut beltOut;
+BeltPadOut BeltUpdate(const VRTracking&, const VRInputState&, double, bool) { return beltOut; }
+bool BeltOwnsHand(int) { return false; }
 }
 
 int main() {
@@ -157,5 +161,28 @@ int main() {
     wheelOut.buttons = XINPUT_GAMEPAD_DPAD_RIGHT;
     Check((Poll().wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0, "the wheel's switch press reaches the game");
     wheelOut = {};
+
+    // The belt: X is the plain X unless it uses an item in hand; a grip holding an item stays off the pad; the
+    // pouch shortcut it plays reaches the game.
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    input.buttons = VRB_X;
+    beltOut = {};
+    Check((Poll().wButtons & XINPUT_GAMEPAD_X) != 0, "X with nothing taken from the belt reaches the game as X");
+    beltOut.swallow = VRB_X;
+    Check((Poll().wButtons & XINPUT_GAMEPAD_X) == 0, "X that uses a belt item does not also reach the game");
+    input.buttons = VRB_A | VRB_X;
+    Check((Poll().wButtons & XINPUT_GAMEPAD_A) != 0, "the belt keeps only its own button from the game");
+    input.buttons = 0;
+    beltOut = {};
+    input.handTrigger[HandLeft] = 1.f;   // LeftGrip=LT
+    Check(Poll().bLeftTrigger == 255, "a grip the belt does not hold sends its mapping as before");
+    beltOut.holdGrip[HandLeft] = true;
+    Check(Poll().bLeftTrigger == 0, "a grip holding a belt item stays off the pad");
+    input.handTrigger[HandLeft] = 0.f;
+    beltOut = {};
+    beltOut.buttons = XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_DPAD_RIGHT;
+    Check((Poll().wButtons & (XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_DPAD_RIGHT)) == (XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_DPAD_RIGHT),
+          "the belt's pouch shortcut (Event Action + D-pad) reaches the game");
+    beltOut = {};
     std::puts("Virtual pad/map zoom and directional dash/roll regression checks passed.");
 }

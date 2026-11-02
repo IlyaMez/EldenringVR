@@ -70,6 +70,8 @@ your hands, and melee where the swing you make is the attack. One zip, one launc
   flies along the casting hand.
 - **A weapon wheel in each hand.** Hold a grip with the hand still: that hand's weapons open around it with
   the game's own icons. Let go over one to switch.
+- **Your pouch on your belt.** The four pouch items with a shortcut hang at your waist. Grab one and press X
+  to use it; let go and it goes back.
 - **The HUD on its own panel.** Health, stamina and the menus float on a panel at headset resolution, where
   you want it, sharper than in the game's frame.
 - **Ride Torrent.** The rider and the view move with the horse, and the right stick turns both.

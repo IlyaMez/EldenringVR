@@ -88,8 +88,9 @@ Defaults for Quest Touch controllers. Every button is a key in `ERVR.ini` (`[But
 | Right trigger, while two-handing | The weapon's skill (Ash of War), without its animation |
 | Left grip | Skill |
 | A grip held, hand still | The weapon wheel: that hand's weapons around it; let go over one to switch to it, in the middle to keep yours |
+| A grip closed at your belt | Take that pouch item; X uses it, opening the hand puts it back |
 | Cast with a staff, seal or bow | The trigger casts; the spell or arrow flies where the casting hand points |
-| X / Y | Use the item in the quick slot / interact (the game's event action) |
+| X / Y | Use the item in the quick slot (or the belt item in your hand) / interact (the game's event action) |
 
 With physical melee on, the triggers and grips never press the game's attack buttons: those would play attack
 animations that pull your arms. A staff, seal or bow in the attacking hand lets the trigger through, so it
@@ -107,6 +108,16 @@ game's way again (after swapping the ash, say).
 **The weapon wheel.** Hold a grip with that hand still and the hand's weapon slots open around it, with the
 game's own icons. Move over one and let go to switch; let go in the middle to switch nothing. A short squeeze
 is still the grip's normal button, and the wheel stays shut while two-handing or in a menu.
+
+**The belt.** The four pouch items the game gives a shortcut (the top two rows of the pouch in the equipment
+menu) hang around your waist with their icons and counts: the top row in front, the middle row on your hips,
+left column on the left. Reach down, close a grip on one to take it, and press X while you hold it: ERVR plays
+the game's own pouch shortcut for that item (Y held, then the item's D-pad direction), so the game's rules and
+animation apply. Open the hand and the item goes back. X with nothing in your hand still uses the item in your
+quick slot. The belt turns with your body and holds still while you reach for it or look down at it. Because
+the shortcut holds Y, using a belt item right beside something you can interact with (a grace, an item on the
+ground) interacts with it instead, exactly as the pouch does on a gamepad. Where it hangs, how big the items
+are and which hands take them are in `[Belt]` in `ERVR.ini`.
 
 ### Menus
 

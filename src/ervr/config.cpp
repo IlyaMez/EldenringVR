@@ -323,6 +323,23 @@ void Config::Load(const std::wstring& path) {
     wheelSwitchTimeout = GetF(ini, L"WeaponWheel", L"SwitchTimeout", wheelSwitchTimeout);
     wheelSwitch        = GetS(ini, L"WeaponWheel", L"Switch", wheelSwitch);
 
+    beltEnabled        = GetB(ini, L"Belt", L"Enabled", beltEnabled);
+    beltHands          = GetS(ini, L"Belt", L"Hands", beltHands);
+    beltUseButton      = GetS(ini, L"Belt", L"UseButton", beltUseButton);
+    beltDrop           = GetF(ini, L"Belt", L"Drop", beltDrop);
+    beltRadius         = GetF(ini, L"Belt", L"Radius", beltRadius);
+    beltAngles         = GetS(ini, L"Belt", L"Angles", beltAngles);
+    beltSize           = GetF(ini, L"Belt", L"Size", beltSize);
+    beltGrabRadius     = GetF(ini, L"Belt", L"GrabRadius", beltGrabRadius);
+    beltFollowDeg      = GetF(ini, L"Belt", L"FollowDegrees", beltFollowDeg);
+    beltOpacity        = GetF(ini, L"Belt", L"Opacity", beltOpacity);
+    beltHaptics        = GetB(ini, L"Belt", L"Haptics", beltHaptics);
+    beltPouchButton    = GetS(ini, L"Belt", L"PouchButton", beltPouchButton);
+    beltDirections     = GetS(ini, L"Belt", L"Directions", beltDirections);
+    beltChordLead      = GetF(ini, L"Belt", L"ChordLead", beltChordLead);
+    beltChordPress     = GetF(ini, L"Belt", L"ChordPress", beltChordPress);
+    beltChordTail      = GetF(ini, L"Belt", L"ChordTail", beltChordTail);
+
     fpEnabled = GetB(ini, L"FirstPerson", L"Enabled", fpEnabled);
     fpEyeHeight = GetF(ini, L"FirstPerson", L"EyeHeight", fpEyeHeight);
     fpCameraAnchor = GetS(ini, L"FirstPerson", L"CameraAnchor", fpCameraAnchor);

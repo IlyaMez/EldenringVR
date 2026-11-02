@@ -69,10 +69,11 @@ struct VRFrameInfo {
 //   World - anchored once and left there, until the player recentres it.
 enum VRQuadLock { QuadLockBody = 0, QuadLockHead, QuadLockWorld };
 
-// Small quads ERVR draws itself, placed in stage space by their owner - the weapon wheel at the
-// hand that opened it, and the cursor showing where that hand is over it. Alpha-blended like the
-// HUD (premultiplied), submitted after it in this order.
-enum VROverlay { OverlayWheel = 0, OverlayWheelCursor, OverlayCount };
+// Small quads ERVR draws itself (overlay_layers.h), placed in stage space by their owner - the belt's
+// four pouch items at the waist or in the hand holding one, the weapon wheel at the hand that opened
+// it, and the cursor showing where that hand is over it. Alpha-blended like the HUD (premultiplied),
+// submitted after it in this order, so the wheel draws over a belt item.
+enum VROverlay { OverlayBelt0 = 0, OverlayBelt1, OverlayBelt2, OverlayBelt3, OverlayWheel, OverlayWheelCursor, OverlayCount };
 struct VROverlayQuad {
     bool  valid = false;
     Pose  pose;                     // centre and orientation; the image faces +Z

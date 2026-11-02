@@ -15,12 +15,11 @@
 // rendered hand is behind the layer.
 //
 // Threads: WeaponWheelUpdate on the pad worker, WeaponWheelGameFrame on the game thread (the equipment
-// it reads), WeaponWheelCompose on the render thread (the image and the XR layers).
+// it reads); the image and its XR layers go out through overlay_layers.h.
 #include "vr_backend.h"
 #include <cstdint>
 
 namespace ervr {
-struct Dx12Frame;
 
 struct WheelPadOut {
     bool holdGrip[2] = {false, false};   // keep the grip's [Buttons] mapping off the pad this tick
@@ -34,9 +33,9 @@ WheelPadOut WeaponWheelUpdate(const VRTracking& tr, const VRInputState& in, doub
 void WeaponWheelGameFrame(uint8_t* player);
 // The hand whose wheel is up: physical combat leaves it alone (moving onto a weapon is not a swing).
 bool WeaponWheelOwnsHand(int hand);
-// Render thread, before each xrEndFrame: uploads the wheel image when it changed and fills its layers.
-void WeaponWheelCompose(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& layer);
-void WeaponWheelReleaseGpu();   // render thread: the device is going away
+// A switch is under way (the wheel may press the D-pad): the belt holds its pouch chord back meanwhile,
+// since the game reads a D-pad press under a held Event Action button as a pouch item.
+bool WeaponWheelBusy();
 
 struct WheelStats {
     int  openHand = -1;          // the hand whose wheel is open, -1 = none

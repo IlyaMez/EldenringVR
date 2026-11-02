@@ -71,6 +71,7 @@ int main() {
         Check(WheelBlocked(g) == nullptr, "the open gate");
         g.twoHanded = true; Check(WheelBlocked(g) != nullptr && WheelBlockExpected(WheelBlocked(g), g), "two-handing blocks the wheel"); g.twoHanded = false;
         g.grabbing = true; Check(WheelBlocked(g) != nullptr, "a hand that took the other weapon's hilt is two-handing it"); g.grabbing = false;
+        g.belt = true; Check(WheelBlocked(g) != nullptr && WheelBlockExpected(WheelBlocked(g), g), "a hand holding a belt item never opens the wheel"); g.belt = false;
         g.menu = true; Check(WheelBlocked(g) != nullptr, "menus block the wheel"); g.menu = false;
         g.weapons = false; Check(WheelBlocked(g) != nullptr && !WheelBlockExpected(WheelBlocked(g), g),
                                  "an empty hand blocks the wheel, and says so in the log");

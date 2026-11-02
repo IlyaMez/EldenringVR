@@ -474,6 +474,7 @@ public:
         for (int i = 0; i < OverlayCount; ++i) {
             const VROverlayQuad& o = layer.overlays[i];
             if (!o.valid || overlays_[i].handle == XR_NULL_HANDLE || o.widthM <= 0.f || o.heightM <= 0.f) continue;
+            if (maxLayers_ && count >= maxLayers_) break;   // over the runtime's limit xrEndFrame would refuse the whole frame
             XrCompositionLayerQuad& q = overlayQuad[i];
             q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
             q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;   // premultiplied, as the HUD
@@ -728,10 +729,16 @@ private:
                                               n, &n, viewConfig_.data()), "xrEnumerateViewConfigurationViews");
         if (viewConfig_.size() < 2) { LOGE("[xr] stereo view config unavailable"); return false; }
         XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
-        if (XR_SUCCEEDED(xrGetSystemProperties(instance_, systemId_, &sp)))
-            LOGI("[xr] system \"%s\": recommended eye %ux%u, max %ux%u", sp.systemName,
+        if (XR_SUCCEEDED(xrGetSystemProperties(instance_, systemId_, &sp))) {
+            LOGI("[xr] system \"%s\": recommended eye %ux%u, max %ux%u, up to %u layers", sp.systemName,
                  viewConfig_[0].recommendedImageRectWidth, viewConfig_[0].recommendedImageRectHeight,
-                 viewConfig_[0].maxImageRectWidth, viewConfig_[0].maxImageRectHeight);
+                 viewConfig_[0].maxImageRectWidth, viewConfig_[0].maxImageRectHeight, sp.graphicsProperties.maxLayerCount);
+            // Projection, cinema, HUD and every overlay can be live at once; EndFrame leaves out what does not fit.
+            maxLayers_ = sp.graphicsProperties.maxLayerCount;
+            if (maxLayers_ && maxLayers_ < 3u + OverlayCount)
+                LOGW("[xr] the runtime composes at most %u layers but ERVR may submit %d: the last overlays (the weapon wheel) can be left out",
+                     maxLayers_, 3 + (int)OverlayCount);
+        }
         return true;
     }
 
@@ -1090,6 +1097,7 @@ private:
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     std::vector<XrViewConfigurationView> viewConfig_;
     Swap        eyes_[2], quad_, hud_, overlays_[OverlayCount];
+    uint32_t    maxLayers_ = 0;   // XrSystemGraphicsProperties.maxLayerCount, 0 = unknown
     // The HUD quad keeps its own anchor: it follows on a different (tighter) leash than the
     // cinema screen, and in World lock it must not be dragged along by the cinema quad.
     Anchor      cinemaAnchor_, hudAnchor_;

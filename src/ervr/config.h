@@ -418,6 +418,26 @@ struct Config {
     // cycle = press the game's switch once per slot in between, as a gamepad would
     std::string wheelSwitch = "jump";
 
+    // [Belt]  the pouch's four shortcut items hang at the waist: close a grip on one to take it, press UseButton
+    // while holding it to use it (the game's own Event Action + D-pad pouch shortcut), open the hand to put it back
+    // (belt.h).
+    bool  beltEnabled = true;
+    std::string beltHands = "both";       // both | right | left | off: the hands that take items
+    std::string beltUseButton = "X";      // A | B | X | Y: uses the item in hand; with nothing taken it is the button it always was
+    float beltDrop = 0.60f;               // m below the eyes (head upright) the items hang
+    float beltRadius = 0.19f;             // m out from the spine
+    std::string beltAngles = "-30,30,-80,80";   // degrees around the waist for pouch slots 1-4 (0 = straight ahead, positive = right)
+    float beltSize = 0.09f;               // m across each item
+    float beltGrabRadius = 0.11f;         // m: a grip closing this close to an item takes it
+    float beltFollowDeg = 45.f;           // the head may look this far to either side before the belt turns with it
+    float beltOpacity = 0.85f;            // 0..1, items no hand is at (a hand at one shows it fully)
+    bool  beltHaptics = true;
+    std::string beltPouchButton = "Y";    // the game's Event Action button (XInput name), held for the pouch shortcut
+    std::string beltDirections = "up,right,left,down";   // the game's D-pad direction for pouch slots 1-4
+    float beltChordLead = 0.40f;          // s Event Action is held before the direction (shorter reads as a plain D-pad switch)
+    float beltChordPress = 0.20f;         // s the direction is held with it
+    float beltChordTail = 0.15f;          // s Event Action stays down after the direction is let go
+
     // [Cheats]  offline convenience for testing (writes the save's PlayerGameData)
     int   cheatSetAllStats = 0;           // >0: set every stat to exactly this value (level adjusted); 0 = off
     int   cheatSetLevel = 0;              // >0: reach exactly this level (points off the highest stats / onto the lowest), once - the key clears itself

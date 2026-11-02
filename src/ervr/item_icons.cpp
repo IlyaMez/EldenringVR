@@ -16,7 +16,7 @@
 namespace ervr {
 namespace {
 
-constexpr uint32_t kIconSide = 128;   // what the wheel draws at; the game's own are 1024
+constexpr uint32_t kIconSide = 256;   // a belt item held up to the eyes; the wheel shrinks it to 128. The game's own are 1024
 
 struct Img { uint32_t w = 0, h = 0; std::vector<uint32_t> px; };
 std::mutex g_mtx;
@@ -33,7 +33,7 @@ double NowMs() {
     return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
 }
 
-// One icon: archive -> TPF -> the MENU_Knowledge_<id> DDS -> RGBA -> 128 px.
+// One icon: archive -> TPF -> the MENU_Knowledge_<id> DDS -> RGBA -> 256 px.
 bool Load(int id, Img& im, std::string& why) {
     std::vector<uint8_t> tpf;
     if (!ArchiveReadItemIcon(id, tpf, &why)) return false;

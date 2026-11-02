@@ -3,6 +3,39 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## Unreleased
+
+### Belt
+* The four pouch items the game gives a shortcut hang around the waist as objects, with the game's own
+  icons and their counts: pouch slot 1 (top left) front left, 2 (top right) front right, 3 and 4 (the
+  middle row) on the hips. Close a grip on one to take it, press X while holding it to use it, open the
+  hand to put it back. X with nothing taken from the belt is the plain X it always was.
+* Using an item is the game's own pouch shortcut: ERVR holds Event Action (Y) for 0.4 s, then presses
+  the slot's D-pad direction (the game's controls list: up, right, left, down), so the game's rules,
+  animation and counts apply. The weapon wheel's switch and the shortcut never press the D-pad at the
+  same time.
+* The belt hangs under the neck (the eyes pivot around it, so looking down does not move it) and turns
+  with the body: the head may look `FollowDegrees` to either side, a big turn drags it along, a heading
+  held for two seconds brings it under the head, and it holds still while a hand is at it.
+* A grip that takes an item is the belt's until it opens: not a two-hand grab, not a weapon wheel, not
+  the grip's `[Buttons]` mapping, and that hand does not swing.
+* Every use is checked against what the game did next - the item's count, the item the game queued for
+  its UseGoods event, and the selections a plain D-pad press would move - and said in ERVR.log. A use
+  that took another slot's item swaps those two directions for the session and logs the `Directions`
+  line to keep; a press the game read as a plain switch says to raise `ChordLead`.
+* Layouts from fromsoftware-rs (read-only reference), each checked against the TGA cheat table: the
+  pouch at PlayerGameData +0x678, the inventory at +0x5D0, EquipMagicData at +0x530; EquipParamGoods
+  `iconId` / `maxNum` for the icons and counts.
+* `[Belt]` in ERVR.ini (`Hands`, `UseButton`, `Drop`, `Radius`, `Angles`, `Size`, `GrabRadius`, ...).
+  Regression test `belt` (directions, the chord's timing, the neck and belt geometry, the body yaw, the
+  grab, the use verdicts); `virtual_pad` checks that X reaches the game unless the belt took it.
+
+### Overlays
+* The weapon wheel's drawing and its D3D12 upload moved into `overlay_canvas` / `overlay_layers`,
+  shared with the belt: one command list copies every overlay that changed. Item icons are now read at
+  256 px (the wheel still draws them at 128). The OpenXR backend logs the runtime's layer limit and
+  never submits more layers than it allows.
+
 ## 0.6.0 (2026-11-02): first public release
 
 ERVR's first download for everyone: the launcher, Seamless Co-op, game patch 1.17.2, the weapon wheel and

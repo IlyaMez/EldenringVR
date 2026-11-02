@@ -114,6 +114,7 @@ struct WheelGate {
     bool enabled = true, handAllowed = true, playerActive = true, menu = false, transition = false;
     bool twoHanded = false;   // the game's arm style is two-handed: the grips belong to the weapon
     bool grabbing = false;    // this hand has taken the other weapon's hilt (two-hand grab)
+    bool belt = false;        // this hand holds an item it took from the belt (belt.h)
     bool weapons = true;      // the hand has a weapon in some slot
 };
 inline const char* WheelBlocked(const WheelGate& g) {
@@ -122,12 +123,13 @@ inline const char* WheelBlocked(const WheelGate& g) {
     if (g.menu) return "a menu is open";
     if (g.twoHanded) return "two-handing";
     if (g.grabbing) return "it took the other weapon's hilt (two-hand grab)";
+    if (g.belt) return "it holds an item from the belt";
     if (!g.weapons) return "no weapon in this hand's slots";
     return nullptr;
 }
 // Blocks the wheel is expected to have (no line in the log when a long squeeze ends on one of these).
 inline bool WheelBlockExpected(const char* why, const WheelGate& g) {
-    return why && (!g.enabled || !g.handAllowed || !g.playerActive || g.transition || g.menu || g.twoHanded || g.grabbing);
+    return why && (!g.enabled || !g.handAllowed || !g.playerActive || g.transition || g.menu || g.twoHanded || g.grabbing || g.belt);
 }
 
 // Switching the game's way. One D-pad press moves a hand to its next filled slot (the game skips

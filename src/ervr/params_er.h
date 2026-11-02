@@ -11,6 +11,7 @@ namespace ervr {
 // Holder indices are the game's own SoloParamRepository order (fromsoftware-rs, ER 1.16).
 enum ParamIndex {
     PI_EquipParamWeapon = 0,
+    PI_EquipParamGoods  = 3,
     PI_AtkParam_Pc      = 8,
     PI_BehaviorParam_PC = 13,
     PI_SpEffectParam    = 15,

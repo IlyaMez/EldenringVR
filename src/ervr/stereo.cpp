@@ -5,7 +5,7 @@
 #include "hud.h"
 #include "reshade_addon.h"
 #include "vr_backend.h"
-#include "weapon_wheel.h"
+#include "overlay_layers.h"
 #include "config.h"
 #include "log.h"
 #include <windows.h>
@@ -202,7 +202,7 @@ Crop MakeCrop(const FrameTans& ft, const VRFov& want) {
 void ReleaseLocked() {
     FramePumpSetGpuQueue(nullptr);
     g_blit.Release();
-    WeaponWheelReleaseGpu();
+    OverlayLayersReleaseGpu();
     g_bound = false;
     g_boundDevice = nullptr;
     g_frameOpen = false;
@@ -553,10 +553,10 @@ void ComposeHud(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& layer) {
     g_hudFrames.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Everything that rides on top of the world: the HUD, then the weapon wheel (weapon_wheel.h).
+// Everything that rides on top of the world: the HUD, then the belt's items and the weapon wheel (overlay_layers.h).
 void ComposeLayers(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& layer) {
     ComposeHud(vr, f, layer);
-    WeaponWheelCompose(vr, f, layer);
+    OverlayLayersCompose(vr, f, layer);
 }
 
 // ---- full stereo: two engine passes, two presents, one XR frame ------------------------

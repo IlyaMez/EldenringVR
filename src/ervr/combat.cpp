@@ -50,6 +50,7 @@
 #include "params_er.h"
 #include "log.h"
 #include "rtti.h"
+#include "belt.h"
 #include "weapon_wheel.h"
 #include <windows.h>
 #include <MinHook.h>
@@ -1799,7 +1800,8 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
         for (int w = HandRight; w >= HandLeft && !s.want; --w) {
             float along = 0.f, perp = 0.f;
             // A hand choosing on its weapon wheel is not grabbing: the right hand's inward slot lies toward the left hilt.
-            if (WeaponWheelOwnsHand(1 - w)) continue;
+            // Nor is one that took an item from the belt (a weapon hanging low puts its hilt by the hip).
+            if (WeaponWheelOwnsHand(1 - w) || BeltOwnsHand(1 - w)) continue;
             if (!g_wepPresent[w].load() || !geometry(w, &along, &perp)) continue;
             if (!(along >= c.twoHandGrabMin && along <= c.twoHandGrabMax && perp <= c.twoHandGrabRadius)) continue;
             zoneNow = true; s.pinHand = 1 - w; s.weaponHand = w;
@@ -2279,9 +2281,10 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         HandSM& s = g_sm[h];
         const Pose& p = tr.hand[h];
         bool grip = in.handTrigger[h] >= c.gripThreshold;   // analog in VRInputState; VRB_*Grip is never set by the backend
-        // A hand choosing on the weapon wheel is not swinging, however fast it moves onto a weapon.
+        // A hand choosing on the weapon wheel is not swinging, however fast it moves onto a weapon, and neither is
+        // one carrying an item from the belt.
         bool allowed = p.valid && in.controllerConnected[h] && h != freeHand && (h == HandRight || (c.combatLeftHand && !leftShield)) &&
-                       (!c.gestureRequiresGrip || grip) && !WeaponWheelOwnsHand(h);
+                       (!c.gestureRequiresGrip || grip) && !WeaponWheelOwnsHand(h) && !BeltOwnsHand(h);
         if (!allowed) {
             // Also cancel an undelivered short contact while already cooling
             // down; tracking loss or taking the support grip must never replay it.
