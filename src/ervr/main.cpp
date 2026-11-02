@@ -24,6 +24,7 @@
 #include "hud.h"
 #include "item_icons.h"
 #include "weapon_wheel.h"
+#include "body_haptics_er.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -217,6 +218,7 @@ DWORD WINAPI Worker(LPVOID) {
         if (IVRBackend* vr = ActiveBackend()) PatchesFollowHeadsetRefresh(vr->DisplayRefreshHz());
         VirtualPadUpdate(t);
         GameERTick();
+        BodyHapticsTick(t);   // [bHaptics]: no-op at Level=0
         if ((++tick % (int)(5.0 / period)) == 0) {   // heartbeat every ~5s at debug level
             VRTracking tr; VRInputState in;
             long calls, merged, fab; XInputHookStats(calls, merged, fab);
@@ -296,6 +298,7 @@ DWORD WINAPI Worker(LPVOID) {
                  cs.paramsReady, cs.lastQuality, cs.lastMult, cs.shield, cs.guarding, cs.blockQuality,
                  cs.armStyle, cs.twoHandWanted, cs.skill, cs.skillsRecorded, cs.fp,
                  cs.castAimHand < 0 ? "head" : cs.castAimHand == 1 ? "right hand" : "left hand", cs.casting ? " (cast live)" : "");
+            BodyHapticsHeartbeat();
             if (Cfg().wheelEnabled) {
                 const WheelStats ws = WeaponWheelGetStats();
                 const ItemIconStats is = ItemIconsGetStats();

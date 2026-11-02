@@ -1,4 +1,6 @@
 build/
+# The bHaptics Developer Portal app a local build plays body haptics as (CMakeLists.txt).
+/bhaptics-app.local
 *.log
 .vs/
 out/

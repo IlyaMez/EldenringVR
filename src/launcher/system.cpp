@@ -21,6 +21,10 @@ constexpr std::array kPayloadFiles{L"dxgi.dll", L"ReShade.ini", L"dinput8.dll", 
 // Documents that travel with an install when the package has them.
 constexpr std::array kPayloadDocuments{L"LICENSE-ReShade.txt", L"ERVR\\README.md", L"ERVR\\CHANGELOG.md",
                                        L"ERVR\\LICENSE.txt", L"ERVR\\THIRD_PARTY.md"};
+// bHaptics' library beside ERVR.dll (body haptics) and the notices that travel with it: installed with ERVR.dll
+// when the package has them, removed with it. Without it ERVR only goes without body haptics.
+constexpr std::array kPayloadBhaptics{L"ERVR\\bhaptics_library.dll", L"ERVR\\LICENSE-bHaptics.txt",
+                                      L"ERVR\\bHaptics-THIRD_PARTY_NOTICES.txt"};
 // R.E.A.L. VR's files: it and ReShade both want to be dxgi.dll (install.ps1's leftovers).
 constexpr std::array kRealVrFiles{L"RealVR64.dll", L"openvr_api.dll", L"cudart64_12.dll", L"RealVR.ini"};
 // The processes that are the game: Steam's start_protected_game.exe is a copy of eldenring.exe on installs
@@ -823,6 +827,10 @@ Change installErvr(const Scan& scan, bool replaceBuild) {
                 if (isFile(from / document))
                     CopyFileW((from / document).c_str(), (game / document).c_str(), FALSE);
         }
+        // With the build taken, or wherever one is missing: an install from before body haptics keeps its ERVR.dll.
+        for (const auto* file : kPayloadBhaptics)
+            if (isFile(from / file) && (takeBuild || !in.dll || !isFile(game / file)))
+                CopyFileW((from / file).c_str(), (game / file).c_str(), FALSE);
         if (!in.ini && c.copy(from / L"ERVR\\ERVR.ini", game / L"ERVR\\ERVR.ini"))
             c.change.lines.push_back("Added ERVR\\ERVR.ini (its settings; edit them in Options).");
         return true;
@@ -899,6 +907,8 @@ Change uninstallErvr(const Scan& scan) {
         c.change.lines.push_back("Removed dinput8.dll.ervr-off.");
     if (scan.install.dll && c.remove((game / L"ERVR\\ERVR.dll").wstring()))
         c.change.lines.push_back("Removed ERVR\\ERVR.dll.");
+    if (isFile(game / kPayloadBhaptics[0]) && c.remove((game / kPayloadBhaptics[0]).wstring()))
+        c.change.lines.push_back("Removed ERVR\\bhaptics_library.dll.");
     const fs::path dxgi = game / L"dxgi.dll";
     if (isFile(dxgi) && versionString(dxgi, L"ProductName") == "ReShade" && c.remove(dxgi.wstring())) {
         c.change.lines.push_back("Removed dxgi.dll (ReShade).");

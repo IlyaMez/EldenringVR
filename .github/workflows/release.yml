@@ -33,8 +33,13 @@ jobs:
           "tag=$tag"                        | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
           "name=ERVR-$tag"                  | Out-File -Append $env:GITHUB_OUTPUT -Encoding utf8
 
+      # Body haptics play as the bHaptics Developer Portal app in the two ERVR_BHAPTICS_ secrets; a build
+      # without them loads bhaptics_library.dll and plays nothing (CMakeLists.txt).
       - name: Configure
         run: cmake -S . -B build -A x64
+        env:
+          ERVR_BHAPTICS_APP_ID: ${{ secrets.ERVR_BHAPTICS_APP_ID }}
+          ERVR_BHAPTICS_API_KEY: ${{ secrets.ERVR_BHAPTICS_API_KEY }}
 
       - name: Build
         run: cmake --build build --config Release

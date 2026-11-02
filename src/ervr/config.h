@@ -187,6 +187,13 @@ struct Config {
     bool  rumbleToControllers = true;     // forward XInputSetState rumble to Touch controllers
     float rumbleScale = 1.0f;
 
+    // [bHaptics]  body haptics on a TactSuit / TactSleeves / TactVisor, through the bHaptics Player (body_haptics_er.h)
+    int   bhapticsLevel = 100;            // percent; 0 = off (bhaptics_library.dll is then never loaded)
+    bool  bhapticsCombat = true;          // blows landed, blocks, deflects, the two-hand grab, casts
+    bool  bhapticsDamage = true;          // blows taken (on the side they came from), heals, death, the heart at low HP
+    bool  bhapticsMovement = true;        // falls and landings
+    bool  bhapticsRumble = true;          // the game's own rumble on the vest
+
     // [FirstPerson]  (ERVR takes over the game camera and the arm bones)
     bool  fpEnabled = true;
     float fpEyeHeight = 1.60f;            // meters above the character root (CameraAnchor=root, and the height for CameraAnchor=head)

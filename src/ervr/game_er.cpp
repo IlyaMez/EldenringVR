@@ -25,6 +25,7 @@
 #include "frame_probe.h"
 #include "stereo.h"
 #include "weapon_wheel.h"
+#include "body_haptics_er.h"
 #include <windows.h>
 #include <MinHook.h>
 #include "virtual_pad.h"
@@ -2730,6 +2731,7 @@ void HkHandler(MidHookRegs*, void*) {
         uint8_t* player = MainPlayer();
         if (pass != 2) CombatGameFrame(player, g_frame);
         if (pass != 2) WeaponWheelGameFrame(player);   // the slots and icons the weapon wheel shows
+        if (pass != 2) BodyHapticsGameFrame(player, g_frame);   // HP, the attacker's side, falls: the bHaptics vest
         CombatActionDiag(player, pass, g_frame);   // both passes: the press-vs-pass picture is the point
     }
 }

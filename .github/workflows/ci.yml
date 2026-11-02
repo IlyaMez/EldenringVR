@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # MinHook, the ReShade headers and the OpenXR SDK are pulled by FetchContent on first configure.
+      # MinHook, the ReShade headers, the OpenXR SDK and the bHaptics SDK are pulled by FetchContent on first configure.
       # Cache them so PR builds do not re-clone them every time.
       - name: Cache FetchContent sources
         uses: actions/cache@v4

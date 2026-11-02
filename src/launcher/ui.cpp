@@ -2036,6 +2036,19 @@ void App::options(ImVec2 origin, ImVec2 size) {
                [&] { amount("##rumbleScale", "Haptics", "RumbleScale", 1.f, 0, 200, 100, 5, "%.0f%%", 2); });
         option("Swing buzz", "A short buzz when a swing lands.", flip, [&] { onOff("##swingBuzz", "Gestures", "Haptics", true); });
     });
+    group(1, "bHaptics", [&] {
+        option("Body haptics", "A bHaptics vest, sleeves and visor, through the bHaptics Player (start it and pair "
+                               "them there). How strongly they play; 0% is off.",
+               gauge, [&] { amount("##bhLevel", "bHaptics", "Level", 100, 0, 100, 1, 5, "%.0f%%", 0); });
+        option("Blows taken", "On the side the attacker stands; heals, death and the heart at low HP too.", flip,
+               [&] { onOff("##bhDamage", "bHaptics", "Damage", true); });
+        option("Your own blows", "Blows landed, blocks and casts in the arm that made them.", flip,
+               [&] { onOff("##bhCombat", "bHaptics", "Combat", true); });
+        option("Falls and landings", "The wind of a long fall, and the landing from the waist up.", flip,
+               [&] { onOff("##bhMovement", "bHaptics", "Movement", true); });
+        option("Game rumble on the vest", "The game's own rumble, at most a quarter, on the vest.", flip,
+               [&] { onOff("##bhRumble", "bHaptics", "Rumble", true); });
+    });
     ImGui::EndDisabled();
     ImGui::SetCursorScreenPos(ImVec2(base.x, std::max(columnY[0], columnY[1])));
     ImGui::Dummy(ImVec2(0, S(2)));
@@ -2180,8 +2193,9 @@ void App::about(ImVec2 origin, ImVec2 size) {
                                "play: that risks a ban. Seamless Co-op is the multiplayer that works.");
         ImGui::PopStyleColor();
         ImGui::PushStyleColor(ImGuiCol_Text, vec(kLogText));
-        ImGui::TextUnformatted("No telemetry, no analytics, no auto-updater, no network code: neither ERVR nor this "
-                               "launcher ever goes online. New versions are on GitHub Releases and Nexus Mods.");
+        ImGui::TextUnformatted("No telemetry, no analytics, no auto-updater, no network code of their own: neither ERVR "
+                               "nor this launcher goes online. Body haptics use bHaptics' own library, which talks to the "
+                               "bHaptics Player on this PC. New versions are on GitHub Releases and Nexus Mods.");
         ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, S(2)));

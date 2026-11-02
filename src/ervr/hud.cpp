@@ -1,4 +1,5 @@
 #include "hud.h"
+#include "hud_target.h"
 #include "config.h"
 #include "dx12_blit.h"
 #include "patches_er.h"
@@ -453,34 +454,46 @@ void ProbeLog() {
 // single draw. So the target moves when a save loads, and moves back on quit-to-title.
 //
 // The rule: scan the frame's census backwards for the last full-size target that took more
-// than one draw. A back buffer is accepted as readily as an offscreen one, so this can walk
-// back as well as forward.
+// than one draw and is in a format a UI can be on (HudPickUiTarget). A back buffer is
+// accepted as readily as an offscreen one, so this can walk back as well as forward.
 void RelearnTarget(rs::device* dev) {
     if (!dev) return;
     const int want = FirstDrawCfg() + 1 > 2 ? FirstDrawCfg() + 1 : 2;
-    for (int i = g_runCount - 1; i >= 0; --i) {
-        if (RunAt(i).draws < want) continue;
-        const uint64_t res = RunAt(i).res;
-        const bool bb = IsBackBuffer(res);
-        if (!bb) {
-            // Full frame size only. A half-res bloom or shadow target can easily take a
-            // dozen draws in a row and would otherwise look just like a UI batch.
-            const rs::resource_desc d = dev->get_resource_desc(rs::resource{res});
-            if (d.type != rs::resource_type::texture_2d) continue;
-            if (d.texture.width != g_bbW || d.texture.height != g_bbH) continue;
-        }
-        const int mode = bb ? (int)TargetMode::BackBuffer : (int)TargetMode::Learned;
-        const int prevMode = g_targetMode.exchange(mode);
-        const uint64_t prevRes = g_learned.exchange(bb ? 0 : res);
-        if (prevMode != mode || prevRes != (bb ? 0 : res))
-            LOGI("[hud] UI target moved to %s (@%llx, %d draws in that frame) after %d passes "
-                 "with no UI. Set [HUD] Target=backbuffer to pin the old behaviour, or "
-                 "Probe=true to watch the whole census.",
-                 bb ? "the back buffer" : "a full-size offscreen target",
-                 (unsigned long long)(res & 0xffffffull), RunAt(i).draws,
-                 g_missStreak.load(std::memory_order_relaxed));
-        return;
+    HudRun runs[kMaxRuns];
+    for (int i = 0; i < g_runCount; ++i) {
+        HudRun& r = runs[i];
+        r.res = RunAt(i).res;
+        r.draws = RunAt(i).draws;
+        r.backBuffer = IsBackBuffer(r.res);
+        if (r.backBuffer || r.draws < want) continue;
+        const rs::resource_desc d = dev->get_resource_desc(rs::resource{r.res});
+        r.texture2d = d.type == rs::resource_type::texture_2d;
+        r.w = d.texture.width;
+        r.h = d.texture.height;
+        r.fmt = (uint32_t)d.texture.format;
     }
+    int rejected = -1;
+    const int i = HudPickUiTarget(runs, g_runCount, want, g_bbW, g_bbH, &rejected);
+    static uint64_t s_toldRejected = 0;
+    if (rejected >= 0 && runs[rejected].res != s_toldRejected) {
+        s_toldRejected = runs[rejected].res;
+        LOGI("[hud] passed over a full-size fmt %u target (@%llx, %d draws) while looking for "
+             "the UI: a scene buffer, not a UI target", runs[rejected].fmt,
+             (unsigned long long)(runs[rejected].res & 0xffffffull), runs[rejected].draws);
+    }
+    if (i < 0) return;
+    const uint64_t res = runs[i].res;
+    const bool bb = runs[i].backBuffer;
+    const int mode = bb ? (int)TargetMode::BackBuffer : (int)TargetMode::Learned;
+    const int prevMode = g_targetMode.exchange(mode);
+    const uint64_t prevRes = g_learned.exchange(bb ? 0 : res);
+    if (prevMode != mode || prevRes != (bb ? 0 : res))
+        LOGI("[hud] UI target moved to %s (@%llx, fmt %u, %d draws in that frame) after %d "
+             "passes with no UI. Set [HUD] Target=backbuffer to pin the old behaviour, or "
+             "Probe=true to watch the whole census.",
+             bb ? "the back buffer" : "a full-size offscreen target",
+             (unsigned long long)(res & 0xffffffull), runs[i].fmt, runs[i].draws,
+             g_missStreak.load(std::memory_order_relaxed));
 }
 
 } // namespace
@@ -596,7 +609,18 @@ void HudOnPresent(void* reshadeSwapchain) {
     // following the game (it moves when a save loads) and the first stereo pair after a load
     // or the map lifts the HUD at once instead of after a relearn.
     const bool found = captured || (!wasRedirecting && draws > FirstDrawCfg());
-    if (found) {
+    const bool absent = !found && HudUiAbsentNotMoved(
+        (TargetMode)g_targetMode.load(std::memory_order_relaxed) == TargetMode::Learned, draws);
+    static int s_absent = 0, s_toldAbsent = 0;
+    if (!absent) {
+        s_absent = 0;
+    } else if (++s_absent == kRelearnAfter) {
+        // Every cutscene does this, so only the first few say so out loud.
+        Log(s_toldAbsent++ < 4 ? LogLevel::Info : LogLevel::Debug,
+            "[hud] %d passes with no UI, but the frame still lands on the UI target (a "
+            "cutscene, or the HUD hidden): target kept", kRelearnAfter);
+    }
+    if (found || absent) {
         g_missStreak.store(0, std::memory_order_relaxed);
         if (captured) {
             g_captures.fetch_add(1, std::memory_order_relaxed);

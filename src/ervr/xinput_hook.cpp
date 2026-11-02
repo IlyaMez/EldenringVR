@@ -8,6 +8,7 @@
 #include "xinput_hook.h"
 #include "virtual_pad.h"
 #include "autopilot.h"
+#include "body_haptics_er.h"
 #include "config.h"
 #include "log.h"
 #include <windows.h>
@@ -121,6 +122,7 @@ template <int I> DWORD WINAPI Hook_GetStateEx(DWORD user, XINPUT_STATE* st) { re
 template <int I> DWORD WINAPI Hook_SetState(DWORD user, XINPUT_VIBRATION* vib) {
     if (user == 0 && vib && Cfg().rumbleToControllers)
         VirtualPadRumble(vib->wLeftMotorSpeed / 65535.f, vib->wRightMotorSpeed / 65535.f);
+    if (user == 0 && vib) BodyHapticsRumble(vib->wLeftMotorSpeed / 65535.f, vib->wRightMotorSpeed / 65535.f);   // the vest's, either way
     DWORD r = g_mods[I].origSetState ? g_mods[I].origSetState(user, vib) : ERROR_DEVICE_NOT_CONNECTED;
     if (r != ERROR_SUCCESS && user == 0 && PadPresent()) return ERROR_SUCCESS;
     return r;
@@ -180,6 +182,7 @@ DWORD WINAPI IAT_GetState(DWORD user, XINPUT_STATE* st) { return Common_GetState
 DWORD WINAPI IAT_SetState(DWORD user, XINPUT_VIBRATION* vib) {
     if (user == 0 && vib && Cfg().rumbleToControllers)
         VirtualPadRumble(vib->wLeftMotorSpeed / 65535.f, vib->wRightMotorSpeed / 65535.f);
+    if (user == 0 && vib) BodyHapticsRumble(vib->wLeftMotorSpeed / 65535.f, vib->wRightMotorSpeed / 65535.f);   // the vest's, either way
     DWORD r = g_iatOrigSetState ? g_iatOrigSetState(user, vib) : ERROR_DEVICE_NOT_CONNECTED;
     if (r != ERROR_SUCCESS && user == 0 && PadPresent()) return ERROR_SUCCESS;
     return r;

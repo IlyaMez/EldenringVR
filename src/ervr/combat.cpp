@@ -37,6 +37,7 @@
 // next swing uses. FP/stamina costs come from SwordArtsParam (the applied gem's arts id via
 // CSGaitem, else the weapon's own). Event ids: DSAnimStudio TAE.Template.ER.xml.
 #include "combat.h"
+#include "body_haptics_er.h"
 #include "config.h"
 #include "equipment_layout.h"
 #include "game_er.h"
@@ -458,12 +459,14 @@ void ArmCastAim(int hand, double now, const char* why) {
 // button was pressed within the last kCastPressMemory s, else the one holding a ranged weapon, else the right.
 // Game thread (TAE hooks).
 constexpr double kCastPressMemory = 3.0;
-void ArmCastAimFromEvent(const char* why) {
-    const double now = NowSec();
+int CastEventHand(double now) {
     int hand = now - g_castPressAt.load() < kCastPressMemory ? g_castPressHand.load() : -1;
     if (hand < 0) hand = g_castWepHand.load();
-    if (hand < 0) hand = HandRight;
-    ArmCastAim(hand, now, why);
+    return hand < 0 ? HandRight : hand;
+}
+void ArmCastAimFromEvent(const char* why) {
+    const double now = NowSec();
+    ArmCastAim(CastEventHand(now), now, why);
 }
 // The cast animation's SetBulletAimAngle (238) clamps the bullet's aim with limits and deadzones sized
 // for a camera a few degrees off the body; EnableTwistModifier (700) does the same for the upper-body
@@ -529,6 +532,13 @@ void __fastcall Hook_ExecEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args
     // Cast aim: a bullet leaving the player (spells without a SetBulletAimAngle, ranged skills, bows) arms the aim.
     if (!g_tripped && Cfg().castAim && SafeRead(&args->eventId, &id, 4) && id == EV_BulletBehavior && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player)
         ArmCastAimFromEvent("BulletBehavior");
+    // Body haptics: the bullet leaves the casting hand - once, on the event's first execution (it runs every
+    // frame of its window), and once per volley.
+    if (!g_tripped && SafeRead(&args->eventId, &id, 4) && id == EV_BulletBehavior && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player &&
+        SafeRead(&args->isFirstExecution, &first, 1) && first) {
+        static double s_lastCast = 0; const double now = NowSec();
+        if (now - s_lastCast > 0.08) { s_lastCast = now; BodyHapticsPost(BodyKind::Cast, CastEventHand(now)); }
+    }
     if (!g_tripped && SafeRead(&args->eventId, &id, 4) && id == EV_AttackBehavior && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player) {
         isPlayer = true;
         SafeRead(&args->args, &a, sizeof(a)); SafeRead(&args->isFirstExecution, &first, 1);
@@ -1033,6 +1043,7 @@ void UpdateTwoHand(double now) {
             LOGI("[combat] arm style %d -> %d (%s)", s_lastStyle, g_armStyle, g_armStyle == 3 ? "right weapon two-handed" : g_armStyle == 2 ? "left weapon two-handed" : g_armStyle == 1 ? "one-handed" : "empty-handed");
             // Felt, not just logged: both hands tick when the grip closes on the weapon, once when it opens.
             g_haptic.fetch_or(TwoHandedStyle(g_armStyle) ? 256u : 512u);
+            BodyHapticsPost(TwoHandedStyle(g_armStyle) ? BodyKind::TwoHand : BodyKind::OneHand);
             // Ours if it followed our chord: then letting go takes it back out, even if the grab had
             // already been released before the game got round to switching (2026-08-25 17:51 log).
             if (g_armStyle == s_chordStyle && now - s_lastReq < 2.0) { std::lock_guard<std::mutex> g(g_mtx); g_two.owned = TwoHandedStyle(g_armStyle); owned = g_two.owned; }
@@ -1503,7 +1514,10 @@ void GameFrameBody(uint8_t* player) {
             // mult); one budget slice per damaged enemy.
             s_spent[h] += s_lastMult[h] * (float)(ef.dmgEvents > 1 ? ef.dmgEvents : 1);
             g_tally.sliceSum += s_lastMult[h]; ++g_tally.sliceN;
-            if (nowS - s_lastHitHaptic[h] > 0.1) { s_lastHitHaptic[h] = nowS; g_haptic.fetch_or(64u << h); }
+            if (nowS - s_lastHitHaptic[h] > 0.1) {
+                s_lastHitHaptic[h] = nowS; g_haptic.fetch_or(64u << h);
+                BodyHapticsPost(BodyKind::Strike, TwoHandedStyle(g_armStyle) ? -1 : h, Clamp(k.qualityCommit, 0.f, 1.f));
+            }
             // The game charged its behavior cost: give it back (only an actual drop - with the
             // watcher signalling the hit there may be nothing to refund).
             if (stamOff && stamAtEntry < g_prevStam) { WriteStamina(player, g_prevStam); stam = g_prevStam; }
@@ -1545,6 +1559,7 @@ void GameFrameBody(uint8_t* player) {
                 std::lock_guard<std::mutex> g(g_mtx);
                 if (g_cmd[h].id == k.id) { g_cmd[h].active = false; g_cmd[h].staminaFail = true; }
                 g_haptic.fetch_or(4u << h);
+                BodyHapticsPost(BodyKind::Winded, h);
                 if (c.combatDebug) LOGD("[combat] %s swing rejected: stamina %d", HandName(h), stam);
                 continue;
             }
@@ -1671,6 +1686,7 @@ void GameFrameBody(uint8_t* player) {
             const bool deflect = blk.into >= c.deflectSpeed && (NowSec() - blk.intoT) < 0.25;
             if (deflect) { WriteStamina(player, g_prevStam); stam = g_prevStam; g_haptic.fetch_or(32u); }
             else g_haptic.fetch_or(16u);
+            BodyHapticsPost(deflect ? BodyKind::Deflect : BodyKind::Block, HandLeft, deflect ? 1.f : Clamp(.4f + (float)drop / 100.f, .4f, 1.f));
             if (c.combatDebug) LOGD("[combat] blocked hit: stamina -%d quality %.2f into %.2f m/s%s", drop, blk.quality, blk.into, deflect ? " -> DEFLECT (refunded)" : "");
         }
     } else RestoreGuard();

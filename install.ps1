@@ -40,6 +40,7 @@ $gameRsIni   = Join-Path $GameDir "ReShade.ini"
 if ($Uninstall) {
     Remove-Item -Force -ErrorAction SilentlyContinue $gameProxy
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $GameDir "ERVR\ERVR.dll")
+    Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $GameDir "ERVR\bhaptics_library.dll")
     if (IsReShade $gameDxgi) {
         Remove-Item -Force $gameDxgi
         if (Test-Path $gameDxgiBak) { Move-Item -Force $gameDxgiBak $gameDxgi; Write-Host "Restored the previous dxgi.dll from dxgi.dll.ervr-bak." }
@@ -96,6 +97,11 @@ if (Test-Path $gameRsIni) { Write-Host "Keeping existing ReShade.ini" } else { C
 New-Item -ItemType Directory -Force (Join-Path $GameDir "ERVR") | Out-Null
 Copy-Item -Force (Freshest "dinput8.dll") $GameDir
 Copy-Item -Force (Freshest "ERVR\ERVR.dll") (Join-Path $GameDir "ERVR")
+# bHaptics' library (body haptics, [bHaptics] in ERVR.ini) and the notices that travel with it.
+foreach ($f in @("bhaptics_library.dll", "LICENSE-bHaptics.txt", "bHaptics-THIRD_PARTY_NOTICES.txt")) {
+    $src = Join-Path $dist "ERVR\$f"
+    if (Test-Path $src) { Copy-Item -Force $src (Join-Path $GameDir "ERVR") }
+}
 $ini = Join-Path $GameDir "ERVR\ERVR.ini"
 if (Test-Path $ini) { Write-Host "Keeping existing ERVR.ini (new defaults in build\dist\ERVR\ERVR.ini)" }
 else { Copy-Item (Join-Path $dist "ERVR\ERVR.ini") $ini }
@@ -106,4 +112,5 @@ Write-Host "  ReShade.ini        (ReShade config)"
 Write-Host "  dinput8.dll        (proxy loader)"
 Write-Host "  ERVR\ERVR.dll      (mod)"
 Write-Host "  ERVR\ERVR.ini      (config, hot-reloads)"
+Write-Host "  ERVR\bhaptics_library.dll (bHaptics SDK, body haptics with the bHaptics Player)"
 Write-Host "Launch the game offline with EAC disabled and put the headset on. Logs: ERVR\ERVR.log and ReShade.log"

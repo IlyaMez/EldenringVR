@@ -48,6 +48,53 @@ foreach(_xr openxr_loader jsoncpp_object jsoncpp_static jsoncpp_lib)
   endif()
 endforeach()
 
+# ---- bHaptics C/C++ SDK (body haptics: src/ervr/bhaptics_output.cpp) ---------------------------
+# bHaptics' own SDK, as Spidy uses it: its header names the functions, and its bhaptics_library.dll,
+# shipped unmodified beside ERVR.dll, is loaded at run time (nothing is linked). Both are bHaptics
+# Redistributables under the bHaptics SDK agreement, not under ERVR's license - see THIRD_PARTY.md.
+# Pinned to v2.7.1, the release Spidy's devkit sessions ran (a moved tag would not change it).
+FetchContent_Declare(tact_cpp2
+  GIT_REPOSITORY https://github.com/bhaptics/tact-cpp2.git
+  GIT_TAG        d016a3f22a4c1e5b6b2192e3ed2224512a045a19   # v2.7.1
+  SOURCE_SUBDIR  headers_only_do_not_build)    # sdk/include + sdk/lib only, no targets
+FetchContent_MakeAvailable(tact_cpp2)
+set(BHAPTICS_SDK "${tact_cpp2_SOURCE_DIR}/sdk")
+set(BHAPTICS_LIBRARY "${BHAPTICS_SDK}/lib/x64/bhaptics_library.dll")
+file(SHA256 "${BHAPTICS_LIBRARY}" _bhaptics_sha)
+if(NOT _bhaptics_sha STREQUAL "399992988dc899173e921be23409bed6dc8e7e0cbe78f505452f311fead06b26")
+  message(FATAL_ERROR "bhaptics_library.dll differs from the pinned SDK 2.7.1 library (${_bhaptics_sha})")
+endif()
+# The Developer Portal app ERVR plays as (bhaptics_output.h): from the environment (the release workflow's
+# repository secrets), else from bhaptics-app.local beside this file (git-ignored; app_id=... and
+# api_key=... lines). A build without one loads the library and plays nothing.
+set(ERVR_BHAPTICS_APP_ID "$ENV{ERVR_BHAPTICS_APP_ID}")
+set(ERVR_BHAPTICS_API_KEY "$ENV{ERVR_BHAPTICS_API_KEY}")
+set(_bhaptics_app "${CMAKE_SOURCE_DIR}/bhaptics-app.local")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_bhaptics_app}")
+if(EXISTS "${_bhaptics_app}" AND (NOT ERVR_BHAPTICS_APP_ID OR NOT ERVR_BHAPTICS_API_KEY))
+  file(STRINGS "${_bhaptics_app}" _bhaptics_lines)
+  foreach(_line IN LISTS _bhaptics_lines)
+    if(_line MATCHES "^[ \t]*app_id[ \t]*=[ \t]*([^ \t]+)")
+      set(ERVR_BHAPTICS_APP_ID "${CMAKE_MATCH_1}")
+    elseif(_line MATCHES "^[ \t]*api_key[ \t]*=[ \t]*([^ \t]+)")
+      set(ERVR_BHAPTICS_API_KEY "${CMAKE_MATCH_1}")
+    endif()
+  endforeach()
+endif()
+foreach(_value IN ITEMS "${ERVR_BHAPTICS_APP_ID}" "${ERVR_BHAPTICS_API_KEY}")
+  if(NOT _value MATCHES "^[A-Za-z0-9_-]*$")
+    message(FATAL_ERROR "A bHaptics App ID or API key has more than letters, digits, - and _ in it")
+  endif()
+endforeach()
+if(ERVR_BHAPTICS_APP_ID AND ERVR_BHAPTICS_API_KEY)
+  message(STATUS "bHaptics app: ${ERVR_BHAPTICS_APP_ID}")
+else()
+  message(STATUS "No bHaptics app (ERVR_BHAPTICS_APP_ID, ERVR_BHAPTICS_API_KEY, bhaptics-app.local): no body haptics in this build")
+endif()
+set_source_files_properties(src/ervr/bhaptics_output.cpp PROPERTIES
+  INCLUDE_DIRECTORIES "${BHAPTICS_SDK}/include"
+  COMPILE_DEFINITIONS "ERVR_BHAPTICS_APP_ID=\"${ERVR_BHAPTICS_APP_ID}\";ERVR_BHAPTICS_API_KEY=\"${ERVR_BHAPTICS_API_KEY}\"")
+
 # ---- Version resources (file properties show the ERVR version; the packager checks it) ----
 set(ERVR_RC_NAME "ERVR")
 set(ERVR_RC_DESCRIPTION "ERVR - native VR for ELDEN RING (ReShade add-on, OpenXR)")
@@ -88,11 +135,23 @@ add_library(ERVR SHARED
   src/ervr/icon_decode.cpp
   src/ervr/game_archive.cpp
   src/ervr/crashlog.cpp
+  src/ervr/body_haptics.cpp
+  src/ervr/bhaptics_output.cpp
+  src/ervr/body_haptics_er.cpp
   ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
 target_include_directories(ERVR PRIVATE src/ervr ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
 target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi bcrypt)
 target_compile_definitions(ERVR PRIVATE ERVR_VERSION="${PROJECT_VERSION}")
 set_target_properties(ERVR PROPERTIES OUTPUT_NAME "ERVR" PREFIX "")
+
+# ---- ervr_haptics_test.exe: the body haptics without the game ----------------------------------
+# Whether the bHaptics Player and the devices are there, which motor is where, and every pattern the
+# game plays, through the game's own path (BodyMixer, BhapticsOutput). The SDK's library goes beside it.
+add_executable(ervr_haptics_test tools/haptics_test.cpp src/ervr/body_haptics.cpp src/ervr/bhaptics_output.cpp)
+target_include_directories(ervr_haptics_test PRIVATE src/ervr)
+add_custom_command(TARGET ervr_haptics_test POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${BHAPTICS_LIBRARY}" "$<TARGET_FILE_DIR:ervr_haptics_test>"
+  VERBATIM)
 
 # ---- xrprobe.exe: standalone OpenXR/D3D12 diagnostic -------------------------
 add_executable(xrprobe tools/xrprobe.cpp)
@@ -144,13 +203,14 @@ endif()
 option(ERVR_BUILD_REGRESSION_TESTS "Build camera, pose, input, and action-queue regression tests" OFF)
 if(ERVR_BUILD_REGRESSION_TESTS)
   enable_testing()
-  foreach(_test head_anchor action_queue pose_frame two_hand_aim two_hand_grip weapon_motion weapon_contact body_pose virtual_pad movement_facing ride_state mounted_rider game_version game_res icon_decode weapon_wheel)
+  foreach(_test head_anchor action_queue pose_frame two_hand_aim two_hand_grip weapon_motion weapon_contact body_pose virtual_pad movement_facing ride_state mounted_rider game_version game_res icon_decode weapon_wheel body_haptics hud_target)
     add_executable(test_${_test} tools/test_${_test}.cpp)
     target_include_directories(test_${_test} PRIVATE src/ervr)
     add_test(NAME ${_test} COMMAND test_${_test})
   endforeach()
   target_sources(test_virtual_pad PRIVATE src/ervr/virtual_pad.cpp src/ervr/gestures.cpp src/ervr/config.cpp)
   target_sources(test_icon_decode PRIVATE src/ervr/icon_decode.cpp)
+  target_sources(test_body_haptics PRIVATE src/ervr/body_haptics.cpp)
   # The launcher's ERVR.ini edits, log reading and Steam parsing.
   add_executable(test_launcher_text tools/test_launcher_text.cpp)
   target_include_directories(test_launcher_text PRIVATE src/launcher src/ervr)
@@ -183,6 +243,11 @@ add_custom_target(dist ALL
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/third_party/reshade/ReShade64.dll ${DIST_DIR}/dxgi.dll
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/third_party/reshade/ReShade.ini   ${DIST_DIR}/ReShade.ini
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/third_party/reshade/LICENSE.md    ${DIST_DIR}/LICENSE-ReShade.txt
+  # bHaptics' SDK library (unmodified, a bHaptics Redistributable) beside ERVR.dll, with the notices the
+  # SDK agreement says travel with it.
+  COMMAND ${CMAKE_COMMAND} -E copy ${BHAPTICS_LIBRARY}                     ${DIST_DIR}/ERVR/bhaptics_library.dll
+  COMMAND ${CMAKE_COMMAND} -E copy ${tact_cpp2_SOURCE_DIR}/LICENSE          ${DIST_DIR}/ERVR/LICENSE-bHaptics.txt
+  COMMAND ${CMAKE_COMMAND} -E copy ${BHAPTICS_SDK}/THIRD_PARTY_NOTICES.txt ${DIST_DIR}/ERVR/bHaptics-THIRD_PARTY_NOTICES.txt
   DEPENDS ERVR dinput8_proxy
   COMMENT "Assembling redistributable in ${DIST_DIR}")
 if(ERVR_BUILD_LAUNCHER)

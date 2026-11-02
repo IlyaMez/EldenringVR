@@ -190,6 +190,11 @@ void Config::Load(const std::wstring& path) {
 
     rumbleToControllers = GetB(ini, L"Haptics", L"RumbleToControllers", rumbleToControllers);
     rumbleScale = GetF(ini, L"Haptics", L"RumbleScale", rumbleScale);
+    bhapticsLevel    = GetI(ini, L"bHaptics", L"Level", bhapticsLevel);
+    bhapticsCombat   = GetB(ini, L"bHaptics", L"Combat", bhapticsCombat);
+    bhapticsDamage   = GetB(ini, L"bHaptics", L"Damage", bhapticsDamage);
+    bhapticsMovement = GetB(ini, L"bHaptics", L"Movement", bhapticsMovement);
+    bhapticsRumble   = GetB(ini, L"bHaptics", L"Rumble", bhapticsRumble);
 
     combatEnabled = GetB(ini, L"Combat", L"Enabled", combatEnabled);
     combatMode = GetS(ini, L"Combat", L"Mode", combatMode);
