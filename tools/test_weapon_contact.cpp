@@ -49,5 +49,12 @@ int main() {
     Check(contact.active && !contact.first, "a continuing contact must retain its identity across frames");
     contact.End();
     Check(!contact.active, "a delivered contact can end immediately");
+    const Vec3 feet{2.f, 0.f, 0.f}, top{2.f, 1.7f, 0.f};
+    Check(std::fabs(SegmentDistance({0, 1, -1}, {0, 1, 1}, feet, top) - 2.f) < 1e-4f,
+          "a blade passing beside a body line is as far as the gap between them");
+    Check(SegmentDistance({1, 1, 0}, {3, 1, 0}, feet, top) < 1e-4f, "a blade through the body line touches it");
+    Check(std::fabs(SegmentDistance({2, 3, 0}, {2, 4, 0}, feet, top) - 1.3f) < 1e-4f,
+          "a blade above the head is measured to the top of the body line");
+    Check(std::fabs(SegmentDistance({0, 0.5f, 0}, {0, 0.5f, 0}, feet, top) - 2.f) < 1e-4f, "a zero-length blade is a point");
     std::puts("Weapon contact regression checks passed.");
 }

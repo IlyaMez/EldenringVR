@@ -123,18 +123,29 @@ own OpenXR session.
   animation until the next stance capture. Menus such as Sites of Grace suspend stance capture until three seconds
   after closing, preserving the saved walking pose through sitting and stand-up. The VR body and its head anchor
   keep using that pose throughout. `PoseMode=game` is the old layered behaviour (animations play, IK fights them).
-* **Torrent**: `PoseMode=vr` captures a separate seated pose after mounting. The rider and camera share a frame
-  anchored to Torrent's physics position and yaw; late rider animation is compensated in the rendered skeleton
-  so gallop bob and sway do not pull the body away from the view. Controller arm IK and physical leaning remain
-  active, and Torrent's own animation is unchanged. Mount/dismount transitions and `PoseMode=game` use the live
-  rider pose. Standing eye height is not added above the saddle. The walking template is preserved and restored
-  after dismounting; loading a save on Torrent never captures the seated pose as a walking stance. Spine twist,
-  player facing pins and direct locomotion stand down throughout the ride.
-  Right-stick turns rotate Torrent and the seated rider together with the view, once per simulation frame;
-  physical head turns remain free look. The active horse's draw visibility and opacity are requested separately
-  from `NearDither`; logs also report model position, scale and alpha for investigating missing geometry.
-  Enabled flags alone do not prove that the mesh or shadow was rendered. Horse writes require a validated
-  current rider/horse pair and stand down during summon/dismount animations and mount death.
+* **Torrent** (`mounted_rider.h`): `FindMountedTorrent` resolves the horse by the first identity that holds - the
+  rider's pair handle (`CSRideNode` counter party), Torrent's own pair link back to the rider, or the last mount
+  being ridden - because the all-links-at-once resolver found nothing on 1.17.2. "Seated" is the riding node
+  state (5), or the mounted flag outside the mount/dismount states (3/7). A miss logs everything it read.
+  `PoseMode=vr` takes a seated pose from the rider's own seat once it holds still (`SeatSettle`, judged upright
+  against the reference pose's head-over-pelvis height) and keeps it across reloads of the same character. The
+  seated body lives in the rider's own model matrix, upright about the pelvis (`UprightSeatRoot`), so camera and
+  body share the game's placement on the saddle; the camera rides the seated head (never the gallop/jump
+  animation's), low-passed in Torrent's physics frame (`RideCameraStabilizer`) and advanced only by the frame's
+  final camera write (the model-pos post). Full-frame pass 2 re-places the rider on the horse at dt 0, so the
+  second eye solves in the pass-1 placement and rebases into the pass-2 matrix, predicted from the last frame
+  before that pass's rebuild (`RiderPassHold`). Controller arm IK and physical leaning remain active, and Torrent's
+  own animation is unchanged. Mount/dismount transitions and `PoseMode=game` use the live rider pose. Standing eye
+  height is not added above the saddle. The walking template is preserved and restored after dismounting; loading
+  a save on Torrent never captures the seated pose as a walking stance. Spine twist, player facing pins and direct
+  locomotion stand down throughout the ride.
+  Right-stick turns and, with `BodyYaw=head`, physical turns (`RideHeadFollow`, `RideTurnsWithHead`) rotate Torrent
+  and the seated rider together, once per simulation frame. The active horse's draw visibility and opacity are
+  requested separately from `NearDither`; logs also report model position, scale and alpha for investigating
+  missing geometry. Enabled flags alone do not prove that the mesh or shadow was rendered. Horse writes require a
+  validated current rider/horse pair and stand down during summon/dismount animations and mount death. Combat
+  sends no two-hand chords or learn presses from the saddle (their attack button is a mounted attack there);
+  `[Combat] RideAttacks=buttons` turns a swing into the game's own mounted attack.
 * **Body facing** (`FaceCamera` + `FaceCameraMode`): keeps movement in strafe mode so the arms can always reach.
   `strafe` (default with `PoseMode=vr`) only sets the ChrCtrl "strafing" flag and leaves the game's lock-on state
   alone. The old way (`lock`) forced `Chr_IsLockedOn` onto a fake far-away point every frame, which engages the

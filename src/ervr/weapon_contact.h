@@ -1,6 +1,29 @@
 #pragma once
+#include "vrmath.h"
 
 namespace ervr {
+
+// Closest distance between segments p1-q1 and p2-q2 (Ericson, Real-Time Collision Detection 5.1.9): how near a
+// blade came to a character's body line.
+inline float SegmentDistance(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec3& q2) {
+    const Vec3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+    const float a = d1.Dot(d1), e = d2.Dot(d2), f = d2.Dot(r);
+    float s = 0.f, t = 0.f;
+    if (a <= 1e-8f && e <= 1e-8f) return r.Length();
+    if (a <= 1e-8f) t = Clamp(f / e, 0.f, 1.f);
+    else {
+        const float c = d1.Dot(r);
+        if (e <= 1e-8f) s = Clamp(-c / a, 0.f, 1.f);
+        else {
+            const float b = d1.Dot(d2), denom = a * e - b * b;
+            s = denom > 1e-8f ? Clamp((b * f - c * e) / denom, 0.f, 1.f) : 0.f;
+            t = (b * s + f) / e;
+            if (t < 0.f) { t = 0.f; s = Clamp(-c / a, 0.f, 1.f); }
+            else if (t > 1.f) { t = 1.f; s = Clamp((b - c) / a, 0.f, 1.f); }
+        }
+    }
+    return ((p1 + d1 * s) - (p2 + d2 * t)).Length();
+}
 
 struct WeaponContactLifetime {
     bool active = false;

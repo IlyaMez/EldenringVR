@@ -96,6 +96,13 @@ uint8_t* GameERWorldChrMan();
 uint8_t* GameERMainPlayer();
 // The save's PlayerGameData (GameDataMan+0x8), null before one is loaded. SafeRead/SafeWrite only.
 uint8_t* GameERPlayerGameData();
+// On Torrent (mounting, riding or dismounting) with first person running. Any thread.
+bool GameERRiding();
+// The blade the hand's arm was last solved holding, in the world: grip and tip (grip + weapon reach along the
+// controller's blade axis). False when that hand is not tracked or the sample is older than 0.1 s.
+bool GameERBladeWorld(int hand, Vec3* grip, Vec3* tip);
+// A character's rendered position (its ChrCtrl model matrix), for distances to it. Any thread; SafeRead only.
+bool GameERChrPosition(uint8_t* chr, Vec3* out);
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and
@@ -115,6 +122,8 @@ struct MoveBasis {
     bool  headValid = false;
     float viewYaw = 0;       // yaw of the camera matrix the GAME sees - the frame it resolves the move stick in
                              // (camYaw + headYaw with CameraRotation=hmd, camYaw otherwise)
+    bool  rideFreeLook = false;  // on Torrent: Forward=head means the free-look direction, not the head itself
+    float rideForwardYaw = 0;    // that direction (RideFreeLookDeg of glancing around it leaves the horse alone)
 };
 MoveBasis GameERGetMoveBasis();
 }

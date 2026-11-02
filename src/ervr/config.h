@@ -246,6 +246,10 @@ struct Config {
     float bodyFacingOffsetDeg = 0.f;      // manual correction if the rendered body faces the wrong way (180 = flipped)
     float bodyYawFollowSeconds = 0.25f;   // time constant of the body chasing the head yaw (0 = instant)
     float bodyYawDeadzoneDeg = 0.f;       // look this far off before the body starts to follow
+    float rideFreeLookDeg = 45.f;         // on Torrent: look this far either side without steering or turning the horse (-1 = off: the stick follows the head)
+    bool  rideTurnsWithHead = true;       // on Torrent with BodyYaw=head: turning past the free look turns the horse and rider (BodyYawFollowSeconds)
+    float rideCameraSmoothing = 0.15f;    // s: Torrent's gallop bounce smoothed out of the view, the rider carried with it (0 = rigid on the rider)
+    float rideCameraMaxDeviation = 0.10f; // m: the smoothed view (and the rider with it) never sits further than this from the saddle's own motion
     bool  torsoFaceCamera = true;         // twist the Spine bone so the chest faces the body yaw
     bool  bodyFollowsHead = true;         // shift the whole rig so its head sits under your eye: physically stepping/leaning moves the character with you (PoseMode=vr makes this idempotent and feedback-free)
     bool  bodyRotateToHead = true;        // also yaw the whole rendered skeleton to BodyYaw (does not wait for the game to turn the character)
@@ -292,6 +296,7 @@ struct Config {
     int   combatAttackIndexRotate = 0;    // diagnostic: rotate AttackIndex 0..N-1 per swing (0 = off)
     int   combatExtraStamina[3] = {0, 0, 0};   // stamina taken by ERVR per light/heavy/left swing (0 = only the game's own cost)
     bool  combatSuppressAnimAttacks = false;   // swallow AttackBehavior events from animations while physical
+    std::string rideAttacks = "physical"; // on Torrent: physical (the blade strikes, as on foot) | buttons (a swing presses the game's own mounted attack)
     bool  combatDebug = false;
     // Kinetic: strike quality (tip speed vs a reference speed, squared, x arc) scales the attack row's
     // motion values live in the loaded params; stamina is fatigue.

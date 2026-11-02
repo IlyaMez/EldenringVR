@@ -30,6 +30,40 @@ release workflow and published on GitHub Releases and Nexus Mods.
   Regression test `belt` (directions, the chord's timing, the neck and belt geometry, the body yaw, the
   grab, the use verdicts); `virtual_pad` checks that X reaches the game unless the belt took it.
 
+### Torrent
+* On 1.17.2 ERVR never found the horse (the 2026-11-02 ride: no seated pose, no horse turns, no
+  visibility fix, and nothing in the log said so): 1.17.2's Torrent is character 8002, and the resolver
+  only accepted 8000. It now takes the first identity that holds - the rider's pair handle, Torrent's own
+  pair link back to the rider, or the last mount being ridden - and a mounted flag left set while riding
+  no longer hides it. A ride it still cannot resolve logs every value it read
+  (`[ride] ... Torrent was not found`).
+* Free look on Torrent (`RideFreeLookDeg`, 45): looking around within it neither steers the horse nor
+  turns it. With `Forward=head` the move stick used to follow the head 1:1, so every glance steered.
+  Past it, the excess becomes the new forward and turns Torrent and the rider with you.
+* The camera no longer rides the gallop and jump animations' head, which crouched it forward into the
+  rider's body and Torrent's neck. Seated, the rider is a seated pose taken from your own seat the first
+  time it holds still in the saddle (kept for later rides), kept upright about the pelvis whatever
+  Torrent's pitch, arms on the controllers. The camera sits on that pose's head, and Torrent's gallop
+  bounce is smoothed out of the view in the horse's own frame (`RideCameraSmoothing`,
+  `RideCameraMaxDeviation`); the rider moves with the smoothed view, so the horse moves under both and
+  the body cannot rise into the camera.
+* The second eye's pass re-places the rider on the horse (measured 15-35 cm off its camera while
+  galloping and jumping), and both eyes are drawn from the first pass's camera. The second eye now draws
+  the rider where the first eye placed it (keyed on the stereo pair: the game's frame counter advances
+  between the rider's rebuild and the second pass).
+* Turning your body past the free look turns the horse: with `BodyYaw=head`, Torrent and the rider turn
+  with you like the right stick does, at `BodyYawFollowSeconds` (`RideTurnsWithHead`).
+* The enemy watcher no longer counts Torrent as an enemy.
+* Combat from the saddle: the two-hand grab and its learn presses send nothing while mounted (their
+  attack button is a mounted attack there). `[Combat] RideAttacks=buttons` makes a swing press the game's
+  own mounted attack instead of striking with the blade. The `[combat] 5 s` line says how close mounted
+  strikes came to an enemy's body.
+* A `[ride] 5 s` line reports whether the horse was found, which body rides, the view smoothing, the
+  second eye's re-placement and the turns. `[body] rendered head vs camera eye` measures each eye against
+  its own camera.
+* Regression tests `mounted_rider` (the resolver, the seat, the upright frame, the camera smoothing, the
+  physical turns, the second eye), `ride_state` (seated states) and `weapon_contact` (blade distance).
+
 ### Overlays
 * The weapon wheel's drawing and its D3D12 upload moved into `overlay_canvas` / `overlay_layers`,
   shared with the belt: one command list copies every overlay that changed. Item icons are now read at

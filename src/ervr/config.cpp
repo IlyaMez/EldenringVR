@@ -223,6 +223,7 @@ void Config::Load(const std::wstring& path) {
     combatExtraStamina[1] = GetI(ini, L"Combat", L"ExtraStaminaHeavy", combatExtraStamina[1]);
     combatExtraStamina[2] = GetI(ini, L"Combat", L"ExtraStaminaLeft", combatExtraStamina[2]);
     combatSuppressAnimAttacks = GetB(ini, L"Combat", L"SuppressAnimAttacks", combatSuppressAnimAttacks);
+    rideAttacks = GetS(ini, L"Combat", L"RideAttacks", rideAttacks);
     cheatSetAllStats = GetI(ini, L"Cheats", L"SetAllStats", cheatSetAllStats);
     cheatSetLevel = GetI(ini, L"Cheats", L"SetLevel", cheatSetLevel);
     cheatInfiniteStamina = GetB(ini, L"Cheats", L"InfiniteStamina", cheatInfiniteStamina);
@@ -391,6 +392,10 @@ void Config::Load(const std::wstring& path) {
     bodyFacingOffsetDeg = GetF(ini, L"FirstPerson", L"BodyFacingOffsetDeg", bodyFacingOffsetDeg);
     bodyYawFollowSeconds = GetF(ini, L"FirstPerson", L"BodyYawFollowSeconds", bodyYawFollowSeconds);
     bodyYawDeadzoneDeg = GetF(ini, L"FirstPerson", L"BodyYawDeadzoneDeg", bodyYawDeadzoneDeg);
+    rideFreeLookDeg = Clamp(GetF(ini, L"FirstPerson", L"RideFreeLookDeg", rideFreeLookDeg), -1.f, 170.f);
+    rideTurnsWithHead = GetB(ini, L"FirstPerson", L"RideTurnsWithHead", rideTurnsWithHead);
+    rideCameraSmoothing = Clamp(GetF(ini, L"FirstPerson", L"RideCameraSmoothing", rideCameraSmoothing), 0.f, 2.f);
+    rideCameraMaxDeviation = Clamp(GetF(ini, L"FirstPerson", L"RideCameraMaxDeviation", rideCameraMaxDeviation), 0.f, 0.5f);
     torsoFaceCamera = GetB(ini, L"FirstPerson", L"TorsoFaceCamera", torsoFaceCamera);
     bodyFollowsHead = GetB(ini, L"FirstPerson", L"BodyFollowsHead", bodyFollowsHead);
     bodyAnchor = GetS(ini, L"FirstPerson", L"BodyAnchor", bodyAnchor);

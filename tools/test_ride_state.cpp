@@ -46,14 +46,29 @@ int main() {
         m.Put(m.node.data() + 0x50, state);
         Check(m.State().valid && m.State().active && m.State().NativeBody(),
               "mounting, riding and dismounting preserve native rider pose and physics even with cleared flags");
+        Check(m.State().seated == (state == 5), "only the riding state is seated, never the mount or dismount animation");
     }
+    m.Put(m.node.data() + 0x50, uint32_t{5});
+    m.ride[0x162] = 1;
+    Check(m.State().active && m.State().seated, "a mounting flag left set while riding does not unseat the rider (1.17.2)");
+    m.Put(m.node.data() + 0x50, uint32_t{3});
+    Check(m.State().active && !m.State().seated, "flags set during the summon animation are not a seat");
+    m.ride[0x162] = 0;
+    m.ride[0x163] = 1;
+    m.Put(m.node.data() + 0x50, uint32_t{6});
+    Check(m.State().active && m.State().seated, "the mounted flag seats a riding state numbered differently");
+    m.Put(m.node.data() + 0x50, uint32_t{7});
+    Check(m.State().active && !m.State().seated, "the mounted flag during the dismount animation is not a seat");
     m.Put(m.node.data() + 0x50, uint32_t{0});
+    Check(m.State().active && m.State().seated, "an idle node with the mounted flag (loading on Torrent) is a seat");
+    m.ride[0x163] = 0;
     Check(!m.State().NativeBody(), "finishing dismount restores the walking policy");
     m.Put(m.ride.data() + 0x10, static_cast<uint8_t*>(nullptr));
     for (int flag : {0x162, 0x163}) {
         m.ride[flag] = 1;
         Check(m.State().valid && m.State().active,
               "live mount flags work without a node or last_mounted pointer (loading already on Torrent)");
+        Check(m.State().seated == (flag == 0x163), "without a node the mounted flag alone means seated");
         m.ride[flag] = 0;
     }
     m.Put(m.ride.data() + 0x18, m.player.data());

@@ -74,7 +74,7 @@ your hands, and melee where the swing you make is the attack. One zip, one launc
   to use it; let go and it goes back.
 - **The HUD on its own panel.** Health, stamina and the menus float on a panel at headset resolution, where
   you want it, sharper than in the game's frame.
-- **Ride Torrent.** The rider and the view move with the horse, and the right stick turns both.
+- **Ride Torrent.** The rider and the view move with the horse, and the right stick or turning your body turns both.
 - **Seamless Co-op.** Play with friends on flat screens: they need neither ERVR nor a headset.
 - **Body haptics.** A bHaptics vest, sleeves and visor play blows on the side they come from, your hits in
   your arms, and the heart at low HP.

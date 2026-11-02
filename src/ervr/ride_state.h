@@ -6,7 +6,8 @@ namespace ervr {
 
 struct RideState {
     bool valid = false;
-    bool active = false;
+    bool active = false;   // mounting, riding or dismounting
+    bool seated = false;   // riding: the mount animation is over and the dismount has not begun
 
     // If the mount cannot be read, leave the rider's pose and physics to the game.
     bool NativeBody() const { return !valid || active; }
@@ -25,15 +26,19 @@ RideState ReadRideState(const uint8_t* player, Read read) {
         !read(ride + 0x08, &owner, sizeof(owner)) || owner != player) return {};
     uint8_t flags[2]{};   // is_mounting @0x162, is_mounted @0x163
     if (!read(ride + 0x162, flags, sizeof(flags)) || flags[0] > 1 || flags[1] > 1) return {};
-    if (flags[0] || flags[1]) return {true, true};
-    if (!read(ride + 0x10, &node, sizeof(node))) return {};
-    if (!node) return {true, false};
+    // Seated: the node's riding state (5), or the mounted flag outside the mount/dismount states (3/7) - no node,
+    // a node left idle after loading on Torrent, or a riding state a later patch numbers differently.
     uint32_t state = 0;
-    if (!read(node + 0x10, &owner, sizeof(owner)) || owner != player ||
-        !read(node + 0x50, &state, sizeof(state))) return {};
+    const bool haveNode = read(ride + 0x10, &node, sizeof(node)) && node &&
+        read(node + 0x10, &owner, sizeof(owner)) && owner == player && read(node + 0x50, &state, sizeof(state));
+    const bool seated = (haveNode && state == 5) || (flags[1] == 1 && !(haveNode && (state == 3 || state == 7)));
+    if (flags[0] || flags[1]) return {true, true, seated};
+    if (!read(ride + 0x10, &node, sizeof(node))) return {};
+    if (!node) return {true, false, false};
+    if (!haveNode) return {};
     // Known node states: 0 idle, 3 mounting, 5 riding, 7 dismounting.
     // Preserve native animation for any other active transition as well.
-    return {true, state != 0};
+    return {true, state != 0, seated};
 }
 
 } // namespace ervr

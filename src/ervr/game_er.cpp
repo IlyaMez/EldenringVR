@@ -248,7 +248,10 @@ volatile LONG g_finalYawForeign = 0, g_finalPosForeign = 0;
 // Rig-vs-camera skew probe: distance between the character root the camera write was built on and the model
 // matrix the rig actually renders with, same frame. Nonzero while moving = our lag; zero = the lag is R.E.A.L.'s.
 Vec3 g_lastCamRoot{}; float g_skewMax = 0.f;
-float g_bodyCamLat = 0.f, g_bodyCamFwd = 0.f, g_bodyCamUp = 0.f;   // rendered head vs written eye, view axes
+// Rendered head vs that pass's own eye, view axes, [0] = first eye (pass 1), [1] = second eye (pass 2). The two
+// used to share one maximum against the FIRST eye, which is how the second eye's rider - re-placed by its own
+// pass, up to 0.4 m off on 2026-11-02 - finally showed; now each eye is measured against its own camera.
+float g_bodyCamLat[2] = {}, g_bodyCamFwd[2] = {}, g_bodyCamUp[2] = {};
 float g_camHMin = 1e9f, g_camHMax = -1e9f;   // camera anchor height above the feet (the template's part of eye height)
 volatile LONGLONG g_hkTicks = 0, g_camTicks = 0;
 uint32_t g_lastArmFrame = 0xFFFFFFFF;
@@ -476,10 +479,53 @@ void ApplyHeadVisibility(uint8_t* player, bool hideHead, bool hideSheathed) {
 }
 
 MountedTurnQueue g_mountedTurns;
-uint8_t* CurrentTorrent(uint8_t* player) {
-    if (!g_status.versionOk || !player) return nullptr;
+// Once per simulation frame: every frame build and every character's model update asks while riding (~900 calls/s),
+// and a summon-set scan per call adds up. Both passes of a frame share the answer.
+TorrentLookup CurrentTorrentLookup(uint8_t* player) {
+    if (!g_status.versionOk || !player) return {};
+    static std::mutex s_mtx; static TorrentLookup s_last; static uint8_t* s_player = nullptr; static uint32_t s_frame = ~0u;
+    const uint32_t frame = g_frame;
+    {
+        std::lock_guard<std::mutex> g(s_mtx);
+        if (s_player == player && s_frame == frame) return s_last;
+    }
     uint8_t* world = g_worldChrManPtr ? Deref(g_worldChrManPtr) : nullptr;
-    return MountedTorrent(player, world, SafeRead);
+    const TorrentLookup l = FindMountedTorrent(player, world, SafeRead);
+    std::lock_guard<std::mutex> g(s_mtx);
+    s_last = l; s_player = player; s_frame = frame;
+    return l;
+}
+uint8_t* CurrentTorrent(uint8_t* player) { return CurrentTorrentLookup(player).mount; }
+
+// Heading of a transform (physics/model forward is local -Z) as a pure yaw, without YawOnlyRoot's lock-on note.
+Quat HeadingQ(const Quat& q) {
+    const Vec3 f = q.Rotate({0.f, 0.f, -1.f});
+    if (f.x * f.x + f.z * f.z < 1e-6f) return q;
+    return Quat::YawQ(std::atan2(f.x, f.z) + 3.14159265f);
+}
+
+// One line per ride that sits on a horse ERVR cannot find: everything the resolver read, so the next log
+// names the field that broke (the 2026-11-02 ride on 1.17.2 resolved nothing and said nothing).
+void LogTorrentLookup(bool active, const TorrentLookup& l) {
+    static double s_since = 0; static bool s_logged = false, s_found = false;
+    const double now = NowSec();
+    if (!active) { s_since = 0; s_logged = false; s_found = false; return; }
+    if (l.mount) {
+        if (!s_found) LOGI("[ride] Torrent %p found by its %s", l.mount, l.how);
+        s_found = true; s_since = 0; return;
+    }
+    if (s_since <= 0) s_since = now;
+    // Seated it should resolve at once; the summon and dismount animations take a second or two, so a ride state
+    // that never reads as seated is reported after 4 s (a riding state numbered differently would look like that).
+    if (s_logged || now - s_since < (l.seated ? 1.5 : 4.0)) return;
+    s_logged = true;
+    LOGW("[ride] %s, but Torrent was not found: node %d state %u, flags mounting %u mounted %u, rider %llx paired with %llx | "
+         "last mount %p npc %d handle %llx ridden %u paired with %llx | %u summon-set entries scanned. Horse turns, Torrent's "
+         "visibility and the camera smoothing need the horse; %s",
+         l.seated ? "riding" : "4 s in the ride state without a riding state", (int)l.node, l.state, l.mounting, l.mounted,
+         (unsigned long long)l.rider, (unsigned long long)l.peer, l.lastMounted, l.lastNpc, (unsigned long long)l.lastHandle,
+         l.lastRidden, (unsigned long long)l.lastPeer, l.scanned,
+         l.seated ? "the seated pose still applies." : "the seated pose waits for a riding state too.");
 }
 
 bool LivingMount(uint8_t* mount) {
@@ -531,8 +577,21 @@ void ApplyTorrentVisibility(uint8_t* mount) {
     }
 }
 
+// The 5 s "[ride]" summary (UpdateChrModelPosBody): what turned the pair, how far the view sat off the bouncing
+// rider, and how far the second eye's pass re-placed the rider and the horse.
+struct RideStats {
+    std::mutex mtx;
+    float stick = 0.f, physical = 0.f, applied = 0.f;   // radians, summed magnitudes
+    float camDev = 0.f;                                  // m, smoothed view vs the rider's anchor (max)
+    Vec3 riderShift{};                                   // m, pass 2 - pass 1, rider frame (per-axis max magnitude, signed)
+    float torrentShift = 0.f;                            // m, pass 2 - pass 1 (max)
+    int pass2 = 0;                                       // pass-2 rebuilds of the rider measured
+    void Turn(float& sum, float radians) { std::lock_guard<std::mutex> g(mtx); sum += std::fabs(radians); }
+} g_rideStats;
+
 void ApplyMountedTurn(uint8_t* player, uint8_t* mount, float radians) {
     if (!mount || radians == 0.f || !std::isfinite(radians) || WorldDyingNow() || !LivingMount(mount)) return;
+    g_rideStats.Turn(g_rideStats.applied, radians);
     uint8_t* horsePh = Physics(mount); uint8_t* riderPh = Physics(player);
     if (!horsePh || !riderPh || Deref(horsePh + 8) != mount || Deref(riderPh + 8) != player) return;
     float horse[12], rider[16]; // current/target quaternions, position; rider also previous position
@@ -570,7 +629,7 @@ struct Skeleton {
     std::vector<HkQsTransform> refPoseCopy;
     int L_ua = -1, L_fa = -1, L_hand = -1, R_ua = -1, R_fa = -1, R_hand = -1;
     Vec3 handFwd[2], handThumb[2]; bool handAxesOk[2]{};   // hand-bone local frame, from ref pose finger roots
-    int torso = -1, L_clav = -1, R_clav = -1, head = -1;
+    int torso = -1, L_clav = -1, R_clav = -1, head = -1, pelvis = -1;
     bool warned = false;
 
     HkQsTransform* LivePose() const {
@@ -589,8 +648,30 @@ Skeleton g_skel;
 // still for a second, so idle/crouch stances come through as discrete poses.
 // Grace/menu poses must never replace this walking template.
 std::vector<HkQsTransform> g_poseTemplate;
-std::vector<HkQsTransform> g_seatedTemplate;
+// Seated on Torrent (see MountedSeatFrame): the rider's own settled seat, its head and pelvis in the rider's model
+// frame (camera anchor / upright pivot), the settle candidate, and whose seat it is (kept across reloads like the
+// standing template). RiderPassHold keeps the second eye's rider where the first eye drew it.
+std::vector<HkQsTransform> g_seatedTemplate, g_seatCand;
 MountedSeatFrame g_seatedFrame;
+SeatSettle g_seatSettle;
+Vec3 g_seatHead{}, g_seatPelvis{};
+std::wstring g_seatOwner;
+std::mutex g_riderHoldMtx;   // pass 1 writes it from the rider's model-pos hook, pass 2 reads it from every write point
+RiderPassHold g_riderHold;
+// Stereo pairs, advanced between the two passes (GameERApplySecondEyeCamera): pass 1 of pair k runs while it reads
+// k, pass 2 while it reads k+1. g_frame cannot key the hold - it advances at the camera step, AFTER the rider's
+// pass-1 rebuild (2026-11-02 20:12 log: not one pass-2 frame matched its pass-1 snapshot).
+std::atomic<uint32_t> g_stereoPair{0};
+uint32_t RiderHoldPair() { const uint32_t k = g_stereoPair.load(); return FramePumpCurrentPass() == 2 ? k - 1 : k; }
+std::mutex g_rideStabMtx;
+RideCameraStabilizer g_rideStab;
+std::mutex g_rideFollowMtx;
+RideHeadFollow g_rideFollow;
+bool SeatTemplateReady() { return g_skel.boneCount > 0 && (int)g_seatedTemplate.size() == g_skel.boneCount; }
+// The blade each hand's arm was last solved holding (world, pass 1): GameERBladeWorld.
+struct BladeSample { bool valid = false; Vec3 grip{}, tip{}; double stamp = 0; };
+std::mutex g_bladeMtx;
+BladeSample g_blade[2];
 BodyPoseCaptureGuard g_poseCaptureGuard;
 Vec3 g_statPos{}; double g_statSince = 0; double g_templLastCapture = 0;
 // Stance re-capture settle guard: candidate snapshot of a pose that differs from the template, only promoted to
@@ -686,7 +767,7 @@ bool BuildSkeleton(uint8_t* chr) {
     const Config& c = Cfg();
     s.L_ua = s.Find(c.boneLUpperArm); s.L_fa = s.Find(c.boneLForearm); s.L_hand = s.Find(c.boneLHand);
     s.R_ua = s.Find(c.boneRUpperArm); s.R_fa = s.Find(c.boneRForearm); s.R_hand = s.Find(c.boneRHand);
-    s.torso = s.Find(c.boneTorso); s.head = s.Find(c.boneHead);
+    s.torso = s.Find(c.boneTorso); s.head = s.Find(c.boneHead); s.pelvis = s.Find("Pelvis");
     s.L_clav = s.Find("L_Clavicle"); s.R_clav = s.Find("R_Clavicle");
     if (s.L_clav < 0) s.L_clav = s.L_ua; if (s.R_clav < 0) s.R_clav = s.R_ua;
     // Anatomical hand axes from the reference pose: finger roots = forward, thumb root = thumb side.
@@ -715,13 +796,15 @@ bool BuildSkeleton(uint8_t* chr) {
     // a fresh snapshot here caught whatever the reload showed - the respawn kneel, a roll, the first steps of a
     // run - and the camera rides that template's head ("dropped to the ground after dying", 2026-11-01).
     const std::wstring owner = PlayerCharacterName();
-    const bool carry = !g_standTemplate.empty() && !owner.empty() && owner == g_templOwner &&
-        g_skel.boneCount == s.boneCount && g_skel.names == s.names && g_skel.parents == s.parents;
+    const bool sameRig = !owner.empty() && g_skel.boneCount == s.boneCount && g_skel.names == s.names && g_skel.parents == s.parents;
+    const bool carry = !g_standTemplate.empty() && owner == g_templOwner && sameRig;
+    const bool carrySeat = !g_seatedTemplate.empty() && owner == g_seatOwner && sameRig;   // the seat waits for an idle moment on the horse
     g_skel = std::move(s);
     g_rootShiftBase.clear(); g_rootShiftWritten.clear(); g_rootShiftHas.clear(); g_rootRotBase.clear(); g_rootRotWritten.clear();
     ResetRecenter();   // new character / area load: start centred on wherever you are standing now
     g_headAnchor.Reset();
-    g_seatedFrame = {}; g_seatedTemplate.clear();
+    g_seatedFrame = {}; g_seatSettle.Reset(); g_seatCand.clear(); g_riderHold.Reset();
+    if (!carrySeat) g_seatedTemplate.clear();
     g_poseTemplate.clear(); g_statPos = {}; g_statSince = 0; g_templLastCapture = 0;
     g_templCand.clear(); g_templCandAt = 0; g_templCheckAt = 0;
     posescan::Disarm("skeleton rebuild");   // the watched buffer may be gone
@@ -985,6 +1068,10 @@ struct FrameInfo {
     bool valid = false;
     bool lockedOn = false; // a real enemy is locked on
     bool riding = false;  // mounting/riding/dismounting: native seated body and physics
+    bool seated = false;  // riding proper: the mount animation is over, the dismount has not begun
+    bool seatPose = false;// seated and the rider is the captured seated pose (PoseMode=vr), upright in its own frame
+    bool latePost = false;// built in the player's model-pos POST of pass 1: the frame's final camera write
+    Vec3 rideCamShift{};  // seated: how far the smoothed view sits off the rider's own anchor - the body goes with it
     bool capturePose = false; // menu/exit poses cannot replace the template; this never gates rendering
     uint8_t* mount = nullptr; // validated, fully mounted Torrent (null during transitions)
     Vec3 root; Quat rootQ; // character root the whole frame is built on (model matrix, physics fallback)
@@ -1137,6 +1224,7 @@ float GameCamYaw() {
 // ERVR now owns rendering, so it is unconditionally the sole owner of where the eye sits.
 // (This used to negotiate with R.E.A.L. over who applied the HMD offset.)
 
+void StabilizeRideCamera(FrameInfo& f);
 void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
     const Config& c = Cfg();
     const Vec3 root = f.root; const Quat rootQ = f.rootQ;
@@ -1149,12 +1237,10 @@ void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
     if (f.riding || c.fpCameraAnchor == "head") {
         Vec3 hb;
         // PoseMode=vr: measure on the template (see HeadBoneTemplateWorld) so the anchor is independent of the
-        // shift we are about to apply; otherwise fall back to the live pose.
+        // shift we are about to apply; otherwise fall back to the live pose. Seated on Torrent: the seated
+        // template's head in the upright seat frame - never the gallop or jump animation's head.
         bool haveHb = false;
-        if (c.fpPoseMode == "vr" && g_seatedFrame.ready && g_seatedFrame.Matches(player, f.mount)) {
-            hb = root + rootQ.Rotate(g_seatedFrame.headLocal);
-            haveHb = true;
-        }
+        if (f.seatPose) { hb = root + rootQ.Rotate(g_seatHead); haveHb = true; }
         if (!f.riding && c.fpPoseMode == "vr" && SkeletonCurrent(player))
             haveHb = HeadBoneTemplateWorld(root, rootQ, g_bodyYaw.load(), hb);
         const bool templatePose = haveHb;
@@ -1168,33 +1254,86 @@ void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
             f.anchor = g_headAnchor.Update(root, hb, c.fpEyeHeight, c.fpCameraBob,
                                           c.fpCameraAnchorSmoothing, templatePose, NowSec(), g_frame, f.riding);
         }
+        if (f.riding) StabilizeRideCamera(f);
     }
 }
 
-bool BuildFrame(uint8_t* player, FrameInfo& f) {
+// Gallop bounce out of the view (RideCameraStabilizer): the anchor is smoothed in Torrent's own frame. Only the
+// frame's final camera write moves the smoothing - the model-pos post with CameraAfterModelPos - so the earlier
+// writes of a frame, built on last frame's rider matrix, cannot drag it. The seated body is moved by the same
+// offset (rideCamShift): a view smoothed over a body that kept the saddle's bounce let the body rise into it on
+// every jump and stride ("horse animations affect the body but not the camera", 2026-11-02). Now the horse
+// moves under a rider and view that move together.
+void StabilizeRideCamera(FrameInfo& f) {
+    const Config& c = Cfg();
+    Vec3 mp; Quat mq;
+    f.rideCamShift = {};
+    std::lock_guard<std::mutex> g(g_rideStabMtx);
+    if (!f.mount || c.rideCameraSmoothing <= 0.f || !PlayerRoot(f.mount, mp, mq)) { g_rideStab.Reset(); return; }
+    const bool advance = FramePumpCurrentPass() != 2 && (f.latePost || !c.fpCameraAfterModelPos);
+    const Vec3 raw = f.anchor;
+    f.anchor = g_rideStab.Apply(f.anchor, mp, HeadingQ(mq), NowSec(), advance, c.rideCameraSmoothing, c.rideCameraMaxDeviation);
+    if (f.seatPose) f.rideCamShift = f.anchor - raw;
+    if (advance) { std::lock_guard<std::mutex> s(g_rideStats.mtx); g_rideStats.camDev = std::max(g_rideStats.camDev, g_rideStab.deviation); }
+}
+
+// Free look on horseback (RideHeadFollow): within RideFreeLookDeg of the way you face, looking around neither steers
+// Torrent nor turns it. Beyond it the excess moves that forward direction - the move stick steers along it
+// (GameERGetMoveBasis), not along the head - and with BodyYaw=head turns Torrent and the rider like the right stick
+// does, at BodyYawFollowSeconds. With Forward=head the stick used to follow the head 1:1, so every glance steered
+// the horse (2026-11-02). Locked on, the game aims; the second eye never turns anything.
+std::atomic<float> g_rideForward{0.f};      // the followed head yaw: forward on the horse, head-yaw convention
+std::atomic<bool>  g_rideForwardValid{false};
+void RideFollowHead(const FrameInfo& f, bool headValid) {
+    const Config& c = Cfg();
+    std::lock_guard<std::mutex> g(g_rideFollowMtx);
+    if (!headValid || !f.riding || f.lockedOn || c.rideFreeLookDeg < 0.f) {
+        g_rideFollow.Reset(); g_rideForwardValid.store(false);
+        return;
+    }
+    if (FramePumpCurrentPass() == 2) return;
+    const float turn = g_rideFollow.Step(f.headYaw, NowSec(), g_frame, Deg2Rad(c.rideFreeLookDeg), c.bodyYawFollowSeconds);
+    g_rideForward.store(g_rideFollow.followed); g_rideForwardValid.store(g_rideFollow.init);
+    if (turn == 0.f || !f.mount || !f.seated || !c.rideTurnsWithHead || c.bodyYawSource != "head") return;
+    g_mountedTurns.Add(turn);
+    g_rideStats.Turn(g_rideStats.physical, turn);
+}
+
+bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false) {
     const Config& c = Cfg();
     Vec3 root; Quat rootQ;
+    const int pass = FramePumpCurrentPass();
     const RideState ride = ReadRideState(player, SafeRead);
     f.riding = ride.NativeBody();
+    f.seated = ride.valid && ride.seated;
+    f.latePost = latePost && pass != 2;
     const uintptr_t poseOwner = reinterpret_cast<uintptr_t>(player);
-    g_poseCaptureGuard.Update(poseOwner, CombatMenuActive(), NowSec(), FramePumpCurrentPass() != 2);
+    g_poseCaptureGuard.Update(poseOwner, CombatMenuActive(), NowSec(), pass != 2);
     f.capturePose = !f.riding && g_poseCaptureGuard.CanCapture(poseOwner);
-    f.mount = ride.valid && ride.active ? CurrentTorrent(player) : nullptr;
-    g_seatedFrame.Observe(player, f.mount, NowSec(), FramePumpCurrentPass() != 2);
-    if (FramePumpCurrentPass() != 2) g_mountedTurns.SetMount(f.mount);
+    TorrentLookup torrent;
+    if (ride.valid && ride.active) torrent = CurrentTorrentLookup(player);
+    f.mount = torrent.mount;
+    if (pass != 2) { LogTorrentLookup(ride.valid && ride.active, torrent); g_mountedTurns.SetMount(f.mount); }
+    g_seatedFrame.Observe(player, f.seated, NowSec(), pass != 2);
     static std::atomic<int> s_rideMode{-1};
     const int rideMode = !ride.valid ? 2 : (ride.active ? 1 : 0);
     if (s_rideMode.exchange(rideMode) != rideMode)
         LOGI("[ride] %s", rideMode == 2 ? "state unavailable; preserving native body/facing" :
-             (rideMode == 1 ? "mount/riding/dismount: waiting for settled seated pose; native pair facing" : "on foot: configured VR body/facing restored"));
+             (rideMode == 1 ? "mount/riding/dismount: native pair facing; the seated pose takes over once seated" : "on foot: configured VR body/facing restored"));
+    f.seatPose = f.riding && f.seated && c.fpPoseMode == "vr" && g_seatedFrame.Seated(player) && SeatTemplateReady();
     if (f.riding) {
-        // The attached rider's rendered transform can differ from its physics
-        // position AND rotation. Use it for both the live head and the arm IK.
-        if (!ModelMatrixRoot(player, root, rootQ) && !PlayerRoot(player, root, rootQ)) return false;
-        Vec3 mountPos; Quat mountQ;
-        if (c.fpPoseMode == "vr" && g_seatedFrame.ready && g_seatedFrame.Matches(player, f.mount) &&
-            PlayerRoot(f.mount, mountPos, mountQ))
-            g_seatedFrame.Root(mountPos, YawOnlyRoot(mountQ), root, rootQ);
+        // The attached rider's rendered transform can differ from its physics position AND rotation: the rider is
+        // built on its model matrix. Seated, upright about the pelvis (UprightSeatRoot). The second eye's pass solves
+        // in the first pass's placement, which it then re-expresses in its own rebuild (RiderPassHold).
+        Vec3 mPos; Quat mRot;
+        bool held = false;
+        if (f.seatPose && pass == 2) {
+            std::lock_guard<std::mutex> g(g_riderHoldMtx);
+            if ((held = g_riderHold.Held(RiderHoldPair(), NowSec()))) { mPos = g_riderHold.pos; mRot = g_riderHold.rot; }
+        }
+        if (!held && !ModelMatrixRoot(player, mPos, mRot) && !PlayerRoot(player, mPos, mRot)) return false;
+        if (f.seatPose) UprightSeatRoot(mPos, mRot, g_seatPelvis, root, rootQ);
+        else { root = mPos; rootQ = mRot; }
     } else if (!SkeletonRoot(player, root, rootQ)) return false;
     f.root = root; f.rootQ = rootQ;
     BuildCameraAnchor(player, f);
@@ -1257,6 +1396,7 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
             f.headYaw = std::atan2(hf.x - hf.y * hu.x, hf.z - hf.y * hu.z);
         }
         g_headYaw.store(f.headYaw); g_headYawValid.store(true);
+        RideFollowHead(f, true);
         for (int h = 0; h < 2; ++h) {
             const Pose& hand = tr.hand[h];
             f.handValid[h] = hand.valid && in.controllerConnected[h];
@@ -1297,7 +1437,7 @@ bool BuildFrame(uint8_t* player, FrameInfo& f) {
         }
         f.bodyYaw = UpdateBodyYaw(want, NowSec(), instant);
     }
-    if (!(vr && tr.head.valid)) { f.eye = f.anchor; g_headYawValid.store(false); }
+    if (!(vr && tr.head.valid)) { f.eye = f.anchor; g_headYawValid.store(false); RideFollowHead(f, false); }
     f.valid = true;
     return true;
 }
@@ -1817,6 +1957,49 @@ bool CaptureTemplate(uint8_t* chr, const char* why, bool firstTemplate) {
     return true;
 }
 
+// The seated pose: the rider's own native seat, judged upright against the reference pose (head over pelvis) -
+// a forward-leaning seat would put the camera back over Torrent's neck. Head and pelvis are kept in the rider's
+// model frame: the camera anchor and the upright pivot.
+bool SetSeatTemplate(const std::vector<HkQsTransform>& t) {
+    if (g_skel.head < 0 || (int)t.size() != g_skel.boneCount) return false;
+    WorldPose w; WorldFromLocal(g_skel, t, Vec3{}, Quat{}, w);
+    const Vec3 head = w.pos[g_skel.head], pelvis = g_skel.pelvis >= 0 ? w.pos[g_skel.pelvis] : Vec3{};
+    if (g_skel.pelvis >= 0) {
+        const float above = head.y - pelvis.y;
+        const float ref = BoneHeight<HkQsTransform>(g_skel.refPoseCopy, g_skel.parents, g_skel.head) -
+                          BoneHeight<HkQsTransform>(g_skel.refPoseCopy, g_skel.parents, g_skel.pelvis);
+        if (ref > 0.3f && above < 0.7f * ref) {
+            static double s_last = 0;
+            if (NowSec() - s_last > 5.0) {
+                s_last = NowSec();
+                LOGI("[ride] seat not taken: head %.2f m over the pelvis = %.0f%% of standing - leaning, waiting for an upright seat",
+                     above, above / ref * 100.f);
+            }
+            return false;
+        }
+    }
+    g_seatedTemplate = t; g_seatHead = head; g_seatPelvis = pelvis; g_seatOwner = PlayerCharacterName();
+    LOGI("[ride] seated pose captured: head %.2f m over the pelvis, %.2f m over the rider's root - the camera rides this "
+         "seat, upright, instead of the gallop and jump animations", head.y - pelvis.y, head.y);
+    return true;
+}
+void ObserveSeat(const std::vector<HkQsTransform>& local, double now) {
+    for (const auto& t : local)
+        for (int k = 0; k < 4; ++k)
+            if (!std::isfinite(t.t[k]) || !std::isfinite(t.q[k]) || !std::isfinite(t.s[k])) return;
+    float diff = 0.f;
+    if ((int)g_seatCand.size() == g_skel.boneCount)
+        for (int i = 0; i < g_skel.boneCount; ++i) {
+            if (OursBone(i) || g_skel.fingers[i]) continue;
+            for (int k = 0; k < 4; ++k) diff += std::fabs(local[i].q[k] - g_seatCand[i].q[k]);
+        }
+    switch (g_seatSettle.Step(diff, 0.12f, now, 0.3)) {
+    case SeatStep::NewCandidate: g_seatCand = local; break;
+    case SeatStep::Take: SetSeatTemplate(g_seatCand); break;
+    case SeatStep::Wait: break;
+    }
+}
+
 void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     const Config& c = Cfg();
     // Pose-write choke point: while the world is dying (death anim, warp, load) the game's
@@ -1874,23 +2057,12 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             }
         }
     }
-    if (c.fpPoseMode == "vr" && g_seatedFrame.Matches(player, f.mount) &&
-        g_seatedFrame.CanCapture(NowSec(), poseForeign, FramePumpCurrentPass() != 2) && g_skel.head >= 0) {
-        Vec3 mountPos; Quat mountQ;
-        bool sane = true;
-        for (const auto& t : local) {
-            for (float v : t.t) sane = sane && std::isfinite(v);
-            for (float v : t.q) sane = sane && std::isfinite(v);
-            for (float v : t.s) sane = sane && std::isfinite(v);
-        }
-        if (sane && PlayerRoot(f.mount, mountPos, mountQ) && (rootPos - mountPos).Length() < 5.f) {
-            g_seatedTemplate = local;
-            g_seatedFrame.Capture(mountPos, YawOnlyRoot(mountQ), rootPos, rootQ, w.pos[g_skel.head]);
-            LOGI("[ride] seated VR pose captured: body and head anchor follow Torrent's physics frame");
-        }
-    }
-    const bool seatedPose = c.fpPoseMode == "vr" && g_seatedFrame.ready &&
-        g_seatedFrame.Matches(player, f.mount) && (int)g_seatedTemplate.size() == g_skel.boneCount;
+    // Seated on Torrent: the rider's own seat becomes the seated pose once it holds still (ObserveSeat) - an idle
+    // moment in the saddle, never a gallop or jump frame - and later rides reuse it (BuildSkeleton carries it).
+    if (c.fpPoseMode == "vr" && f.riding && f.seated && g_skel.head >= 0 && !SeatTemplateReady() &&
+        g_seatedFrame.CanCapture(NowSec(), poseForeign, FramePumpCurrentPass() != 2))
+        ObserveSeat(local, NowSec());
+    const bool seatedPose = f.seatPose;
     bool vrPose = !f.riding && c.fpPoseMode == "vr" && (int)g_poseTemplate.size() == g_skel.boneCount;
     bool followsHead = !f.riding && !vrPose && c.bodyFollowsHead && c.fpCameraAnchor != "head";   // head anchor: the camera goes to the body, not the body to the camera
     if (f.riding) {
@@ -1910,6 +2082,10 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             bodyOff.y = Clamp(bodyOff.y, -c.bodyFollowMaxDown, c.bodyFollowMaxUp);
             bodyOff.x -= std::sin(f.bodyYaw) * c.bodyBackOffset;
             bodyOff.z -= std::cos(f.bodyYaw) * c.bodyBackOffset;
+        }
+        // The rider moves with the smoothed view, so the saddle's bounce cannot lift the body into it.
+        bodyOff = bodyOff + f.rideCamShift;
+        if (bodyOff.Length() > 1e-5f) {
             const Vec3 lo = rootQ.Conj().Rotate(bodyOff);
             for (int i = 0; i < g_skel.boneCount; ++i) {
                 if (g_skel.parents[i] >= 0 && g_skel.parents[i] < i) continue;
@@ -2176,6 +2352,17 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
         else               SolveArm(g_skel, pose, local, w, g_skel.R_ua, g_skel.R_fa, g_skel.R_hand, tp[h], tq[h], pole);
         any = true;
     }
+    // The blade each hand holds, in the world (GameERBladeWorld): combat measures how close a strike came to an
+    // enemy - on horseback the difference between "never reached" and "reached and did nothing".
+    if (FramePumpCurrentPass() != 2) {
+        std::lock_guard<std::mutex> g(g_bladeMtx);
+        for (int h = 0; h < 2; ++h) {
+            g_blade[h].valid = tok[h];
+            if (!tok[h]) continue;
+            const Vec3 axis = c.twoHandAxis != "forward" ? tcu[h] : tcf[h];
+            g_blade[h].grip = tp[h]; g_blade[h].tip = tp[h] + axis * CombatHandReach(h); g_blade[h].stamp = NowSec();
+        }
+    }
     // Publish the entire solved root in the native model frame. Mixing a render-frame
     // shift with physics-frame rotations reversed the lean when the frames differed.
     // Editing the model matrix itself also changed axes the game uses for movement,
@@ -2183,6 +2370,13 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     if (vrPose || seatedPose || followsHead) {
         Vec3 renderPos; Quat renderQ;
         if (ModelMatrixRoot(player, renderPos, renderQ)) {
+            // Second eye, seated: until pass 2 has re-placed the rider this frame, its rebuild is predicted, so the
+            // pose written now already lands where pass 1 drew the rider (RiderPassHold).
+            if (seatedPose && FramePumpCurrentPass() == 2) {
+                std::lock_guard<std::mutex> g(g_riderHoldMtx);
+                const uint32_t pair = RiderHoldPair();
+                if (g_riderHold.Held(pair, NowSec())) renderPos = g_riderHold.Render(renderPos, HeadingQ(renderQ), pair);
+            }
             for (int i = 0; i < g_skel.boneCount; ++i) {
                 const int parent = g_skel.parents[i];
                 if (!(parent < 0 || parent >= i)) continue;
@@ -2478,6 +2672,64 @@ uint64_t __fastcall Hook_CamFinalize(void* a, void* b, void* c, void* d) {
     return rv;
 }
 
+// The pair's rebuilt model matrices, per pass: pass 1's rider placement is what both eyes draw (RiderPassHold);
+// how far pass 2 re-places the rider and the horse goes into the "[ride]" summary.
+void NoteRidePass(uint8_t* chr, bool isMount) {
+    Vec3 p; Quat q;
+    if (!chr || !ModelMatrixRoot(chr, p, q)) return;
+    const bool pass2 = FramePumpCurrentPass() == 2;
+    static Vec3 s_torrent{}; static uint32_t s_torrentFrame = ~0u;
+    if (isMount) {
+        if (!pass2) { s_torrent = p; s_torrentFrame = g_frame; }
+        else if (s_torrentFrame == g_frame) {
+            std::lock_guard<std::mutex> g(g_rideStats.mtx);
+            g_rideStats.torrentShift = std::max(g_rideStats.torrentShift, (p - s_torrent).Length());
+        }
+        return;
+    }
+    const Quat yaw = HeadingQ(q);
+    Vec3 d; bool held;
+    {
+        std::lock_guard<std::mutex> g(g_riderHoldMtx);
+        const uint32_t pair = RiderHoldPair();
+        if (!pass2) { g_riderHold.Pass1(p, q, pair, NowSec()); return; }
+        held = g_riderHold.Held(pair, NowSec());
+        if (!held) return;
+        d = g_riderHold.Pass2(p, yaw, pair);
+    }
+    const Vec3 l = yaw.Conj().Rotate(d);   // rider frame: x = side, y = up, -z = forward
+    const float axis[3] = {-l.z, l.y, l.x};
+    std::lock_guard<std::mutex> g(g_rideStats.mtx);
+    float* keep[3] = {&g_rideStats.riderShift.z, &g_rideStats.riderShift.y, &g_rideStats.riderShift.x};
+    for (int i = 0; i < 3; ++i) if (std::fabs(axis[i]) > std::fabs(*keep[i])) *keep[i] = axis[i];
+    ++g_rideStats.pass2;
+}
+
+// Every 5 s on horseback: whether the horse was found, which body rides, how far the smoothed view sat off the
+// bouncing rider, how far the second eye's pass re-placed rider and horse, and what turned the pair.
+void LogRideSummary(const FrameInfo& f) {
+    static double s_last = 0;
+    const double now = NowSec();
+    if (!f.riding) { s_last = now; return; }
+    if (now - s_last < 5.0) return;
+    s_last = now;
+    float stick, physical, applied, camDev, torrentShift; Vec3 shift; int pass2;
+    {
+        std::lock_guard<std::mutex> g(g_rideStats.mtx);
+        stick = g_rideStats.stick; physical = g_rideStats.physical; applied = g_rideStats.applied;
+        camDev = g_rideStats.camDev; torrentShift = g_rideStats.torrentShift; shift = g_rideStats.riderShift; pass2 = g_rideStats.pass2;
+        g_rideStats.stick = g_rideStats.physical = g_rideStats.applied = g_rideStats.camDev = g_rideStats.torrentShift = 0.f;
+        g_rideStats.riderShift = {}; g_rideStats.pass2 = 0;
+    }
+    LOGI("[ride] 5 s: Torrent %s | %s | view smoothed up to %.0f mm off the bouncing rider | second eye re-placed the rider up to "
+         "forward %+.0f up %+.0f side %+.0f mm (%d frames)%s, Torrent %.0f mm | turns: stick %.0f deg, physical %.0f deg, applied to the pair %.0f deg",
+         f.mount ? "found" : "NOT FOUND",
+         f.seatPose ? "seated pose" : f.seated ? "seated, live animation until a still moment gives the seated pose" : "mount/dismount animation",
+         camDev * 1000.f, shift.z * 1000.f, shift.y * 1000.f, shift.x * 1000.f, pass2,
+         f.seatPose ? " - drawn where the first eye drew it" : "", torrentShift * 1000.f,
+         Rad2Deg(stick), Rad2Deg(physical), Rad2Deg(applied));
+}
+
 // Per-character model-matrix update, late in the frame. The pose probe measured the upper-body animation layer
 // (walk sway, weapon arts) evaluating every frame AFTER the camera step - this hook runs later still, so the
 // pose written here is what the renderer actually skins.
@@ -2493,6 +2745,7 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
     if (!post)
         ApplyMountedTurn(player, mount, g_mountedTurns.Take(mount, g_frame, FramePumpCurrentPass() != 2));
     ApplyTorrentVisibility(mount);
+    if (post && g_moveRiding.load()) NoteRidePass(isMount ? mount : player, isMount);
     if (!isPlayer) return;
     if (post) {
         // Skew probe: the model matrix the rig renders with this frame vs the root our camera write used.
@@ -2509,7 +2762,7 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
             g_skewMax = 0.f;
         }
     }
-    FrameInfo f; if (!BuildFrame(player, f)) return;
+    FrameInfo f; if (!BuildFrame(player, f, post)) return;
     // Last word on the facing before the original rebuilds the model matrix FROM the physics orientation.
     // The pin written at the pose hook / camera step can be overwritten by the game's own turn-toward-move
     // logic later in the frame (it only runs while moving), and then the matrix - the rotation the renderer
@@ -2529,16 +2782,20 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
     // disconnect is still visible, our placement is correct and the separation is produced downstream (R.E.A.L.
     // renders one eye per frame, and lateral motion is exactly where that shows).
     if (post) {
+        // Each eye against its own camera: pass 2 renders the second eye's.
+        const int eye = FramePumpCurrentPass() == 2 ? 1 : 0;
+        Vec3 eyePos = g_lastWrittenPos; bool haveEye = true;
+        if (eye == 1) { std::lock_guard<std::mutex> g(g_secondEye.mtx); haveEye = g_secondEye.camValid; eyePos = g_secondEye.camPos; }
         Vec3 hw;
         Vec3 renderPos = f.root; Quat renderQ = f.rootQ;
         ModelMatrixRoot(player, renderPos, renderQ);
-        if (HeadBoneWorld(player, renderPos, renderQ, hw)) {
-            Vec3 d = hw - g_lastWrittenPos;
+        if (haveEye && HeadBoneWorld(player, renderPos, renderQ, hw)) {
+            Vec3 d = hw - eyePos;
             float cy = std::cos(f.baseYaw), sy = std::sin(f.baseYaw);
             float lat = d.x * cy - d.z * sy, fwd = d.x * sy + d.z * cy;
-            if (std::fabs(lat) > std::fabs(g_bodyCamLat)) g_bodyCamLat = lat;
-            if (std::fabs(fwd) > std::fabs(g_bodyCamFwd)) g_bodyCamFwd = fwd;
-            if (std::fabs(d.y) > std::fabs(g_bodyCamUp)) g_bodyCamUp = d.y;
+            if (std::fabs(lat) > std::fabs(g_bodyCamLat[eye])) g_bodyCamLat[eye] = lat;
+            if (std::fabs(fwd) > std::fabs(g_bodyCamFwd[eye])) g_bodyCamFwd[eye] = fwd;
+            if (std::fabs(d.y) > std::fabs(g_bodyCamUp[eye])) g_bodyCamUp[eye] = d.y;
         }
         // Eye height is the camera anchor over the feet: the probe above cannot see a template that took the camera
         // down WITH the body (it stays a constant few cm under the eye), this can.
@@ -2548,14 +2805,19 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
         static double s_bc = 0; double nb = NowSec();
         if (nb - s_bc > 5.0) {
             s_bc = nb;
-            const bool lowCam = g_camHMin < Cfg().fpEyeHeight - 0.15f;
-            if (std::fabs(g_bodyCamLat) > 0.02f || std::fabs(g_bodyCamFwd) > 0.02f || std::fabs(g_bodyCamUp) > 0.02f || lowCam)
-                LOGI("[body] rendered head vs camera eye (5 s max): lateral %+.0f mm, forward %+.0f mm, vertical %+.0f mm | camera %.2f-%.2f m above the feet, template %s (head %.2f m, %s)",
-                     g_bodyCamLat * 1000.f, g_bodyCamFwd * 1000.f, g_bodyCamUp * 1000.f, g_camHMin, g_camHMax,
-                     f.riding ? "unused (riding)" : g_templLow ? "LOW" : "standing", g_templHead, g_templWhy);
-            g_bodyCamLat = g_bodyCamFwd = g_bodyCamUp = 0.f;
+            const bool lowCam = !f.riding && g_camHMin < Cfg().fpEyeHeight - 0.15f;
+            bool off = lowCam;
+            for (int e = 0; e < 2; ++e) off = off || std::fabs(g_bodyCamLat[e]) > 0.02f || std::fabs(g_bodyCamFwd[e]) > 0.02f || std::fabs(g_bodyCamUp[e]) > 0.02f;
+            if (off)
+                LOGI("[body] rendered head vs camera eye (5 s max): lateral %+.0f mm, forward %+.0f mm, vertical %+.0f mm | second eye %+.0f / %+.0f / %+.0f mm | camera %.2f-%.2f m above the %s, template %s (head %.2f m, %s)",
+                     g_bodyCamLat[0] * 1000.f, g_bodyCamFwd[0] * 1000.f, g_bodyCamUp[0] * 1000.f,
+                     g_bodyCamLat[1] * 1000.f, g_bodyCamFwd[1] * 1000.f, g_bodyCamUp[1] * 1000.f, g_camHMin, g_camHMax,
+                     f.seatPose ? "seated pose's root" : f.riding ? "rider's root" : "feet",
+                     f.seatPose ? "seated" : f.riding ? "unused (riding, live animation)" : g_templLow ? "LOW" : "standing", g_templHead, g_templWhy);
+            for (int e = 0; e < 2; ++e) g_bodyCamLat[e] = g_bodyCamFwd[e] = g_bodyCamUp[e] = 0.f;
             g_camHMin = 1e9f; g_camHMax = -1e9f;
         }
+        if (eye == 0) LogRideSummary(f);
         g_vrCycle.fetch_add(1, std::memory_order_relaxed);   // next cycle takes a fresh head sample
     }
 }
@@ -2776,6 +3038,25 @@ int GameERPlayerLevel() {
 uint8_t* GameERWorldChrMan() { return WorldChrMan(); }
 uint8_t* GameERMainPlayer() { return MainPlayer(); }
 
+bool GameERRiding() { return g_moveActive.load() && g_moveRiding.load(); }
+
+bool GameERBladeWorld(int hand, Vec3* grip, Vec3* tip) {
+    if (hand != HandLeft && hand != HandRight) return false;
+    std::lock_guard<std::mutex> g(g_bladeMtx);
+    const BladeSample& b = g_blade[hand];
+    if (!b.valid || NowSec() - b.stamp > 0.1) return false;
+    if (grip) *grip = b.grip;
+    if (tip) *tip = b.tip;
+    return true;
+}
+
+bool GameERChrPosition(uint8_t* chr, Vec3* out) {
+    Vec3 p;
+    if (!chr || !out || !ModelMatrixPos(chr, p)) return false;
+    *out = p;
+    return true;
+}
+
 // Full stereo, pass 2: write the OTHER eye's camera into every slot the real pass wrote.
 // Called by the frame pump between the two engine passes, on the main-loop thread, while
 // every camera writer is quiescent (the camera step is gated for the pass that follows).
@@ -2803,6 +3084,7 @@ bool GameERApplySecondEyeCamera() {
         std::lock_guard<std::mutex> g(g_secondEye.mtx);
         if (!g_secondEye.valid) return false;
         g_secondEye.valid = false;   // consumed; UpdateCamera refills next frame
+        g_stereoPair.fetch_add(1);   // pass 2 follows: it belongs to the pass 1 that just ran (RiderHoldPair)
         haveHeadBasis = g_secondEye.haveHeadBasis;
         qHead = g_secondEye.qHead; rot = g_secondEye.rot;
         br = g_secondEye.r; bu = g_secondEye.u; bf = g_secondEye.fw;
@@ -3326,7 +3608,7 @@ void GameERAddCameraYaw(float radians) {
     if (radians == 0.f || !g_camYawInit) return;
     if (g_moveLocked.load()) return;   // locked on: the game aims the view, our turn input would fight it
     g_camYaw.store(WrapPi(g_camYaw.load() + radians));
-    if (g_moveRiding.load()) g_mountedTurns.Add(radians);
+    if (g_moveRiding.load()) { g_mountedTurns.Add(radians); g_rideStats.Turn(g_rideStats.stick, radians); }
     float e = g_pendingYawPivot.load();
     while (!g_pendingYawPivot.compare_exchange_weak(e, e + radians)) {}
 }
@@ -3351,6 +3633,9 @@ MoveBasis GameERGetMoveBasis() {
     // With CameraRotation=hmd the matrix we write into ChrCam is YawQ(camYaw) * headQ (UpdateCamera), and the game
     // derives its stick frame from that matrix - so physically turning your head already turns "stick forward".
     m.viewYaw = (m.headValid && Cfg().fpCameraRotation == "hmd") ? WrapPi(m.camYaw + m.headYaw) : m.camYaw;
+    // On Torrent: forward is the free-look direction (RideFollowHead), so a glance does not steer the horse.
+    m.rideFreeLook = m.riding && m.headValid && g_rideForwardValid.load();
+    m.rideForwardYaw = WrapPi(m.camYaw + g_rideForward.load());
     return m;
 }
 

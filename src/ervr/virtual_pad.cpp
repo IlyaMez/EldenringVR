@@ -289,6 +289,7 @@ void VirtualPadUpdate(double now) {
         if (c.moveForward == "hand" && tr.hand[HandLeft].valid) want = mb.camYaw - tr.hand[HandLeft].rot.Yaw();
         else if (c.moveForward == "body") want = mb.bodyYaw;
         else if (c.moveForward == "camera") want = mb.camYaw;
+        else if (mb.rideFreeLook) want = mb.rideForwardYaw;                 // on Torrent: the free-look direction, a glance does not steer
         else if (mb.headValid) want = mb.camYaw + mb.headYaw;               // head (and hand without a controller)
         rotateStick(WrapPi(want - mb.viewYaw));
     } else if (c.moveForward == "hand" && tr.hand[HandLeft].valid && tr.head.valid && !anyMenu) {

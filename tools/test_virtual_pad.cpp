@@ -138,6 +138,20 @@ int main() {
     }
     basis.riding = true; basis.active = false;
     Check(Poll().sThumbLY == 32767, "mounted input also passes through with game-owned camera yaw");
+    // Free look on Torrent: looking 40 degrees aside must not steer - the stick, resolved in the 40-degree view
+    // frame, comes back to the free-look direction (forward = straight ahead).
+    basis.active = true; c.locomotion = "game"; basis.headValid = true;
+    basis.camYaw = 0.f; basis.headYaw = basis.viewYaw = 0.6981317f;
+    basis.rideFreeLook = true; basis.rideForwardYaw = 0.f;
+    {
+        const auto move = Poll();
+        Check(move.sThumbLX < -20000 && move.sThumbLY > 24000 && move.sThumbLY < 26000,
+              "on Torrent a glance inside the free look does not steer the horse");
+    }
+    basis.rideFreeLook = false;
+    const int headLx = Poll().sThumbLX;
+    Check(headLx > -100 && headLx < 100, "without the free look Forward=head steers where you look");
+    basis.headYaw = basis.viewYaw = 0.f;
     basis.active = true; basis.riding = false; c.locomotion = "game";
     input.buttons = VRB_B; Poll();
     input.controllerConnected[0] = input.controllerConnected[1] = false;

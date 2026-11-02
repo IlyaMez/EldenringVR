@@ -46,6 +46,7 @@
 #include "action_queue_snapshot.h"
 #include "weapon_motion.h"
 #include "weapon_contact.h"
+#include "mounted_rider.h"
 #include "debug_keys.h"
 #include "params_er.h"
 #include "log.h"
@@ -1052,6 +1053,9 @@ void UpdateTwoHand(double now) {
         s_lastStyle = g_armStyle;
     }
     if (g_armStyle == 0 || Cfg().twoHandMode != "grab") return;
+    // On Torrent the chord's attack button is a mounted attack, and the saddle does not change grips: a grab
+    // there sends nothing (the attempts start fresh once you are on foot).
+    if (GameERRiding()) { s_desired = -1; return; }
     const int desired = want ? (wh == HandRight ? 3 : 2) : (owned ? 1 : g_armStyle);
     if (desired != s_desired) { s_desired = desired; s_attempts = 0; s_gaveUp = false; }
     if (g_armStyle == desired) {
@@ -1294,6 +1298,7 @@ struct EnemyFrame {
     int   riseTotal = 0;
     float nearest = 1e9f;      // distance of the nearest live non-player character
     int   nearestNpc = 0;
+    float blade = 1e9f;        // closest a striking blade came to a live character's body line (measured on horseback)
 };
 struct EnemyPrev { int hp; uint32_t seenFrame; };
 std::unordered_map<uint8_t*, EnemyPrev> g_enemyPrev;
@@ -1306,6 +1311,7 @@ struct CombatTally {
     int hitFrames = 0, dmg = 0, sliceN = 0; float sliceSum = 0.f;
     int unattributed = 0, foreign = 0, foreignDmg = 0, outside = 0;
     int stamMarks = 0, stamOnly = 0, rises = 0, riseTotal = 0;
+    int rideStrikes = 0; float rideBlade = 1e9f, rideNearest = 1e9f;   // on Torrent: reach of the strikes
 } g_tally;
 double g_tallyAt = 0;
 
@@ -1327,13 +1333,21 @@ void FlushTally(double now) {
     g_tallyAt = now;
     CombatTally& t = g_tally;
     const int spentEnds = g_spentValleyEnds.exchange(0), spentTimeouts = g_spentTimeoutEnds.exchange(0);
+    // On Torrent: did the strikes reach anyone? "never within a metre" (out of reach from the saddle) and "touched
+    // an enemy, no HP moved" (the game ignored the strike) are different problems.
+    char ride[160] = "";
+    if (t.rideStrikes > 0) {
+        if (t.rideNearest > 1e8f) snprintf(ride, sizeof(ride), " | on Torrent: %d strikes, no enemy within the watch radius", t.rideStrikes);
+        else if (t.rideBlade > 1e8f) snprintf(ride, sizeof(ride), " | on Torrent: %d strikes, nearest enemy %.1f m, blade not measured", t.rideStrikes, t.rideNearest);
+        else snprintf(ride, sizeof(ride), " | on Torrent: %d strikes, the blade came within %.2f m of an enemy's body (nearest enemy %.1f m)", t.rideStrikes, t.rideBlade, t.rideNearest);
+    }
     if (t.strikes[0] + t.strikes[1] + t.hitFrames + t.foreign + t.outside + t.rises + spentEnds + spentTimeouts > 0)
         LOGI("[combat] 5 s: strikes right %d (%d landed, %d budget-spent) left %d (%d landed, %d budget-spent); spent strikes re-armed at a speed valley %d, by timeout %d | "
              "own hit-frames %d, %d damage, mean hit %.2f of a vanilla hit, %d on-hit stamina marks (%d with no HP drop seen) | HP drops: %d without a recorded attacker (counted as ours), "
-             "%d not ours (%d damage), %d of ours outside a strike | HP rose %d times (+%d)%s",
+             "%d not ours (%d damage), %d of ours outside a strike | HP rose %d times (+%d)%s%s",
              t.strikes[HandRight], t.landed[HandRight], t.spent[HandRight], t.strikes[HandLeft], t.landed[HandLeft], t.spent[HandLeft], spentEnds, spentTimeouts,
              t.hitFrames, t.dmg, t.sliceN ? t.sliceSum / (float)t.sliceN : 0.f, t.stamMarks, t.stamOnly, t.unattributed, t.foreign, t.foreignDmg, t.outside,
-             t.rises, t.riseTotal, GameERCoopInSession() ? " | co-op session" : "");
+             t.rises, t.riseTotal, ride, GameERCoopInSession() ? " | co-op session" : "");
     t = CombatTally{};
 }
 
@@ -1345,9 +1359,12 @@ int ChrHp(uint8_t* chr, int* maxOut) {
     return hp;
 }
 
-EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c) {
+// `bladeHands`: hands with a live strike whose blade is measured against every character in reach (on Torrent).
+EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c, int bladeHands = 0) {
     EnemyFrame ef;
     if (!c.combatEnemyWatch) return ef;
+    Vec3 grip[2], tip[2]; bool blade[2] = {false, false};
+    for (int h = 0; h < 2; ++h) blade[h] = (bladeHands & (1 << h)) && GameERBladeWorld(h, &grip[h], &tip[h]);
     uint8_t* wcm = GameERWorldChrMan();
     if (!wcm) return ef;
     uint8_t *first = nullptr, *last = nullptr;
@@ -1369,7 +1386,16 @@ EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c) 
         int maxHp = -1; int hp = ChrHp(chr, &maxHp);
         if (hp < 0 || maxHp <= 0) continue;
         int npc = 0; SafeRead(chr + Chr_NpcId, &npc, 4);
+        // Torrent is never the enemy: from the saddle it was the "nearest enemy at 1.6 m" (2026-11-02), and a hit
+        // an enemy lands on the horse is not a hit of ours.
+        if (IsTorrentNpc(npc)) continue;
         if (hp > 0 && dist < ef.nearest) { ef.nearest = dist; ef.nearestNpc = npc; }
+        Vec3 at;
+        if (hp > 0 && (blade[0] || blade[1]) && GameERChrPosition(chr, &at)) {
+            const Vec3 low = at + Vec3{0.f, 0.2f, 0.f}, high = at + Vec3{0.f, 1.7f, 0.f};   // a body line, feet to head
+            for (int h = 0; h < 2; ++h)
+                if (blade[h]) ef.blade = std::min(ef.blade, SegmentDistance(grip[h], tip[h], low, high));
+        }
         auto it = g_enemyPrev.find(chr);
         if (it != g_enemyPrev.end()) {
             const int delta = it->second.hp - hp;
@@ -1456,7 +1482,13 @@ void GameFrameBody(uint8_t* player) {
     // WatchEnemies). Fallback when the list is unreadable: the one-frame stamina drop the game
     // charges per hit - but never while the shield is up and the drop is guard-impact sized;
     // 13:51:38 log: the session's only stamina-"HIT" was a 47-point blocked enemy attack.
-    const EnemyFrame ef = WatchEnemies(player, cmd[0].active || cmd[1].active, c);
+    const bool riding = GameERRiding();
+    const int bladeHands = riding ? (cmd[0].active ? 1 : 0) | (cmd[1].active ? 2 : 0) : 0;
+    const EnemyFrame ef = WatchEnemies(player, cmd[0].active || cmd[1].active, c, bladeHands);
+    if (bladeHands) {
+        g_tally.rideBlade = std::min(g_tally.rideBlade, ef.blade);
+        if (ef.available) g_tally.rideNearest = std::min(g_tally.rideNearest, ef.nearest);
+    }
     // One hit per swing (continuous contacts, KineticSlices=false): the swing's damage lands as ONE
     // quality-scaled hit and the strike is spent. ER takes flat defense off every hit, so the per-frame
     // slices (6-10% of a hit) dealt 3-5 HP each where a full hit deals hundreds (2026-10-31 co-op log).
@@ -1567,6 +1599,7 @@ void GameFrameBody(uint8_t* player) {
             { std::lock_guard<std::mutex> g(g_mtx); if (g_cmd[h].id == k.id) g_cmd[h].first = false; }
             InterlockedIncrement(&g_swings);
             ++g_tally.strikes[h];
+            if (riding) ++g_tally.rideStrikes;
             if (skillStrike) { g_skillSwing.armed = false; LOGI("[combat] skill strike: judge %d type %d (the skill's own attack row)", t.a.judgeId, t.a.attackType); }
         }
         anyStrike = true;
@@ -2190,6 +2223,10 @@ uint16_t CombatForcedButtons(double now) {
         case 3: r.key = ParseXInputButton(c.skillButton); break;
         case 4: r.key = ParseXInputButton(c.lightAttackButton); break;
         case 5: r.key = ParseXInputButton(c.heavyAttackButton); break;
+        // Mounted attacks (RideAttacks=buttons): pressed for the game, not a learn press.
+        case 6: r.key = ParseXInputButton(c.lightAttackButton); break;
+        case 7: r.key = ParseXInputButton(c.heavyAttackButton); break;
+        case 8: r.key = ParseXInputButton(c.guardButton); break;
         default: r.phase = 0; return 0;
         }
         if (!r.key) { r.phase = 0; LOGW("[combat] chord %d: no button configured", req); return 0; }
@@ -2272,6 +2309,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
     PollTwoHand(tr, in, now);
     PollSkillTrigger(in, now);
     const bool leftShield = g_leftShield.load() != 0;
+    const bool riding = GameERRiding();
     // Two-handed: the free hand is on the weapon, it never swings on its own (the game's arm style
     // is the authority; a grab in progress already holds that hand still).
     const int style = g_armStyleShared.load();
@@ -2346,9 +2384,20 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                 if (h == HandLeft && !TwoHandedStyle(style)) slot = SlotLeft;
                 else if (c.kineticEnabled) slot = (q >= c.kineticHeavyQuality && s.arc >= 0.8f * ArcRefFor(weight, c)) ? SlotHeavy : SlotLight;
                 else slot = s.peak >= c.heavySwingSpeed ? SlotHeavy : SlotLight;
+                // On Torrent with RideAttacks=buttons the swing is the game's own mounted attack: the matching
+                // button is pressed (never learned from - mounted rows are not the on-foot ones) and nothing is
+                // injected. The arms stay on the controllers either way.
+                if (riding && c.rideAttacks == "buttons") {
+                    if (g_chordReq.load() == 0) g_chordReq.store(slot == SlotLeft ? 8 : slot == SlotHeavy ? 7 : 6);
+                    g_haptic.fetch_or(1u << h);
+                    s.st = HandSM::Cooldown; s.t = now; s.restSpeed = 0.f;
+                    if (c.combatDebug) LOGD("[combat] %s swing on Torrent: pressing the mounted %s attack (quality %.2f)", HandName(h), SlotName(slot), q);
+                    break;
+                }
                 // Two-handed rows not known yet (auto mode): this swing presses the button instead, so the
                 // game plays the two-handed attack once and the hook learns its row (as 1H learning does).
-                if (TwoHandedStyle(style) && c.combatLearn && c.combatMode == "auto" && slot != SlotLeft) {
+                // Never from the saddle: that press is a mounted attack, and its row is not the 2H one.
+                if (TwoHandedStyle(style) && c.combatLearn && c.combatMode == "auto" && slot != SlotLeft && !riding) {
                     bool known; { std::lock_guard<std::mutex> g(g_mtx); known = g_tpl[slot == SlotLight ? SlotLight2H : SlotHeavy2H].valid; }
                     if (!known) {
                         if (g_chordReq.load() == 0) { g_chordReq.store(slot == SlotLight ? 4 : 5); LOGI("[combat] two-handed %s row unknown: pressing %s so the game teaches it", SlotName(slot), slot == SlotLight ? c.lightAttackButton.c_str() : c.heavyAttackButton.c_str()); }
