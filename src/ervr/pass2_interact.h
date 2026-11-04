@@ -8,12 +8,17 @@
 // survived into the next frame's decision depended on which task groups pass 2 kept: with EventMan (25)
 // gated, pass 2's update consumed the doors' prompts and the interact button did nothing; with it kept, the
 // same press was answered again in pass 2 - an item picked up twice, its card left on screen with nothing to
-// close it. With [VR] Pass2ActionButtons=false (default) the update runs in pass 1 only and pass 2's
-// ExecuteActionButton calls answer "not pressed" without registering a prompt: the single-pass game's state.
+// close it. With [VR] Pass2ActionButtons=false (default) the update runs in pass 1 only - one decision per
+// frame, as in the single-pass game - and every ExecuteActionButton call still reaches the game, in either pass;
+// a prompt that answers "pressed" a second time for the same decision is answered "not pressed".
 //
-// Also logged, capped, at INFO ([VR] Pass2Watch): every press the game accepts, with its pass and caller, and
-// what each pass changed in the action-button manager, MapItemMan's item-get popup queue and the menu
-// manager's per-element UI states.
+// Where prompts are asked is NOT per pass (measured in-headset 2026-11-04): a grace's and an NPC's were asked
+// only while pass 2 ran, once per stereo pair, never in pass 1. The first version of this fix answered every
+// pass-2 call "not pressed" and nothing in the world could be interacted with.
+//
+// Also logged, capped, at INFO ([VR] Pass2Watch): every press the game accepts, with its pass and caller, each
+// prompt caller's calls per pass and thread, and what each pass changed in the action-button manager,
+// MapItemMan's item-get popup queue and the menu manager's per-element UI states.
 //
 // Exe signature-checked: each hook needs its function's first bytes. Threads: the boundaries run on the
 // game's frame thread around queue_tasks; the hooks on whichever thread calls them; the lookup on its own.

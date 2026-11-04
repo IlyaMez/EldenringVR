@@ -25,8 +25,8 @@ body:
     id: ervr-version
     attributes:
       label: ERVR version
-      description: From the first line of the log, e.g. "ERVR 0.6.5 starting".
-      placeholder: "0.6.5"
+      description: From the first line of the log, e.g. "ERVR 0.7.0 starting".
+      placeholder: "0.7.0"
     validations:
       required: true
 

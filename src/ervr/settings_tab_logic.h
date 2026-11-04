@@ -4,12 +4,14 @@
 //
 // The page draws in Sound's window, which has 12 rows (a list longer than its window scrolls the cursor but
 // not the rows), so the tab has the 12 settings players change most while playing; the launcher's Options and
-// ERVR.ini have the rest. Every row here is read live by ERVR, so a change applies within a second (the ini
-// hot-reload).
+// ERVR.ini have the rest (Resolution among them: it needs a restart, so its row went to the body calibration).
+// Every row here is read live by ERVR, so a change applies within a second (the ini hot-reload).
+#include "body_calibration_logic.h"
 #include "launcher_text.hpp"
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cwchar>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,7 +21,11 @@ namespace ervr {
 constexpr int kTabMaxRows = 12;      // AudioSetting's rows (the page itself would take 16)
 constexpr int kTabMaxChoices = 32;   // a list row: ComboItemList<unsigned char, 32>
 
-enum class TabRowKind : uint8_t { onOff, list };
+// calibrate: the body calibration ([Body], body_calibration.h), a list of two built from the ini - what it holds,
+// then the T-pose again. Choosing the second asks for the panel at the next moment of play (the menu holds it
+// until it closes); choosing the first again before that takes the ask back. It writes nothing itself: the
+// calibration does, when it is done.
+enum class TabRowKind : uint8_t { onOff, list, calibrate };
 
 struct TabChoice {
     const wchar_t* label;
@@ -89,7 +95,29 @@ inline int TabFind(const TabShown& s, const TabRow& row, const std::string& v, c
 }
 } // namespace detail
 
+// The calibrate row: what [Body] holds, as the launcher says it (height = eyes / 0.936), then the T-pose again.
+inline TabShown TabShowCalibration(std::string_view ini) {
+    TabShown s;
+    const int eye = std::atoi(detail::TabIniValue(ini, "Body", "EyeHeightMm", "0").c_str());
+    const int arm = std::atoi(detail::TabIniValue(ini, "Body", "ArmLengthMm", "0").c_str());
+    const bool calibrated = CalibValid(eye, arm);
+    if (calibrated) {
+        wchar_t text[64];
+        std::swprintf(text, 64, L"%.2f m tall, arms %.2f m", CalibHeight(eye / 1000.f), arm / 1000.0);
+        s.labels.emplace_back(text);
+    } else {
+        s.labels.emplace_back(TabTruthy(detail::TabIniValue(ini, "Body", "CalibrationPrompt", "true")) ? L"Not yet"
+                                                                                                       : L"Skipped");
+    }
+    s.labels.emplace_back(calibrated ? L"Redo when the menu closes" : L"Calibrate when the menu closes");
+    s.values = {"", "ask"};
+    s.values2 = {"", ""};
+    return s;   // current and fallback 0: the row always opens on what the ini holds
+}
+
 inline TabShown TabShow(const TabRow& row, std::string_view ini) {
+    if (row.kind == TabRowKind::calibrate)
+        return TabShowCalibration(ini);
     TabShown s;
     const std::string v = detail::TabIniValue(ini, row.section, row.key, row.fallback);
     if (row.kind == TabRowKind::onOff) {
@@ -116,9 +144,11 @@ inline TabShown TabShow(const TabRow& row, std::string_view ini) {
     return s;
 }
 
-// The ini edits that choosing `index` on the row makes.
+// The ini edits that choosing `index` on the row makes (none on the calibrate row: see TabAsksCalibration).
 inline std::vector<TabWrite> TabWrites(const TabRow& row, const TabShown& s, int index) {
     std::vector<TabWrite> out;
+    if (row.kind == TabRowKind::calibrate)
+        return out;
     if (row.kind == TabRowKind::onOff) {
         out.push_back({row.section, row.key, index ? "true" : "false"});
         return out;
@@ -130,6 +160,8 @@ inline std::vector<TabWrite> TabWrites(const TabRow& row, const TabShown& s, int
         out.push_back({row.section, row.key2, s.values2[(size_t)index]});
     return out;
 }
+// Whether `index` on the calibrate row asks for the T-pose (false: it takes the ask back).
+inline bool TabAsksCalibration(const TabRow& row, int index) { return row.kind == TabRowKind::calibrate && index == 1; }
 
 // The tab, top to bottom: moving, combat, the picture, the HUD, feel.
 inline const std::vector<TabRow>& TabRows() {
@@ -159,16 +191,15 @@ inline const std::vector<TabRow>& TabRows() {
          L"How the weapon sits in your hand: higher tips the blade forward, lower stands it back toward you.", "45",
          {{L"0\x00b0", "0"}, {L"15\x00b0", "15"}, {L"30\x00b0", "30"}, {L"45\x00b0", "45"}, {L"60\x00b0", "60"},
           {L"75\x00b0", "75"}, {L"90\x00b0", "90"}, {L"105\x00b0", "105"}, {L"120\x00b0", "120"}}},
+        {TabRowKind::calibrate, "Body", "EyeHeightMm", L"Body calibration",
+         // The help line shows about 125 characters on this page (flat, 2026-11-04); longer is cut off.
+         L"Fits the Tarnished's arms and belt to you. Choose it, close the menu, then T-pose holding both triggers.",
+         "0", {}},
         {TabRowKind::list, "VR", "WorldScale", L"World scale",
          L"Below 100% the world feels larger, above it smaller (it scales the distance between your eyes).", "1.0",
          {{L"50%", "0.5"}, {L"60%", "0.6"}, {L"70%", "0.7"}, {L"80%", "0.8"}, {L"90%", "0.9"}, {L"100%", "1.0"},
           {L"110%", "1.1"}, {L"120%", "1.2"}, {L"130%", "1.3"}, {L"140%", "1.4"}, {L"150%", "1.5"}, {L"160%", "1.6"},
           {L"170%", "1.7"}, {L"180%", "1.8"}, {L"190%", "1.9"}, {L"200%", "2.0"}}},
-        {TabRowKind::list, "VR", "GameResScale", L"Resolution",
-         L"The share of the headset's pixels the game renders. Lower it if the picture stutters. "
-         L"Takes effect the next time the game starts.", "0.86",
-         {{L"50%", "0.5"}, {L"60%", "0.6"}, {L"70%", "0.7"}, {L"75%", "0.75"}, {L"80%", "0.8"}, {L"86%", "0.86"},
-          {L"90%", "0.9"}, {L"95%", "0.95"}, {L"100%", "1.0"}}},
         {TabRowKind::list, "HUD", "Lock", L"HUD follows",
          L"Your body: the HUD stays put while you look around and follows when you turn or walk away. Your head: "
          L"welded to the view.",

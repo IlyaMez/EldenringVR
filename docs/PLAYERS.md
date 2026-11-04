@@ -47,7 +47,8 @@ files for you.
    second and a half. The Tarnished's arms then take your arm's length, so his hands sit on your controllers
    with his elbows bending as yours do, and the belt hangs at your waist. B skips it. The launcher's Options >
    Body > *Body calibration* shows your height and arm length; its *Redo* asks again at the next moment of
-   play, mid-game too.
+   play, mid-game too. In the headset, the game's System > ERVR Settings tab has the same *Body calibration*
+   row.
 
 The launcher's other tabs:
 
@@ -157,8 +158,10 @@ each trackpad does is `[Buttons] LeftPad` / `RightPad` (`MENU`, `DPAD`, a button
 
 In the game: open the menu, choose **System**, and go to the **ERVR Settings** tab, to the right of Graphics
 (its icon is a game pad). Its twelve rows work like the game's own: Walk toward, Turning, Smooth turn speed,
-Physical melee, Damage, Weapon weight, Weapon angle, World scale, Resolution, HUD follows, HUD distance and
-Rumble strength. A change applies within a second and is saved in `ERVR.ini`. (Exe 2.7.2.0, patch 1.17.2.)
+Physical melee, Damage, Weapon weight, Weapon angle, Body calibration, World scale, HUD follows, HUD distance
+and Rumble strength. A change applies within a second and is saved in `ERVR.ini`. *Body calibration* shows your
+height and arm length: choose *Redo when the menu closes*, close the menu, and the T-pose panel comes up. (Exe
+2.7.2.0, patch 1.17.2.)
 
 The launcher's Options tab has those and the other settings players change most. Everything else is in
 `ELDEN RING\Game\ERVR\ERVR.ini`, and most keys apply within a second while you play.
@@ -181,7 +184,8 @@ The launcher's Options tab has those and the other settings players change most.
   lower it. Options > Body has it as a slider.
 - **Body calibration** (`[Body]`): your eye height and arm length from the T-pose (above). `FitArms` gives the
   Tarnished your arm's length, `FitBelt` puts the belt at your waist; `EyeHeightMm=0` and `ArmLengthMm=0` (the
-  launcher's *Redo*) ask for the T-pose again. The launcher's *Defaults* keeps your calibration.
+  launcher's *Redo*) ask for the T-pose again, as does the in-game tab's *Redo when the menu closes* (which keeps
+  the old one until the new one is done). The launcher's *Defaults* keeps your calibration.
 - **Combat** (`[Combat]`): physical melee, speed-scaled damage, weapon weight, two-handing, blocking, cast aim.
   *Swing threshold* (`ContactOnSpeed`, 0.8 m/s) is how fast the blade's tip must move to strike: raise it if
   slow moves attack, lower it if gentle swings miss.
@@ -256,7 +260,7 @@ in this release and not yet tried on a suit: tell us in `#ervr-help` if a side f
 | A launcher slider saved a tenth of what you set (90° became 9°) | That was the 0.6.0 and 0.6.5 launcher, for *Smooth turn speed*, *Weapon angle* and *Body haptics*: update and set them again. |
 | A door, lever, lift or new grace ignores Y | That was 0.6.0: update to 0.6.5 or later. ERVR corrects 0.6.0's `Pass2FullFrameKeep` / `Pass2SafeKeep` lines in your `ERVR.ini` by itself; if you typed other values there, delete both lines. |
 | The weapon points too far up, or you bend your wrist to hold it upright | Options > Body > *Weapon angle*. |
-| The Tarnished's arms look stretched, or his elbows stay bent with your arms straight | Options > Body > *Body calibration* > *Redo*, then stand tall in the T-pose when the panel asks. |
+| The Tarnished's arms look stretched, or his elbows stay bent with your arms straight | In the game, System > ERVR Settings > *Body calibration* > *Redo when the menu closes* (or the launcher's Options > Body > *Body calibration* > *Redo*), then stand tall in the T-pose when the panel asks. |
 | The calibration panel keeps saying *Check your headset's floor* | The headset's floor is off (it measures you under 1.20 m or over 2.20 m tall): set the floor in the headset's own settings, then hold the T-pose again. |
 | Your antivirus removes `dxgi.dll` or `ERVR.dll` | See below; restore the file and allow the folder. |
 | Anything else | Ask in `#ervr-help` with what happened and your `ERVR.log`. |

@@ -1,3 +1,13 @@
+0.7.0 (2026-11-04)
+
+- ERVR Settings in the game's own menu (System, to the right of Graphics; patch 1.17.2): walking, turning, physical melee, damage, weapon weight and angle, body calibration, world scale, the HUD and rumble, changed without leaving the headset
+- Body calibration: a T-pose with both triggers held measures your height and arm length; the character's arms take your length and the belt hangs at your waist. Redo it from the in-game tab or the launcher
+- Turning with the stick no longer swings your weapons (it caused constant attacking and drained stamina in fights)
+- The card after picking up a new item no longer stays on screen ignoring every button
+- Sharper at the same GPU cost: the game renders a frame shaped like your view, 1.36x sharper on a Quest 3
+- Launcher sliders save what they show (a 90 degree weapon angle was saved as 9): if you moved Smooth turn speed, Weapon angle or Body haptics in 0.6.x, set them again
+- Launcher Options > Combat > Swing threshold: how fast the blade must move to strike
+
 0.6.5 (2026-11-02)
 
 - Doors, levers, lifts and new graces open again (0.6.0 showed the prompt and ignored Y, which kept new characters in the first room). An ERVR.ini carrying 0.6.0's value, or the 16-25 workaround, is corrected at load

@@ -1,7 +1,7 @@
 [center][size=6][b]ERVR: native VR for ELDEN RING[/b][/size]
 [size=3]Your head is the camera, the weapons are in your hands, and your swing is the attack.[/size]
 
-[b]Version 0.6.5. From the maker of [url=https://github.com/IlyaMez/SpidyVR]Spidy[/url], the Spider-Man Remastered VR mod.[/b]
+[b]Version 0.7.0. From the maker of [url=https://github.com/IlyaMez/SpidyVR]Spidy[/url], the Spider-Man Remastered VR mod.[/b]
 
 [url=https://discord.gg/x27ZXDpdNt][b]Join the Discord[/b][/url]: release news first, help in #ervr-help, clips. One server for ERVR and Spidy.[/center]
 
@@ -11,7 +11,7 @@ ERVR writes the game's memory, so it runs with Easy Anti-Cheat off; the included
 [size=5][b]What you get[/b][/size]
 [list]
 [*][b]Full stereo at your headset's resolution.[/b] An image for each eye from that eye's own camera, both at the same instant. Menus, loading screens and cutscenes go on a big screen in the headset.
-[*][b]First person, in the body.[/b] Your head is the camera: look around, lean, duck. Look down and your character is there, the arms following your controllers.
+[*][b]First person, in the body.[/b] Your head is the camera: look around, lean, duck. Look down and your character is there, the arms following your controllers. Strike a T-pose once and its arms take the length of yours.
 [*][b]Your swing is the attack.[/b] ERVR fires the game's own attack along the blade in your hand: damage, poise, status and stamina come from the game, and a faster swing hits harder. Weapons have weight.
 [*][b]A shield that blocks.[/b] Raise it in front of you to block; move it into a blow to deflect it.
 [*][b]Two-hand by grabbing the hilt.[/b] Squeeze your free hand on the hilt and the game two-hands the weapon. The right trigger then fires its Ash of War, the effect without the animation.
@@ -23,6 +23,7 @@ ERVR writes the game's memory, so it runs with Easy Anti-Cheat off; the included
 [*][b]Seamless Co-op[/b] with friends on flat screens: they need neither ERVR nor a headset.
 [*][b]Body haptics[/b] on a bHaptics TactSuit, TactSleeves and TactVisor through the bHaptics Player.
 [*][b]One launcher[/b] that checks the game, the headset and your PC, sets the game up for VR and starts it with one button.
+[*][b]Settings in the game's own menu[/b]: System > ERVR Settings changes turning, combat, the HUD, world scale and your body calibration without leaving the headset (patch 1.17.2).
 [/list]
 
 [size=5][b]Requirements[/b][/size]
@@ -74,7 +75,7 @@ Ask in [b]#ervr-help[/b] on the [url=https://discord.gg/x27ZXDpdNt]Discord[/url]
 [size=5][b]Antivirus warnings and verifying the download[/b][/size]
 ERVR.dll injects into a running game, and dxgi.dll is ReShade's add-on build, which is unsigned by design. Generic antivirus detections are therefore possible. Every release is built from the public tagged source by GitHub Actions and carries a signed provenance attestation and a SHA256 file; this Nexus file is the same zip as the GitHub release.
 
-[code]gh attestation verify ERVR-v0.6.5.zip --repo IlyaMez/EldenringVR[/code]
+[code]gh attestation verify ERVR-v0.7.0.zip --repo IlyaMez/EldenringVR[/code]
 
 [b]ERVR has no telemetry, analytics, auto-updater or network code of its own.[/b] For body haptics it loads bHaptics' own library, which talks to the bHaptics Player on your PC; [b][bHaptics] Level=0[/b] keeps it from loading.
 

@@ -24,7 +24,7 @@ namespace {
 constexpr double kPromptAfter = 1.5;           // s of play before the panel asks
 constexpr double kResultShows = 3.5;           // s the result stays up
 
-std::atomic<bool> g_request{false};
+std::atomic<int> g_request{0};   // 1 ask, 2 take the ask back (BodyCalibrationRequest)
 // A measurement just taken, until the hot reload shows ERVR.ini holding it (or 5 s pass): the body uses it at once.
 std::atomic<int> g_pendingEye{0}, g_pendingArm{0};
 double g_pendingSince = 0.0;
@@ -161,7 +161,7 @@ void End() {
 
 } // namespace
 
-void BodyCalibrationRequest() { g_request.store(true); }
+void BodyCalibrationRequest(bool ask) { g_request.store(ask ? 1 : 2); }
 
 float BodyEyeHeight() {
     int eye = 0, arm = 0;
@@ -191,8 +191,13 @@ CalibPadOut BodyCalibrationUpdate(const VRTracking& tr, const VRInputState& in, 
     int eyeMm = 0, armMm = 0;
     Measurements(c, eyeMm, armMm);
     const bool calibrated = CalibValid(eyeMm, armMm);
-    if (g_request.exchange(false)) {
+    const int request = g_request.exchange(0);
+    if (request == 1) {
         if (!g_running) { g_requested = true; g_playSince = -1.0; LOGI("[calib] body calibration asked for: the panel comes up at the next moment of play"); }
+    } else if (request == 2 && g_requested && !(g_running && g_cal.Phase() == CalibPhase::done)) {
+        LOGI("[calib] body calibration ask taken back%s", g_running ? ": the panel closes" : "");
+        if (g_running) End();
+        g_requested = false;
     }
     const bool wanted = g_requested || (!calibrated && c.bodyCalibrationPrompt);
     const char* why = NotPlaying(c, tr, menu);

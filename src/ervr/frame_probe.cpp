@@ -2342,6 +2342,7 @@ bool FramePumpReady() { return g_origQueueTasks != nullptr && g_pumpMode == 2; }
 void FramePumpNotePass2Present() { g_p2PresentTick.store(GetTickCount64(), std::memory_order_relaxed); }
 bool FramePumpSafeSetActive() { return g_safeSetActive.load(std::memory_order_relaxed); }
 int  FramePumpCurrentPass() { return g_curPass.load(std::memory_order_acquire); }
+unsigned long FramePumpFrameThread() { return g_qtThread; }
 
 int FramePumpCurrentTaskGroup() {
     void* task = g_table.owner;

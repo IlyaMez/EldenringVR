@@ -3,7 +3,10 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## Unreleased
+## 0.7.0 (2026-11-04)
+
+ERVR settings in the game's own menu; body calibration; no more strikes from turning; the stuck item card fixed;
+a sharper picture at the same GPU cost.
 
 ### Body calibration
 * The first time you play, a panel in the headset asks for a T-pose: stand tall, look ahead, stretch both arms
@@ -20,7 +23,8 @@ release workflow and published on GitHub Releases and Nexus Mods.
   do nothing in the game (no swing, wheel, belt or grab either); the sticks, the menu button, X and Y work. A
   menu, a cutscene, a load, Torrent or the big screen holds the panel until play returns.
 * The launcher's Options > Body > **Body calibration** shows your height and arm length; **Redo** asks for the
-  T-pose again at the next moment of play, mid-game too (**Ask again** after a skip). *Defaults* keeps your
+  T-pose again at the next moment of play, mid-game too (**Ask again** after a skip). In the game, the pause
+  menu's System > ERVR Settings > **Body calibration** row does the same without leaving the headset. *Defaults* keeps your
   calibration. Kept in `ERVR.ini` `[Body]` (`EyeHeightMm`, `ArmLengthMm`; `FitArms` and `FitBelt` turn either
   use off). Numpad * (NumLock on) asks for it while testing.
 * The log says what was measured (`[calib] body calibrated ...`) and what it changed (`[body] left arm fitted
@@ -44,10 +48,11 @@ release workflow and published on GitHub Releases and Nexus Mods.
   The same press was then answered twice and the item handled twice, leaving a card that nothing closed. The
   same double decision is why 0.6.0's doors ignored the button: which prompts survived to the next frame
   depended on which task groups the second pass re-ran. That decision now happens once per frame, as in the
-  game without ERVR, and the second pass's prompts answer "not pressed" (`[VR] Pass2ActionButtons=false`).
-* The log records every interact press the game accepts and what each pass changed in the prompts, the
-  item-get popups and the menu's UI elements (`[p2watch]` lines, `[VR] Pass2Watch`), so a stuck card or a
-  dead door can be traced from a log.
+  game without ERVR, and a prompt that answers the same press a second time is told it was not pressed
+  (`[VR] Pass2ActionButtons=false`).
+* The log records every interact press the game accepts, where each prompt is asked from, and what each pass
+  changed in the prompts, the item-get popups and the menu's UI elements (`[p2watch]` lines,
+  `[VR] Pass2Watch`), so a stuck card or a dead door can be traced from a log.
 
 ### Combat
 * Options > Combat > **Swing threshold** (`[Combat] ContactOnSpeed`, 0.8 m/s as before): how fast the blade's
@@ -72,8 +77,7 @@ release workflow and published on GitHub Releases and Nexus Mods.
 * Each eye is now a pixel-for-pixel copy of its part of the game's frame. The crop used to start at a
   fraction of a pixel and be stretched a pixel or two onto the eye image, so every eye pixel blended two of
   the game's, softening the finest detail (foliage, text, distant edges).
-* The ERVR tab's Resolution row says what was always true: the game reads its render size when it starts,
-  so a new Resolution takes effect at the next launch.
+* A new Resolution takes effect at the next launch: the game reads its render size when it starts.
 
 ### Frame rate
 * Below the headset's refresh, the log now says which side is short, at every log level: the engine passes'
@@ -91,11 +95,14 @@ release workflow and published on GitHub Releases and Nexus Mods.
 
 ### ERVR in the game's menu
 * The game's System menu has an **ERVR Settings** tab, to the right of Graphics: Walk toward, Turning, Smooth
-  turn speed, Physical melee, Damage, Weapon weight, Weapon angle, World scale, Resolution, HUD follows, HUD
-  distance and Rumble strength, as rows like the game's own. A change applies within a second and is written to
-  `ERVR.ini`. The game builds the tab and its rows with its own code; ERVR answers for the values. Exe 2.7.2.0
-  (1.17.2) only; `[SettingsTab] Enabled=false` leaves the game's Settings as they are, and `Icon` picks the tab's
-  icon from the game's own (the game has no headset icon; 1 is a game pad).
+  turn speed, Physical melee, Damage, Weapon weight, Weapon angle, Body calibration, World scale, HUD follows,
+  HUD distance and Rumble strength, as rows like the game's own. A change applies within a second and is written
+  to `ERVR.ini`. *Body calibration* shows your height and arm length; choose *Redo when the menu closes* and the
+  T-pose panel comes up once you are back in play (your old calibration stays in use until the new one is done,
+  and B keeps it). Resolution, which needs a restart, stays in the launcher's Options. The game builds the tab
+  and its rows with its own code; ERVR answers for the values. Exe 2.7.2.0 (1.17.2) only;
+  `[SettingsTab] Enabled=false` leaves the game's Settings as they are, and `Icon` picks the tab's icon from the
+  game's own (the game has no headset icon; 1 is a game pad).
 * For unattended test runs, `[Experimental] AutoPilotScript` taps a list of buttons once the player is in the
   world (`START+3 UP+2 A+3`), and `SHOT+N` has ReShade save the frame; `tools\run_game.ps1 -ShotWindow`
   captures the game's window only.

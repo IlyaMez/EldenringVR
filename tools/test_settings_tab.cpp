@@ -70,6 +70,24 @@ int main() {
         Check(keep.size() == 2 && keep[0].value == "true" && keep[1].value == "20", "and writes back both values");
     }
 
+    // Body calibration: what [Body] holds, then the T-pose again; it writes nothing, its second choice asks.
+    {
+        const TabRow& r = Row("Body", "EyeHeightMm");
+        const TabShown none = TabShow(r, "");
+        Check(none.labels.size() == 2 && none.labels[0] == L"Not yet" && none.labels[1] == L"Calibrate when the menu closes" &&
+                  none.current == 0 && none.fallback == 0,
+              "no calibration yet: not yet, calibrate");
+        Check(TabShow(r, "[Body]\nCalibrationPrompt=false\n").labels[0] == L"Skipped", "a skipped one says so");
+        const TabShown done = TabShow(r, "[Body]\nEyeHeightMm=1650\nArmLengthMm=618\nCalibrationPrompt=false\n");
+        Check(done.labels[0] == L"1.76 m tall, arms 0.62 m" && done.labels[1] == L"Redo when the menu closes" &&
+                  done.current == 0,
+              "a calibration shows height (eyes / 0.936) and arms, as the launcher does");
+        Check(TabShow(r, "[Body]\nEyeHeightMm=1650\nArmLengthMm=0\n").labels[0] == L"Not yet", "half a calibration is none");
+        Check(TabWrites(r, done, 1).empty() && TabWrites(r, done, 0).empty(), "the row writes nothing itself");
+        Check(TabAsksCalibration(r, 1) && !TabAsksCalibration(r, 0), "the second choice asks, the first takes it back");
+        Check(!TabAsksCalibration(Row("Combat", "Inertia"), 1), "only that row asks");
+    }
+
     // The edits land in the file the way the launcher's do: the key in place, every other byte kept.
     {
         const std::string ini = "; ERVR\r\n[Movement]\r\n; comment\r\nForward=head\r\nTurnSpeed=120\r\n";

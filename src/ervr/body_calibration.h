@@ -26,8 +26,10 @@ struct CalibPadOut {
 };
 // Pad worker, once per update, before anything reads the controls. `menu` = any menu, the map or menu-nav mode.
 CalibPadOut BodyCalibrationUpdate(const VRTracking& tr, const VRInputState& in, double now, bool menu);
-// Ask for a calibration at the next moment of play, whatever [Body] holds (Numpad *). Any thread.
-void BodyCalibrationRequest();
+// Ask for a calibration at the next moment of play, whatever [Body] holds (Numpad *, the ERVR tab's Body
+// calibration row); the old one stays in use until the new one is done, and B keeps it. `ask` false takes back an
+// ask whose panel has not been answered yet (the row turned back before the menu closed). Any thread.
+void BodyCalibrationRequest(bool ask = true);
 
 // The measurements in use, metres; 0 = none. ERVR.ini [Body], or one just taken until the hot reload brings it.
 float BodyEyeHeight();

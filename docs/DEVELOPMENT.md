@@ -580,13 +580,22 @@ no Quit Game, it goes after Graphics.
   heap slot 13). If it is the page being left, the composite forgets it first and the switch skips handing its
   option data on. The game makes the deleted page again, fresh, the next time its tab opens.
 * *Twelve rows.* A page holds 16 (`BasicViewItemList<EditProperty, 16>`), but a list longer than its window scrolls
-  the cursor, not the rows; the tab has 12.
+  the cursor, not the rows; the tab has 12. Resolution gave its row to Body calibration (it needs a restart; the
+  launcher has it).
+* *About 125 characters of help.* The help line under the rows is cut off past that (flat, eye-shaped frame).
 
 **The values.** Each row edits a byte of ERVR's (`g_value`): the choice's index, or 0/1 for OFF/ON. The rows are
 built from `ERVR.ini` as the page is made (a value the list does not offer is shown as itself, `0.6 (ERVR.ini)`,
 and choosing it again writes it back). The worker writes a row that has held still for 0.3 s with the launcher's
 `iniSet` (every other byte of the file kept), whole and renamed into place; the hot-reload applies it and logs
 `[tab] ERVR.ini: Haptics.RumbleScale=1.25`.
+
+**Body calibration** is the one row that writes nothing (`TabRowKind::calibrate`): a list of two built from
+`[Body]` - `1.87 m tall, arms 0.57 m` (or *Not yet* / *Skipped*), then *Redo when the menu closes*. The second,
+held 0.3 s, calls `BodyCalibrationRequest()` (`[tab] Body calibration: the T-pose panel comes up when the menu
+closes`); the panel waits for 1.5 s of play as always, and the old calibration stays in use until the new one is
+written. Turning back to the first before that takes the ask back (`not asked for after all`). Verified flat
+2026-11-04 (both log lines, the row and its labels in ReShade shots); the panel itself needs the headset.
 
 **Testing it without a headset.** `[Experimental] AutoPilotScript` taps buttons once the player is in the world
 (`WAIT+12 START+3 UP+2 A+3 LB+1.5 LB+3` reaches the tab: UP wraps the pause menu to System, LB wraps from Game
@@ -645,7 +654,7 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise: it 
   unaffected (the simulation consumes the measured frame time). Lower Resolution before blaming the headset;
   `StereoMode=cinema` is the cheap fallback and always works.
 * Visual/comfort options live in `[VR]` (`RenderScale`, `WorldScale`, `FovDeg`, `IpdMm`, snap turn). In the
-  headset, twelve of them are the game's System > ERVR Settings tab (exe 2.7.2.0 only); the rest are `ERVR.ini`
+  headset, eleven of them and the body calibration are the game's System > ERVR Settings tab (exe 2.7.2.0 only); the rest are `ERVR.ini`
   and the launcher's Options tab, which hot-reload.
 * While any game menu is open, physical combat stands down completely (`[Combat] MenuGate`, default on):
   no swing detection, no injected attacks, no guard hold, no two-hand chords, and the live param edits

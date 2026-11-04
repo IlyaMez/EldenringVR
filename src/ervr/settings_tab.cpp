@@ -1,5 +1,6 @@
 #include "settings_tab.h"
 #include "settings_tab_logic.h"
+#include "body_calibration.h"
 #include "config.h"
 #include "game_memory.h"
 #include "game_version.h"
@@ -504,14 +505,21 @@ void SettingsTabTick(double now) {
     if (now - s_movedAt < 0.3)
         return;
     std::vector<TabWrite> writes;
+    std::vector<bool> calibration;   // the Body calibration row's asks, in order
     AcquireSRWLockExclusive(&g_lock);
     for (size_t i = 0; i < n && i < g_shown.size(); ++i)
         if (value[i] != g_written[i]) {
+            if (rows[i].kind == TabRowKind::calibrate)
+                calibration.push_back(TabAsksCalibration(rows[i], value[i]));
             for (TabWrite& w : TabWrites(rows[i], g_shown[i], value[i]))
                 writes.push_back(std::move(w));
             g_written[i] = value[i];
         }
     ReleaseSRWLockExclusive(&g_lock);
+    for (const bool ask : calibration) {
+        LOGI("[tab] Body calibration: %s", ask ? "the T-pose panel comes up when the menu closes" : "not asked for after all");
+        BodyCalibrationRequest(ask);
+    }
     if (writes.empty())
         return;
     const std::wstring& path = Cfg().iniPath;

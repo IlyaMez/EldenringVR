@@ -58,9 +58,76 @@ constexpr long kLineCap[] = {300, 300, 60};
 
 bool g_watch = false;
 
+// The decisions made so far: the update below counts the ones that ran. A prompt's "pressed" answer belongs to
+// the decision current when it is asked.
+std::atomic<uint32_t> g_decision{0};
+bool g_updateHooked = false;   // without the update hook there are no decisions to key answers on
+
+// Who asks: each prompt caller (return address), its calls per pass and how many came from off the frame thread.
+// Measured 2026-11-04 (in-headset, 2.7.2.0): a grace's and an NPC's prompts were asked ONLY while pass 2 ran,
+// once per stereo pair - the old pass-2 "not pressed" rule left them nothing to answer. Logged to show where
+// each kind of prompt is asked from.
+struct Caller {
+    std::atomic<uintptr_t> ra{0};
+    std::atomic<long> n[2]{}, offThread{0};
+};
+Caller g_callers[12];
+std::atomic<long> g_callerLines{0};
+
+void NoteCaller(uintptr_t ra, int p, int32_t id) {
+    const unsigned long frameThread = FramePumpFrameThread();
+    const unsigned long tid = GetCurrentThreadId();
+    for (Caller& c : g_callers) {
+        uintptr_t cur = c.ra.load(std::memory_order_acquire);
+        if (!cur && c.ra.compare_exchange_strong(cur, ra, std::memory_order_acq_rel)) {
+            if (g_callerLines.fetch_add(1, std::memory_order_relaxed) < 24) {
+                auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+                LOGI("[p2watch] prompt asked from exe+0x%llX (first: action button %d, pass %d, %s thread %lu, task "
+                     "tag %d, frame %ld)",
+                     (unsigned long long)((uint8_t*)ra - base), id, p + 1,
+                     tid == frameThread ? "the frame" : "another", tid, FramePumpCurrentTaskGroup(),
+                     g_frameNo.load(std::memory_order_relaxed));
+            }
+            cur = ra;
+        }
+        if (cur != ra) continue;
+        c.n[p].fetch_add(1, std::memory_order_relaxed);
+        if (tid != frameThread) c.offThread.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+}
+
+// A prompt answers "pressed" at most once per decision. With the decision made once per frame (pass 2 skips the
+// update), a prompt asked in both passes would otherwise answer the same press twice - an item handled twice,
+// its card left on screen. Kept per prompt (caller + action button id): one press is one decision's winner, so a
+// second "pressed" from the same prompt for the same decision is always the repeat. The frame bound (this frame
+// or the next) lets a prompt asked before the update - the next frame's pass 1, about the last decision - still
+// count as a repeat, and keeps a decision that stops updating (a state with no world step) from going quiet.
+struct Answer { uintptr_t caller; int32_t id; uint32_t decision; long frame; };
+SRWLOCK g_answersLock = SRWLOCK_INIT;
+Answer g_answers[8]{};
+int g_answersNext = 0;
+std::atomic<long> g_repeats{0}, g_repeatLines{0};
+
+bool RepeatAnswer(uintptr_t caller, int32_t id) {
+    const uint32_t decision = g_decision.load(std::memory_order_acquire);
+    const long frame = g_frameNo.load(std::memory_order_relaxed);
+    AcquireSRWLockExclusive(&g_answersLock);
+    bool repeat = false;
+    for (const Answer& a : g_answers)
+        if (a.caller == caller && a.id == id && a.decision == decision && frame - a.frame <= 1) { repeat = true; break; }
+    if (!repeat) {
+        g_answers[g_answersNext] = {caller, id, decision, frame};
+        g_answersNext = (g_answersNext + 1) % 8;
+    }
+    ReleaseSRWLockExclusive(&g_answersLock);
+    return repeat;
+}
+
 // ExecuteActionButton (fromsoftware-rs present_action_button): what every prompt calls each frame - it registers
 // the prompt with the manager and answers whether the interact press was for it. Arg 3 is a float (movss,
-// 2.7.2.0), 9 args, the answer in al. In pass 2 it answers "not pressed" without registering anything.
+// 2.7.2.0), 9 args, the answer in al. Every call reaches the game, in either pass; only a repeated "pressed" for
+// one decision is answered "not pressed".
 using FnExecuteActionButton = uint8_t(__fastcall*)(void*, int32_t, float, uint64_t, uint64_t, uint64_t, uint64_t,
                                                    uint64_t, uint64_t);
 FnExecuteActionButton g_origExecute = nullptr;
@@ -69,17 +136,25 @@ std::atomic<long> g_calls[2], g_accepted[2], g_acceptLines{0};
 uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uint64_t a4, uint64_t a5, uint64_t a6,
                                             uint64_t a7, uint64_t a8, uint64_t a9) {
     const int p = FramePumpCurrentPass() == 2 ? 1 : 0;
+    const uintptr_t ra = (uintptr_t)_ReturnAddress();
     g_calls[p].fetch_add(1, std::memory_order_relaxed);
-    if (p == 1 && !Cfg().vrPass2ActionButtons) return 0;
+    if (g_watch) NoteCaller(ra, p, id);
     const uint8_t r = g_origExecute(self, id, f, a4, a5, a6, a7, a8, a9);
-    if (r && g_watch) {
+    if (!r) return 0;
+    auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    if (g_updateHooked && !Cfg().vrPass2ActionButtons && RepeatAnswer(ra, id)) {
+        g_repeats.fetch_add(1, std::memory_order_relaxed);
+        if (g_repeatLines.fetch_add(1, std::memory_order_relaxed) < 100)
+            LOGI("[p2watch] action button %d answered the same press again in pass %d (frame %ld, from exe+0x%llX): "
+                 "not pressed this time - the game already handled it",
+                 id, p + 1, g_frameNo.load(std::memory_order_relaxed), (unsigned long long)((uint8_t*)ra - base));
+        return 0;
+    }
+    if (g_watch) {
         g_accepted[p].fetch_add(1, std::memory_order_relaxed);
-        if (g_acceptLines.fetch_add(1, std::memory_order_relaxed) < 300) {
-            auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+        if (g_acceptLines.fetch_add(1, std::memory_order_relaxed) < 300)
             LOGI("[p2watch] action button %d accepted the interact press in pass %d (frame %ld, from exe+0x%llX)",
-                 id, p + 1, g_frameNo.load(std::memory_order_relaxed),
-                 (unsigned long long)((uint8_t*)_ReturnAddress() - base));
-        }
+                 id, p + 1, g_frameNo.load(std::memory_order_relaxed), (unsigned long long)((uint8_t*)ra - base));
     }
     return r;
 }
@@ -96,6 +171,7 @@ void __fastcall Hook_ActionButtonUpdate(void* table, void* arg) {
         g_updatesSkipped.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    g_decision.fetch_add(1, std::memory_order_acq_rel);
     g_origUpdate(table, arg);
 }
 
@@ -198,17 +274,32 @@ void Summary() {
     const long c1 = g_calls[0].exchange(0), c2 = g_calls[1].exchange(0);
     const long a1 = g_accepted[0].exchange(0), a2 = g_accepted[1].exchange(0);
     const long skipped = g_updatesSkipped.exchange(0);
+    const long repeats = g_repeats.exchange(0);
     long ch[kObjs][3];
     memcpy(ch, g_changes, sizeof(ch));
     memset(g_changes, 0, sizeof(g_changes));
     long changes = 0;
     for (auto& o : ch) for (long v : o) changes += v;
-    if (!a1 && !a2 && !changes) return;
-    LOGI("[p2watch] 5 s: interact presses accepted pass 1 %ld / pass 2 %ld (of %ld / %ld prompt calls%s), "
-         "action-button updates skipped in pass 2 %ld | changes in pass 1 / pass 2 / between frames: action-button "
-         "state %ld/%ld/%ld, item popup queue %ld/%ld/%ld, ui %ld/%ld/%ld",
-         a1, a2, c1, c2, Cfg().vrPass2ActionButtons ? "" : "; pass 2's answered not-pressed", skipped,
-         ch[0][0], ch[0][1], ch[0][2], ch[1][0], ch[1][1], ch[1][2], ch[2][0], ch[2][1], ch[2][2]);
+    // Per prompt caller: calls in pass 1 / pass 2, and how many of them came from off the frame thread.
+    std::string callers;
+    auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    for (Caller& c : g_callers) {
+        const uintptr_t ra = c.ra.load(std::memory_order_acquire);
+        if (!ra) break;
+        const long n1 = c.n[0].exchange(0), n2 = c.n[1].exchange(0), off = c.offThread.exchange(0);
+        if (!n1 && !n2) continue;
+        char part[96];
+        const unsigned long long rva = (unsigned long long)((uint8_t*)ra - base);
+        if (off) snprintf(part, sizeof(part), " exe+0x%llX %ld/%ld (%ld off the frame thread)", rva, n1, n2, off);
+        else     snprintf(part, sizeof(part), " exe+0x%llX %ld/%ld", rva, n1, n2);
+        callers += part;
+    }
+    if (!a1 && !a2 && !changes && !c1 && !c2 && !repeats) return;
+    LOGI("[p2watch] 5 s: interact presses accepted pass 1 %ld / pass 2 %ld (of %ld / %ld prompt calls), repeated "
+         "answers dropped %ld, action-button updates skipped in pass 2 %ld | changes in pass 1 / pass 2 / between "
+         "frames: action-button state %ld/%ld/%ld, item popup queue %ld/%ld/%ld, ui %ld/%ld/%ld%s%s",
+         a1, a2, c1, c2, repeats, skipped, ch[0][0], ch[0][1], ch[0][2], ch[1][0], ch[1][1], ch[1][2], ch[2][0],
+         ch[2][1], ch[2][2], callers.empty() ? "" : " | prompts asked from (pass 1/pass 2):", callers.c_str());
 }
 
 // The managers exist from boot; look them up once the world is up (the scan reads the whole module), and
@@ -255,9 +346,11 @@ void Pass2InteractInit() {
                         MH_EnableHook(exec) == MH_OK;
     const bool updOk = upd && MH_CreateHook(upd, (void*)&Hook_ActionButtonUpdate, (void**)&g_origUpdate) == MH_OK &&
                        MH_EnableHook(upd) == MH_OK;
+    g_updateHooked = updOk;
     if (execOk && updOk)
-        LOGI("[stereo] action buttons run once per frame: the second eye's pass skips their update (exe+0x%llX) and its "
-             "prompts answer not-pressed (exe+0x%llX)%s",
+        LOGI("[stereo] action buttons decide once per frame: the second eye's pass skips their update (exe+0x%llX); "
+             "every prompt is still asked, in either pass, and one that answers the same press twice gets "
+             "not-pressed the second time (exe+0x%llX)%s",
              (unsigned long long)(upd - base), (unsigned long long)(exec - base),
              Cfg().vrPass2ActionButtons ? " - OFF for now, [VR] Pass2ActionButtons=true" : "");
     else
@@ -270,8 +363,8 @@ void Pass2InteractInit() {
 }
 
 void Pass2InteractFrameBegin(long frame) {
+    g_frameNo.store(frame, std::memory_order_relaxed);   // the repeat check's frame bound needs it watched or not
     if (!g_watch) return;
-    g_frameNo.store(frame, std::memory_order_relaxed);
     Boundary(0);
     Summary();
 }

@@ -711,11 +711,13 @@ struct Config {
     // Skip restoration after animation/equipment changes, explicit input flushes/restrictions, transitions,
     // or changes to player/module/storage ownership. New-press history remains game-owned. Hot-reloads.
     bool  vrPass2KeepActionRequest = true;
-    // false = the action-button system (the prompt the interact button answers) runs once per frame, in
-    // pass 1, like the single-pass game: pass 2 skips its update and its prompts answer "not pressed"
+    // false = the action-button system (the prompt the interact button answers) decides once per frame, in
+    // pass 1, like the single-pass game: pass 2 skips its update, every prompt is still asked in either pass,
+    // and a prompt answering the same decision's press twice gets "not pressed" the second time
     // (pass2_interact.h). Measured 2026-11-03: pass 2 re-ran the update every frame, so pass 2's keep set
     // decided which prompts reached the next frame's decision - doors dead with EventMan (25) gated, the same
-    // press answered twice with it kept (an item card left on screen). Hot-reloads.
+    // press answered twice with it kept (an item card left on screen). Graces and NPCs are asked only in pass
+    // 2 (2026-11-04), so pass 2's calls must reach the game. true = both passes decide (0.6.5). Hot-reloads.
     bool  vrPass2ActionButtons = false;
     // Log what each pass changes in the interaction state (pass2_interact.h): interact presses accepted per
     // pass, the item-get popup queue, the menu's UI-element states. Capped; read once at startup.

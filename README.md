@@ -81,6 +81,8 @@ your hands, and melee where the swing you make is the attack. One zip, one launc
   your arms, and the heart at low HP.
 - **One launcher.** It checks the game, the headset and your PC, sets the game up for VR and starts it with
   one button.
+- **Settings in the game's own menu.** System > ERVR Settings changes turning, combat, the HUD, world scale
+  and your body calibration without leaving the headset (patch 1.17.2).
 
 ## Join the community
 
