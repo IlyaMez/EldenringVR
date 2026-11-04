@@ -15,8 +15,8 @@ struct Published {
     bool visible = false;
     ULONGLONG tick = 0;            // when the owner last refreshed it
     Pose pose;
-    float sizeM = 0.f;
-    int side = 0;                  // of the image, px
+    float widthM = 0.f, heightM = 0.f;
+    int w = 0, h = 0;              // of the image, px
     uint32_t version = 0;          // bumped with every new image
     std::vector<uint32_t> img;
 };
@@ -37,14 +37,14 @@ struct Gpu {
     struct Up { ID3D12Resource* buf = nullptr; uint8_t* map = nullptr; uint64_t fence = 0; };
     struct Ov {
         Up up[2];
-        int side = 0;                              // what the buffers were made for
+        int w = 0, h = 0;                          // what the buffers were made for
         int cur = -1;                              // the buffer holding the current content
         uint32_t version = 0;                      // content version staged in up[cur]
         DXGI_FORMAT staged = DXGI_FORMAT_UNKNOWN;  // swapchain format it was converted for
     } ov[OverlayCount];
 } g_gpu;
 
-UINT RowPitch(int side) { return (UINT)((side * 8 + 255) & ~255); }   // room for 8 bytes/pixel, 256-aligned
+UINT RowPitch(int w) { return (UINT)((w * 8 + 255) & ~255); }   // room for 8 bytes/pixel, 256-aligned
 
 void WaitFence(uint64_t v) {
     if (!v || !g_gpu.fence || g_gpu.fence->GetCompletedValue() >= v) return;
@@ -53,7 +53,7 @@ void WaitFence(uint64_t v) {
 
 void ReleaseUpload(Gpu::Ov& o) {
     for (auto& u : o.up) if (u.buf) { u.buf->Release(); u = {}; }
-    o.side = 0; o.cur = -1;
+    o.w = o.h = 0; o.cur = -1;
 }
 
 void ReleaseGpu() {
@@ -87,10 +87,10 @@ bool EnsureGpu(ID3D12Device* dev) {
     return true;
 }
 
-// The overlay's two upload buffers, (re)made for a `side` px image.
-bool EnsureUpload(int i, int side) {
+// The overlay's two upload buffers, (re)made for a `w` x `h` px image.
+bool EnsureUpload(int i, int w, int h) {
     Gpu::Ov& o = g_gpu.ov[i];
-    if (o.side == side && o.up[0].buf && o.up[1].buf) return true;
+    if (o.w == w && o.h == h && o.up[0].buf && o.up[1].buf) return true;
     for (auto& u : o.up) WaitFence(u.fence);
     ReleaseUpload(o);
     D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -98,7 +98,7 @@ bool EnsureUpload(int i, int side) {
     for (auto& u : o.up) {
         D3D12_RESOURCE_DESC rd{};
         rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = (UINT64)RowPitch(side) * side;
+        rd.Width = (UINT64)RowPitch(w) * h;
         rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.SampleDesc.Count = 1;
         rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         ok = SUCCEEDED(g_gpu.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ,
@@ -112,7 +112,7 @@ bool EnsureUpload(int i, int side) {
         ReleaseUpload(o);
         return false;
     }
-    o.side = side;
+    o.w = w; o.h = h;
     return true;
 }
 
@@ -131,24 +131,24 @@ void Stage(int i, const std::vector<uint32_t>& img, DXGI_FORMAT fmt) {
     const int next = o.cur < 0 ? 0 : (o.cur + 1) & 1;
     Gpu::Up& u = o.up[next];
     WaitFence(u.fence);
-    const int side = o.side;
-    const UINT pitch = RowPitch(side);
+    const int w = o.w;
+    const UINT pitch = RowPitch(w);
     CanvasInit();
-    for (int y = 0; y < side; ++y) {
-        const uint32_t* src = img.data() + (size_t)y * side;
+    for (int y = 0; y < o.h; ++y) {
+        const uint32_t* src = img.data() + (size_t)y * w;
         uint8_t* dst = u.map + (size_t)y * pitch;
         switch (fmt) {
         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-            std::memcpy(dst, src, (size_t)side * 4);
+            std::memcpy(dst, src, (size_t)w * 4);
             break;
         case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-            for (int x = 0; x < side; ++x) {
+            for (int x = 0; x < w; ++x) {
                 const uint32_t v = src[x];
                 ((uint32_t*)dst)[x] = (v & 0xFF00FF00u) | ((v >> 16) & 0xFFu) | ((v & 0xFFu) << 16);
             }
             break;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:   // linear light, read as such
-            for (int x = 0; x < side; ++x) {
+            for (int x = 0; x < w; ++x) {
                 const uint32_t v = src[x];
                 uint16_t* out = (uint16_t*)dst + 4 * x;
                 out[0] = Half(SrgbToLinear(v & 255)); out[1] = Half(SrgbToLinear((v >> 8) & 255));
@@ -157,7 +157,7 @@ void Stage(int i, const std::vector<uint32_t>& img, DXGI_FORMAT fmt) {
             break;
         default: {   // 8-bit UNORM, which the runtimes read as linear (as the eye and HUD blits assume)
             const bool bgra = fmt == DXGI_FORMAT_B8G8R8A8_UNORM;
-            for (int x = 0; x < side; ++x) {
+            for (int x = 0; x < w; ++x) {
                 const uint32_t v = src[x];
                 const uint32_t r = (uint32_t)std::lround(SrgbToLinear(v & 255) * 255.f), g = (uint32_t)std::lround(SrgbToLinear((v >> 8) & 255) * 255.f);
                 const uint32_t b = (uint32_t)std::lround(SrgbToLinear((v >> 16) & 255) * 255.f);
@@ -182,26 +182,26 @@ void Barrier(ID3D12GraphicsCommandList* l, ID3D12Resource* r, D3D12_RESOURCE_STA
 
 } // namespace
 
-void OverlayPublishImage(int which, int side, std::vector<uint32_t>& rgba) {
-    if (which < 0 || which >= OverlayCount || side <= 0 || rgba.size() != (size_t)side * side) return;
+void OverlayPublishImage(int which, int w, int h, std::vector<uint32_t>& rgba) {
+    if (which < 0 || which >= OverlayCount || w <= 0 || h <= 0 || rgba.size() != (size_t)w * h) return;
     std::lock_guard<std::mutex> g(g_mtx);
     Published& p = g_pub[which];
     p.img.swap(rgba);
-    p.side = side;
+    p.w = w; p.h = h;
     ++p.version;
 }
 
-void OverlayPublishPose(int which, bool visible, const Pose& pose, float sizeM) {
+void OverlayPublishPose(int which, bool visible, const Pose& pose, float widthM, float heightM) {
     if (which < 0 || which >= OverlayCount) return;
     std::lock_guard<std::mutex> g(g_mtx);
     Published& p = g_pub[which];
     p.visible = visible;
     p.tick = GetTickCount64();
-    if (visible) { p.pose = pose; p.sizeM = sizeM; }
+    if (visible) { p.pose = pose; p.widthM = widthM; p.heightM = heightM; }
 }
 
 void OverlayLayersCompose(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& layer) {
-    struct Want { bool on = false; Pose pose; float sizeM = 0.f; int side = 0; uint32_t version = 0; } want[OverlayCount];
+    struct Want { bool on = false; Pose pose; float widthM = 0.f, heightM = 0.f; int w = 0, h = 0; uint32_t version = 0; } want[OverlayCount];
     bool any = false;
     {
         std::lock_guard<std::mutex> g(g_mtx);
@@ -209,8 +209,9 @@ void OverlayLayersCompose(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& lay
         for (int i = 0; i < OverlayCount; ++i) {
             const Published& p = g_pub[i];
             // An owner that stopped refreshing (controllers gone, a stall) must not leave its quad hanging.
-            if (!p.visible || now - p.tick > 300 || p.side <= 0 || p.sizeM <= 0.f) continue;
-            want[i].on = true; want[i].pose = p.pose; want[i].sizeM = p.sizeM; want[i].side = p.side; want[i].version = p.version;
+            if (!p.visible || now - p.tick > 300 || p.w <= 0 || p.h <= 0 || p.widthM <= 0.f || p.heightM <= 0.f) continue;
+            want[i].on = true; want[i].pose = p.pose; want[i].widthM = p.widthM; want[i].heightM = p.heightM;
+            want[i].w = p.w; want[i].h = p.h; want[i].version = p.version;
             any = true;
         }
     }
@@ -218,7 +219,7 @@ void OverlayLayersCompose(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& lay
     if (!EnsureGpu(f.device)) return;
     for (int i = 0; i < OverlayCount; ++i) {
         if (!want[i].on) continue;
-        if (!vr->EnsureOverlaySwapchain(i, (uint32_t)want[i].side, (uint32_t)want[i].side) || !EnsureUpload(i, want[i].side)) {
+        if (!vr->EnsureOverlaySwapchain(i, (uint32_t)want[i].w, (uint32_t)want[i].h) || !EnsureUpload(i, want[i].w, want[i].h)) {
             want[i].on = false;
             continue;
         }
@@ -231,7 +232,7 @@ void OverlayLayersCompose(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& lay
         {
             std::lock_guard<std::mutex> g(g_mtx);
             const Published& p = g_pub[i];
-            if (p.side == want[i].side && p.img.size() == (size_t)p.side * p.side) { img = p.img; version = p.version; }
+            if (p.w == want[i].w && p.h == want[i].h && p.img.size() == (size_t)p.w * p.h) { img = p.img; version = p.version; }
         }
         if (!img.empty()) { Stage(i, img, fmt); o.version = version; }
     }
@@ -256,10 +257,10 @@ void OverlayLayersCompose(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& lay
             src.pResource = o.up[o.cur].buf; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             src.PlacedFootprint.Offset = 0;
             src.PlacedFootprint.Footprint.Format = img[i]->GetDesc().Format;   // the image's own (maybe typeless) format: a bit copy
-            src.PlacedFootprint.Footprint.Width = (UINT)o.side;
-            src.PlacedFootprint.Footprint.Height = (UINT)o.side;
+            src.PlacedFootprint.Footprint.Width = (UINT)o.w;
+            src.PlacedFootprint.Footprint.Height = (UINT)o.h;
             src.PlacedFootprint.Footprint.Depth = 1;
-            src.PlacedFootprint.Footprint.RowPitch = RowPitch(o.side);
+            src.PlacedFootprint.Footprint.RowPitch = RowPitch(o.w);
             l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
             Barrier(l, img[i], D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
@@ -277,7 +278,7 @@ void OverlayLayersCompose(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& lay
     for (int i = 0; i < OverlayCount; ++i) {
         if (!img[i]) continue;
         VROverlayQuad& q = layer.overlays[i];
-        q.valid = true; q.pose = want[i].pose; q.widthM = q.heightM = want[i].sizeM;
+        q.valid = true; q.pose = want[i].pose; q.widthM = want[i].widthM; q.heightM = want[i].heightM;
     }
 }
 

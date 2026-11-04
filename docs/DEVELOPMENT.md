@@ -187,6 +187,25 @@ own OpenXR session.
   walking the skeleton away from the character; with `BodyAnchor=head` the head bone is measured on that
   *unshifted* pose first (measuring it on our own previous output made the shift alternate between full and
   zero on back-to-back calls).
+* **Body calibration** (`[Body]`, `body_calibration*.{h,cpp}`, Spidy's T-pose calibration made for ERVR): the
+  camera rides the Tarnished's head and each hand target is the controller itself, so the player's size never
+  moved either; what did not fit was the arm between shoulder and controller (`ArmStretch` stretched a long
+  reach, a short arm kept the elbows bent). The panel (`body_calibration_draw.h`: three overlay quads, the panel
+  and a ring per controller, drawn on the CPU in the stroke font of `overlay_text.h`) asks for a T-pose with
+  both triggers; `body_calibration_logic.h` checks it - tracked, eyes over 1 m, a height (eyes / 0.936) within
+  1.20-2.20 m, each arm within 41 degrees of straight out from a typical adult's shoulder scaled to the eyes,
+  at least 0.72 of a typical arm, the two within 12% of each other, the wrists no more than 1.15 x the eye
+  height apart, the head level and square to the arms, the triggers past 0.6, nothing moving faster than
+  0.3-0.35 m/s - and after 1.5 s of it (a lapse under 0.25 s pauses the hold) averages the eye height and each
+  arm's reach. The wrist is ERVR's own arm target: the grip pose `HandBackOffset` back along the
+  `HandRotOffset`-turned controller forward. The arm length (the longer arm) scales the forearm and hand bone
+  translations in `SolveArm` - `writeT`, the mechanism `ArmStretch` uses - by arm × `HandScale` / (upper arm +
+  forearm), within 0.8-1.25; `ArmStretch` multiplies on top only past that reach. The eye height scales
+  `[Belt] Drop` by height / 1.76 m. Results go to `ERVR.ini` through `ini_file.h` (whole file, renamed into
+  place) and stay in use from the pad worker's atomics until the hot reload brings them back; the launcher's
+  *Redo* writes zeros, which ask again. The panel's input: from its start until each is released the
+  triggers, grips, A and B are zeroed in the pad worker's copy of the controller state, before anything else
+  reads them; combat polling and swing gestures stop, the wheel and the belt get `menu`.
 * **Turning / movement**: ERVR owns the camera controller (`OwnChrCam`, `CameraYawSource=ervr`,
   `CameraTurnByErvr`): the game's follow cam keeps its own yaw state (it is what turned the view whenever the
   character walked at an angle) and writes it into the chr-cam from several places per frame (skipping one of

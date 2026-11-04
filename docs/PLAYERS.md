@@ -31,8 +31,9 @@ files for you.
 
 ## Install and play
 
-1. Download the zip from [Releases](https://github.com/IlyaMez/EldenringVR/releases/latest) and unpack it to a
-   folder you can write to, such as `Documents\ERVR`.
+1. Download **ERVR-v….zip** from [Releases](https://github.com/IlyaMez/EldenringVR/releases/latest), under
+   *Assets*, and unpack it to a folder you can write to, such as `Documents\ERVR`. Not *Source code* and not
+   the green *Code* button: those are the source, with no launcher in them.
 2. Start **ERVR Launcher.exe**. If Windows says it protected your PC, choose *More info*, then *Run anyway*.
 3. The **Play** tab checks this PC: the game in your Steam libraries and its patch, the OpenXR runtimes, the
    headset (*Check* asks the runtime), ERVR in the game folder, and flat mods in VR's way. Fix anything it
@@ -41,6 +42,12 @@ files for you.
    parks the flat render mods, turns off the game's depth of field, motion blur and ray tracing, starts Steam
    if needed, and starts the game with EAC off (through Seamless Co-op when it is installed). `ERVR.log`
    shows on the Play tab as the game runs.
+5. The first time you play, a panel in the headset asks you to calibrate your body: stand tall, look ahead,
+   stretch both arms straight out to the sides (a T-pose) and hold both triggers until the bar fills, about a
+   second and a half. The Tarnished's arms then take your arm's length, so his hands sit on your controllers
+   with his elbows bending as yours do, and the belt hangs at your waist. B skips it. The launcher's Options >
+   Body > *Body calibration* shows your height and arm length; its *Redo* asks again at the next moment of
+   play, mid-game too.
 
 The launcher's other tabs:
 
@@ -75,6 +82,7 @@ Defaults for Quest Touch controllers. Every button is a key in `ERVR.ini` (`[But
 | Left stick click | Crouch |
 | Left stick click held + tilt | D-pad: switch spells, items and weapons in the quick slots |
 | Right stick click | Lock on |
+| T-pose, both triggers held | Calibrates your body, when the panel asks; B skips it. Until you let go, the triggers, grips, A and B do nothing in the game |
 
 ### Fighting
 
@@ -117,7 +125,7 @@ animation apply. Open the hand and the item goes back. X with nothing in your ha
 quick slot. The belt turns with your body and holds still while you reach for it or look down at it. Because
 the shortcut holds Y, using a belt item right beside something you can interact with (a grace, an item on the
 ground) interacts with it instead, exactly as the pouch does on a gamepad. Where it hangs, how big the items
-are and which hands take them are in `[Belt]` in `ERVR.ini`.
+are and which hands take them are in `[Belt]` in `ERVR.ini`; with a body calibration its height follows yours.
 
 ### Menus
 
@@ -171,7 +179,12 @@ The launcher's Options tab has those and the other settings players change most.
 - **Weapon angle** (`[FirstPerson] HandRotOffsetX`, 45 by default): how the weapon sits in your hand. If you
   have to bend your wrist forward to hold the blade upright, raise it; if the blade leans too far forward,
   lower it. Options > Body has it as a slider.
+- **Body calibration** (`[Body]`): your eye height and arm length from the T-pose (above). `FitArms` gives the
+  Tarnished your arm's length, `FitBelt` puts the belt at your waist; `EyeHeightMm=0` and `ArmLengthMm=0` (the
+  launcher's *Redo*) ask for the T-pose again. The launcher's *Defaults* keeps your calibration.
 - **Combat** (`[Combat]`): physical melee, speed-scaled damage, weapon weight, two-handing, blocking, cast aim.
+  *Swing threshold* (`ContactOnSpeed`, 0.8 m/s) is how fast the blade's tip must move to strike: raise it if
+  slow moves attack, lower it if gentle swings miss.
 - `[General] LogLevel=debug` writes much more to `ERVR.log`: use it when you report a bug.
 
 Copying a fresh `ERVR.ini` over yours resets your settings; the launcher keeps yours when it updates ERVR.
@@ -238,9 +251,13 @@ in this release and not yet tried on a suit: tell us in `#ervr-help` if a side f
 | The picture is washed out, doubled or broken | A flat render mod is in the way. Start from the launcher, which parks them. |
 | Low frame rate, or play feels sluggish | Lower *Resolution* in Options and the game's own graphics settings. In Virtual Desktop pick 72, 80 or 90 Hz yourself: games only get its current rate. *Big screen* is the cheap fallback. |
 | The stick does nothing in a menu | Hold the left stick click for half a second: menu navigation by hand turns on for menus ERVR did not notice. |
-| A swing does nothing | Swing faster: a slow push is not an attack. In a menu, combat stands down on purpose. |
+| A swing does nothing | Swing faster: a slow push is not an attack. In a menu, combat stands down on purpose. Options > Combat > *Swing threshold* sets how fast a strike must be. |
+| Slow moves, or a blade resting on a wall, keep attacking | Raise Options > Combat > *Swing threshold* (`[Combat] ContactOnSpeed`, 0.8 m/s): the blade's tip must move faster than that to strike. |
+| A launcher slider saved a tenth of what you set (90° became 9°) | That was the 0.6.0 and 0.6.5 launcher, for *Smooth turn speed*, *Weapon angle* and *Body haptics*: update and set them again. |
 | A door, lever, lift or new grace ignores Y | That was 0.6.0: update to 0.6.5 or later. ERVR corrects 0.6.0's `Pass2FullFrameKeep` / `Pass2SafeKeep` lines in your `ERVR.ini` by itself; if you typed other values there, delete both lines. |
 | The weapon points too far up, or you bend your wrist to hold it upright | Options > Body > *Weapon angle*. |
+| The Tarnished's arms look stretched, or his elbows stay bent with your arms straight | Options > Body > *Body calibration* > *Redo*, then stand tall in the T-pose when the panel asks. |
+| The calibration panel keeps saying *Check your headset's floor* | The headset's floor is off (it measures you under 1.20 m or over 2.20 m tall): set the floor in the headset's own settings, then hold the T-pose again. |
 | Your antivirus removes `dxgi.dll` or `ERVR.dll` | See below; restore the file and allow the folder. |
 | Anything else | Ask in `#ervr-help` with what happened and your `ERVR.log`. |
 

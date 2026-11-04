@@ -365,6 +365,11 @@ void Config::Load(const std::wstring& path) {
     beltGrabRadius     = GetF(ini, L"Belt", L"GrabRadius", beltGrabRadius);
     beltFollowDeg      = GetF(ini, L"Belt", L"FollowDegrees", beltFollowDeg);
     beltOpacity        = GetF(ini, L"Belt", L"Opacity", beltOpacity);
+    bodyEyeHeightMm       = GetI(ini, L"Body", L"EyeHeightMm", bodyEyeHeightMm);
+    bodyArmLengthMm       = GetI(ini, L"Body", L"ArmLengthMm", bodyArmLengthMm);
+    bodyCalibrationPrompt = GetB(ini, L"Body", L"CalibrationPrompt", bodyCalibrationPrompt);
+    bodyFitArms           = GetB(ini, L"Body", L"FitArms", bodyFitArms);
+    bodyFitBelt           = GetB(ini, L"Body", L"FitBelt", bodyFitBelt);
     beltHaptics        = GetB(ini, L"Belt", L"Haptics", beltHaptics);
     beltPouchButton    = GetS(ini, L"Belt", L"PouchButton", beltPouchButton);
     beltDirections     = GetS(ini, L"Belt", L"Directions", beltDirections);

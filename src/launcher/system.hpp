@@ -152,7 +152,8 @@ Change switchToFlat(const Scan& scan);
 // install.ps1 -Uninstall: ERVR's DLLs and the bundled ReShade gone (the old dxgi.dll back); ERVR.ini, its logs
 // and ReShade.ini stay.
 Change uninstallErvr(const Scan& scan);
-// The game folder's ERVR.ini replaced by this launcher's, the old one kept beside it.
+// The game folder's ERVR.ini replaced by this launcher's, the old one kept beside it; the body calibration
+// ([Body] EyeHeightMm, ArmLengthMm, CalibrationPrompt) carried over.
 Change restoreDefaultIni(const Scan& scan);
 // The effects `which` names switched off in every GraphicsConfig.xml, each file first kept once as
 // GraphicsConfig_ervr_backup.xml (ERVR.dll's backup, the same rule). Refused while the game runs: it writes the

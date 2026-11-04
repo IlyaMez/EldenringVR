@@ -132,6 +132,7 @@ add_library(ERVR SHARED
   src/ervr/params_er.cpp
   src/ervr/weapon_wheel.cpp
   src/ervr/belt.cpp
+  src/ervr/body_calibration.cpp
   src/ervr/overlay_canvas.cpp
   src/ervr/overlay_layers.cpp
   src/ervr/item_icons.cpp
@@ -208,7 +209,7 @@ endif()
 option(ERVR_BUILD_REGRESSION_TESTS "Build camera, pose, input, and action-queue regression tests" OFF)
 if(ERVR_BUILD_REGRESSION_TESTS)
   enable_testing()
-  foreach(_test head_anchor action_queue pose_frame two_hand_aim two_hand_grip weapon_motion weapon_contact body_pose virtual_pad movement_facing ride_state mounted_rider game_version game_res icon_decode weapon_wheel belt body_haptics hud_target)
+  foreach(_test head_anchor action_queue pose_frame two_hand_aim two_hand_grip weapon_motion weapon_contact body_pose virtual_pad movement_facing ride_state mounted_rider game_version game_res icon_decode weapon_wheel belt body_haptics hud_target body_calibration)
     add_executable(test_${_test} tools/test_${_test}.cpp)
     target_include_directories(test_${_test} PRIVATE src/ervr)
     add_test(NAME ${_test} COMMAND test_${_test})

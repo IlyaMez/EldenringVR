@@ -3,6 +3,7 @@
 #include "config.h"
 #include "game_memory.h"
 #include "game_version.h"
+#include "ini_file.h"
 #include "log.h"
 #include <windows.h>
 #include <MinHook.h>
@@ -412,37 +413,9 @@ void __fastcall Hook_SetPage(uint8_t* composite, int kind) {
 }
 
 // ---- ERVR.ini -------------------------------------------------------------------------------------------
-std::string ReadAll(const std::wstring& path) {
-    std::string out;
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE)
-        return out;
-    LARGE_INTEGER size{};
-    if (GetFileSizeEx(h, &size) && size.QuadPart > 0 && size.QuadPart < (16 << 20)) {
-        out.resize((size_t)size.QuadPart);
-        DWORD got = 0;
-        if (!ReadFile(h, out.data(), (DWORD)out.size(), &got, nullptr))
-            got = 0;
-        out.resize(got);
-    }
-    CloseHandle(h);
-    return out;
-}
-// Whole, then renamed into place: the hot-reload never reads half a file.
-bool WriteAll(const std::wstring& path, const std::string& text) {
-    const std::wstring temp = path + L".tab";
-    HANDLE h = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE)
-        return false;
-    DWORD put = 0;
-    const bool ok = WriteFile(h, text.data(), (DWORD)text.size(), &put, nullptr) && put == text.size();
-    CloseHandle(h);
-    if (ok && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        return true;
-    DeleteFileW(temp.c_str());
-    return false;
-}
+// Whole, then renamed into place: the hot-reload never reads half a file (ini_file.h).
+std::string ReadAll(const std::wstring& path) { return IniReadAll(path); }
+bool WriteAll(const std::wstring& path, const std::string& text) { return IniWriteAll(path, text, L".tab"); }
 
 bool CheckGame() {
     for (const GameFn& f : kFns) {

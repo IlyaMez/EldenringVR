@@ -100,6 +100,16 @@ int main() {
     for (const auto& entry : fs::directory_iterator(game / "ERVR"))
         kept |= entry.path().extension() == ".bak" && Read(entry.path()) == "[VR]\nStereoMode=cinema\n";
     Check(kept, "the player's settings kept as a .bak");
+    // The body calibration measures the player; it is no setting, and Defaults keeps it.
+    Write(game / "ERVR" / "ERVR.ini", "[VR]\nStereoMode=cinema\n[Body]\nEyeHeightMm=1760\nArmLengthMm=640\nCalibrationPrompt=true\n");
+    change = restoreDefaultIni(scan);
+    {
+        const std::string now = Read(game / "ERVR" / "ERVR.ini");
+        Check(change.ok && text::iniGet(now, "Body", "EyeHeightMm") == "1760" && text::iniGet(now, "Body", "ArmLengthMm") == "640" &&
+                  text::iniGet(now, "Body", "CalibrationPrompt") == "true",
+              "Defaults keeps the body calibration");
+        Check(text::iniGet(now, "VR", "StereoMode") != "cinema", "and none of the player's settings");
+    }
 
     // ERVR.ini edits as the Options tab makes them, through the file.
     auto ini = readIni((game / "ERVR" / "ERVR.ini").wstring());

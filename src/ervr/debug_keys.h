@@ -23,6 +23,7 @@
 //                 mapping (HandRotOffsetX), for dialling out the "weapon points at me"
 //                 grip-pose offset live; bake the logged winner into the ini
 //   Numpad 0  re-announce the current state (haptic + log)
+//   Numpad *  the T-pose body calibration, at the next moment of play (body_calibration.h)
 //
 // Haptics: one pulse = value returned to default/off, two = alternative/on, three = the
 // third or later entry in a cycle.

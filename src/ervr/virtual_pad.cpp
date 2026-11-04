@@ -8,6 +8,7 @@
 #include "log.h"
 #include "game_memory.h"
 #include "belt.h"
+#include "body_calibration.h"
 #include "weapon_wheel.h"
 #include <mutex>
 #include <cctype>
@@ -153,6 +154,19 @@ void VirtualPadUpdate(double now) {
     uint16_t held = 0;   // buttons held as long as the physical control is held
     uint8_t lt = 0, rt = 0;
 
+    // ---- body calibration ------------------------------------------------------
+    // The T-pose panel reads the controls first: while it asks, the triggers, grips, A and B are its own (each until
+    // let go), so everything below sees them released - no attack, guard, wheel, belt or grab. Last update's menu
+    // state gates it (this update's is worked out below, from controls the panel may not have).
+    static bool s_menuBefore = false;
+    const CalibPadOut calib = BodyCalibrationUpdate(tr, in, now, s_menuBefore);
+    for (int h = 0; h < 2; ++h) {
+        if (calib.trigger[h]) { in.indexTrigger[h] = 0.f; in.buttons &= ~(h == HandLeft ? VRB_LTrigger : VRB_RTrigger); }
+        if (calib.grip[h]) { in.handTrigger[h] = 0.f; in.buttons &= ~(h == HandLeft ? VRB_LGrip : VRB_RGrip); }
+        if (calib.hapticAmp[h] > 0.f) Haptic((Hand)h, calib.hapticAmp[h], now, calib.hapticSec[h]);
+    }
+    in.buttons &= ~calib.buttons;
+
     auto mapHeld = [&](uint16_t mask, bool down) {
         if (!down || !mask) return;
         if (mask == VP_LT) lt = 255; else if (mask == VP_RT) rt = 255; else held |= mask;
@@ -265,6 +279,7 @@ void VirtualPadUpdate(double now) {
     // sticks raw (left pans, RIGHT ZOOMS - 2026-08-31 "can navigate but not zoom": ervrTurn was
     // consuming the right stick for view yaw with the world sim still live behind the map).
     const bool anyMenu = g_menuMode || gameMenu == 1 || mapCam;
+    s_menuBefore = anyMenu;
     CombatSetMenuOpen(anyMenu);
 
     // Left stick click: tap = LS (crouch); hold + tilt = D-pad (quick slots).
@@ -380,7 +395,7 @@ void VirtualPadUpdate(double now) {
     // The pouch's four shortcut items hang at the waist: a grip closed on one takes it, the use button uses it
     // (the game's own Event Action + D-pad shortcut), an open hand puts it back. Before combat, so a grip closed
     // on a belt item is never read as a two-hand grab, and the hand holding one never swings.
-    const BeltPadOut belt = BeltUpdate(tr, in, now, anyMenu || CombatMenuOpen());
+    const BeltPadOut belt = BeltUpdate(tr, in, now, anyMenu || CombatMenuOpen() || calib.showing);
 
     // ---- face buttons ------------------------------------------------------
     const uint32_t faces = in.buttons & ~belt.swallow;
@@ -393,8 +408,9 @@ void VirtualPadUpdate(double now) {
 
     // ---- gestures ----------------------------------------------------------
     // Physical combat (swing -> game AttackBehavior event) takes over from button pulses when active.
+    // The T-pose is no swing: combat sees still hands while the calibration panel asks.
     bool physical = CombatHandlesSwings();
-    if (physical && !g_menuMode) CombatPollHands(tr, in, now);
+    if (physical && !g_menuMode && !calib.showing) CombatPollHands(tr, in, now);
     else CombatPollHands(VRTracking{}, VRInputState{}, now);   // keeps its state machine idle
     if (uint32_t hr = CombatTakeHapticRequests(); hr && c.gestureHaptics) {
         for (int h = 0; h < 2; ++h) {
@@ -419,7 +435,7 @@ void VirtualPadUpdate(double now) {
         CombatNotifyButton(mask, now);
         if (c.gestureHaptics) Haptic(h, amp, now, 0.08);
     };
-    if (!g_menuMode && !physical && !CombatMenuOpen()) {   // muted in menus: a swing there would press RB/RT/LB = tab switching / item use
+    if (!g_menuMode && !physical && !CombatMenuOpen() && !calib.showing) {   // muted in menus: a swing there would press RB/RT/LB = tab switching / item use
         if (sr == Swing::Light) fire(g_map.light, HandRight, 0.5f);
         if (sr == Swing::Heavy) fire(g_map.heavy, HandRight, 1.0f);
         if (sl == Swing::LeftSwing) fire(g_map.leftSwing, HandLeft, 0.6f);
@@ -429,7 +445,7 @@ void VirtualPadUpdate(double now) {
     // A grip held still opens that hand's weapon wheel, so a squeeze the wheel may still claim stays
     // off the pad; a quick one comes back as a single tap of the grip's mapping. After combat, whose
     // two-hand grab and swing state the wheel's gate reads.
-    const WheelPadOut wheel = WeaponWheelUpdate(tr, in, now, anyMenu || CombatMenuOpen());
+    const WheelPadOut wheel = WeaponWheelUpdate(tr, in, now, anyMenu || CombatMenuOpen() || calib.showing);
     // A grip holding a belt item is the belt's: its [Buttons] mapping stays off the pad too.
     mapHeld(g_map.lgrip, lGrip && !wheel.holdGrip[HandLeft] && !belt.holdGrip[HandLeft]);
     mapHeld(g_map.rgrip, rGrip && !wheel.holdGrip[HandRight] && !belt.holdGrip[HandRight]);

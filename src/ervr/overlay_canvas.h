@@ -32,7 +32,17 @@ const Icon* CanvasIcon(int iconId, int maxSide);
 struct Canvas {
     int w = 0, h = 0;
     std::vector<Px> px;
-    void Reset(int size) { w = h = size; px.assign((size_t)size * size, Px{}); }
+    void Reset(int size) { Reset(size, size); }
+    void Reset(int width, int height) { w = width; h = height; px.assign((size_t)width * height, Px{}); }
+    // A rectangle's cover, its edges anti-aliased (px, y down).
+    void Rect(float x0, float y0, float x1, float y1, const Px& c) {
+        for (int y = std::max(0, (int)std::floor(y0)); y <= std::min(h - 1, (int)std::ceil(y1)); ++y) {
+            const float cy = Clamp(std::min((float)y + 1.f, y1) - std::max((float)y, y0), 0.f, 1.f);
+            if (cy <= 0.f) continue;
+            for (int x = std::max(0, (int)std::floor(x0)); x <= std::min(w - 1, (int)std::ceil(x1)); ++x)
+                Blend(x, y, c, cy * Clamp(std::min((float)x + 1.f, x1) - std::max((float)x, x0), 0.f, 1.f));
+        }
+    }
     void Blend(int x, int y, const Px& c, float cov) {
         if (cov <= 0.f) return;
         if (cov > 1.f) cov = 1.f;

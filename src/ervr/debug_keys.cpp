@@ -1,4 +1,5 @@
 #include "debug_keys.h"
+#include "body_calibration.h"
 #include "frame_probe.h"
 #include "hud.h"
 #include "vr_backend.h"
@@ -220,6 +221,12 @@ void DebugKeysTick() {
     }
     if (Pressed(VK_NUMPAD0)) {
         Announce();
+        Buzz(1);
+    }
+    if (Pressed(VK_MULTIPLY)) {
+        // The T-pose body calibration now (at the next moment of play), whatever [Body] holds.
+        BodyCalibrationRequest();
+        LOGI("[keys] body calibration asked for");
         Buzz(1);
     }
 }

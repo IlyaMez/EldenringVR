@@ -5,7 +5,39 @@ release workflow and published on GitHub Releases and Nexus Mods.
 
 ## Unreleased
 
+### Body calibration
+* The first time you play, a panel in the headset asks for a T-pose: stand tall, look ahead, stretch both arms
+  straight out to the sides and hold both triggers until the bar fills (1.5 s). A line on the panel says what to
+  change (arms out, straighten them, look ahead, the headset's floor), and a ring at each controller turns gold
+  while that arm is in place and fills with the hold. ERVR then has your height and arm length:
+  * The Tarnished's arms take your arm's length. His hands always sat on your controllers, so what did not fit
+    was the arm between: a long reach stretched his forearm and upper arm, a short arm kept his elbows bent.
+    Now your straight arm is his straight arm, and a bent one bends his elbow as much. The stretch still adds to
+    it past that reach.
+  * The belt hangs at your waist: `[Belt] Drop` is for a 1.76 m player and follows your height (0.64 m below
+    the eyes at 1.88 m).
+* B skips it, and ERVR asks no more. From the panel's start until each is let go, the triggers, grips, A and B
+  do nothing in the game (no swing, wheel, belt or grab either); the sticks, the menu button, X and Y work. A
+  menu, a cutscene, a load, Torrent or the big screen holds the panel until play returns.
+* The launcher's Options > Body > **Body calibration** shows your height and arm length; **Redo** asks for the
+  T-pose again at the next moment of play, mid-game too (**Ask again** after a skip). *Defaults* keeps your
+  calibration. Kept in `ERVR.ini` `[Body]` (`EyeHeightMm`, `ArmLengthMm`; `FitArms` and `FitBelt` turn either
+  use off). Numpad * (NumLock on) asks for it while testing.
+* The log says what was measured (`[calib] body calibrated ...`) and what it changed (`[body] left arm fitted
+  to your calibration ...`, `[belt] hangs ... fitted to your calibrated ...`).
+
 ### Fixes
+* Turning with the stick no longer swings your weapons. The blade's speed was measured against ERVR's own
+  play-space origin, which turns about your head with every stick turn and jumps to your head when you step
+  35 cm away: a smooth turn at the default 120°/s added up to 0.7 m/s to every blade tip, a snap turn or a
+  recentre a one-frame spike, against the 0.8 m/s that opens a strike. Speeds are now measured in the headset's tracking space, as the
+  controllers report them, and a controller that jumps faster than a hand can move (a tracking loss coming
+  back) opens nothing. Reported as constant attacking and a stamina bar that empties in fights.
+* The launcher's sliders save what they show. A whole number lost its trailing zeros: a 90° weapon angle was
+  saved as 9°, a 200°/s turn speed as 2°/s, 100% body haptics as 1%. Affected *Smooth turn speed*, *Weapon
+  angle* and *Body haptics* in 0.6.0 and 0.6.5; if you moved one of them, set it again.
+* The download steps say which file: **ERVR-v….zip** under *Assets*, not *Source code* or the green *Code*
+  button, which have no launcher in them.
 * The card shown after picking up a new item no longer stays on screen, ignoring every button and menu until
   you die or travel. Cause, measured: the game decides once per frame which prompt (door, lever, grace, item
   on the ground) the interact button answers, and the second eye's pass made that decision a second time.
@@ -16,6 +48,13 @@ release workflow and published on GitHub Releases and Nexus Mods.
 * The log records every interact press the game accepts and what each pass changed in the prompts, the
   item-get popups and the menu's UI elements (`[p2watch]` lines, `[VR] Pass2Watch`), so a stuck card or a
   dead door can be traced from a log.
+
+### Combat
+* Options > Combat > **Swing threshold** (`[Combat] ContactOnSpeed`, 0.8 m/s as before): how fast the blade's
+  tip must move to strike. Raise it if slow moves or a blade resting on a wall keep attacking.
+* The 5 s combat line in `ERVR.log` now says where the stamina bar went: what the game took and gave back with
+  a strike live and without one, what ERVR refunded, and the lowest it got. A report of stamina "gone in a
+  blink" then shows whether strikes cost it or stopped its regeneration.
 
 ### Sharper at the same GPU cost
 * The game now renders a frame shaped like the view the two eyes share (2736x2832 on a Quest 3 at

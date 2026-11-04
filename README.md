@@ -58,7 +58,8 @@ your hands, and melee where the swing you make is the attack. One zip, one launc
   own camera, both at the same instant. Menus, loading screens and cutscenes go on a big screen in the
   headset.
 - **First person, in the body.** Your head is the camera: look around, lean, duck. Look down and your
-  character is there, the arms following your controllers.
+  character is there, the arms following your controllers. Strike a T-pose once and its arms take the length
+  of yours.
 - **Your swing is the attack.** Swing a weapon and ERVR fires the game's own attack along the blade in your
   hand. Damage, poise, status and stamina come from the game, and a faster swing hits harder. Weapons have
   weight: a head-heavy one is slower to turn than a balanced one.
@@ -138,8 +139,9 @@ ERVR needs no other mod and does not use R.E.A.L. VR.
 
 ## Install and play
 
-1. Download the zip from [Releases](https://github.com/IlyaMez/EldenringVR/releases/latest) and unpack it to
-   a folder you can write to, such as `Documents\ERVR`.
+1. Download **ERVR-v….zip** from [Releases](https://github.com/IlyaMez/EldenringVR/releases/latest), under
+   *Assets*, and unpack it to a folder you can write to, such as `Documents\ERVR`. Not *Source code* and not
+   the green *Code* button: those are the source, with no launcher in them.
 2. Start **ERVR Launcher.exe**. If Windows says it protected your PC, choose *More info*, then *Run anyway*.
 3. Fix anything the Play tab marks: the game and its patch, the VR runtime, the headset.
 4. Connect your headset and press **START VR**.

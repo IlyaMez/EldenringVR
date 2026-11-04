@@ -1312,6 +1312,11 @@ struct CombatTally {
     int unattributed = 0, foreign = 0, foreignDmg = 0, outside = 0;
     int stamMarks = 0, stamOnly = 0, rises = 0, riseTotal = 0;
     int rideStrikes = 0; float rideBlade = 1e9f, rideNearest = 1e9f;   // on Torrent: reach of the strikes
+    // Where the stamina bar went, from the game's own frame-to-frame changes (ERVR's writes excluded): with a
+    // strike live and without one, what it lost and what it regained, and what ERVR gave back. Players report
+    // a bar that empties in fights and never recovers; these say whether strikes cost it or stop its regen.
+    int stamFrames[2] = {}, stamLost[2] = {}, stamGained[2] = {};   // [0] no strike live, [1] a strike live
+    int stamRefunded = 0, stamLow = INT_MAX, stamMax = 0;
 } g_tally;
 double g_tallyAt = 0;
 
@@ -1341,13 +1346,18 @@ void FlushTally(double now) {
         else if (t.rideBlade > 1e8f) snprintf(ride, sizeof(ride), " | on Torrent: %d strikes, nearest enemy %.1f m, blade not measured", t.rideStrikes, t.rideNearest);
         else snprintf(ride, sizeof(ride), " | on Torrent: %d strikes, the blade came within %.2f m of an enemy's body (nearest enemy %.1f m)", t.rideStrikes, t.rideBlade, t.rideNearest);
     }
-    if (t.strikes[0] + t.strikes[1] + t.hitFrames + t.foreign + t.outside + t.rises + spentEnds + spentTimeouts > 0)
+    char stamina[200] = "";
+    if (t.stamMax > 0)
+        snprintf(stamina, sizeof(stamina), " | stamina (game's own changes): striking %d frames -%d +%d, otherwise %d frames -%d +%d; ERVR refunded %d; low %d of %d",
+                 t.stamFrames[1], t.stamLost[1], t.stamGained[1], t.stamFrames[0], t.stamLost[0], t.stamGained[0], t.stamRefunded,
+                 t.stamLow == INT_MAX ? 0 : t.stamLow, t.stamMax);
+    if (t.strikes[0] + t.strikes[1] + t.hitFrames + t.foreign + t.outside + t.rises + spentEnds + spentTimeouts + t.stamLost[1] > 0)
         LOGI("[combat] 5 s: strikes right %d (%d landed, %d budget-spent) left %d (%d landed, %d budget-spent); spent strikes re-armed at a speed valley %d, by timeout %d | "
              "own hit-frames %d, %d damage, mean hit %.2f of a vanilla hit, %d on-hit stamina marks (%d with no HP drop seen) | HP drops: %d without a recorded attacker (counted as ours), "
-             "%d not ours (%d damage), %d of ours outside a strike | HP rose %d times (+%d)%s%s",
+             "%d not ours (%d damage), %d of ours outside a strike | HP rose %d times (+%d)%s%s%s",
              t.strikes[HandRight], t.landed[HandRight], t.spent[HandRight], t.strikes[HandLeft], t.landed[HandLeft], t.spent[HandLeft], spentEnds, spentTimeouts,
              t.hitFrames, t.dmg, t.sliceN ? t.sliceSum / (float)t.sliceN : 0.f, t.stamMarks, t.stamOnly, t.unattributed, t.foreign, t.foreignDmg, t.outside,
-             t.rises, t.riseTotal, ride, GameERCoopInSession() ? " | co-op session" : "");
+             t.rises, t.riseTotal, stamina, ride, GameERCoopInSession() ? " | co-op session" : "");
     t = CombatTally{};
 }
 
@@ -1500,6 +1510,14 @@ void GameFrameBody(uint8_t* player) {
     bool stamHit = stamKnown && stamDrop >= (stamOff ? (oneHit ? kHitMarkStamina / 2 : 1) : c.kineticHitStamina);
     if (blk.raised && stamKnown && stamDrop >= c.blockImpactStamina) stamHit = false;
     const bool striking = cmd[0].active || cmd[1].active;
+    if (stamKnown) {   // the game's own change since our last frame (regen, rolls, charges) - ERVR's writes are in g_prevStam
+        const int d = stamAtEntry - g_prevStam, k = striking ? 1 : 0;
+        ++g_tally.stamFrames[k];
+        if (d < 0) g_tally.stamLost[k] -= d; else g_tally.stamGained[k] += d;
+        if (stamAtEntry < g_tally.stamLow) g_tally.stamLow = stamAtEntry;
+        g_tally.stamMax = maxStam;
+    }
+    bool refundCounted = false;
     // On an enemy another player's game owns, the game records no attacker at all (2026-10-31: every
     // co-op drop read last_hit_by ffffffff, ours included), so a partner's hit there reads as ours and
     // would end our swing. Once the stamina mark has been seen landing with such a drop three times this
@@ -1553,7 +1571,10 @@ void GameFrameBody(uint8_t* player) {
             }
             // The game charged its behavior cost: give it back (only an actual drop - with the
             // watcher signalling the hit there may be nothing to refund).
-            if (stamOff && stamAtEntry < g_prevStam) { WriteStamina(player, g_prevStam); stam = g_prevStam; }
+            if (stamOff && stamAtEntry < g_prevStam) {
+                WriteStamina(player, g_prevStam); stam = g_prevStam;
+                if (!refundCounted) { g_tally.stamRefunded += g_prevStam - stamAtEntry; refundCounted = true; }
+            }
             if (c.combatDebug && (!c.kineticContinuous || s_strikeHits[h] == 1)) LOGD("[combat] %s strike HIT #%d (%d damage, stamina %d -> %d)%s", HandName(h), s_strikeHits[h], ef.dmgTotal, g_prevStam, stamAtEntry, stamOff ? " refunded" : "");
             if (oneHit) {   // the swing landed its one hit: spent (the worker re-arms on the next swing)
                 std::lock_guard<std::mutex> g(g_mtx);
@@ -1718,7 +1739,7 @@ void GameFrameBody(uint8_t* player) {
         if (!anyStrike && maxStam > 0 && g_prevStam != INT_MIN && g_prevStam - stamAtEntry >= c.blockImpactStamina) {
             const int drop = g_prevStam - stamAtEntry;
             const bool deflect = blk.into >= c.deflectSpeed && (NowSec() - blk.intoT) < 0.25;
-            if (deflect) { WriteStamina(player, g_prevStam); stam = g_prevStam; g_haptic.fetch_or(32u); }
+            if (deflect) { WriteStamina(player, g_prevStam); stam = g_prevStam; g_haptic.fetch_or(32u); g_tally.stamRefunded += drop; }
             else g_haptic.fetch_or(16u);
             BodyHapticsPost(deflect ? BodyKind::Deflect : BodyKind::Block, HandLeft, deflect ? 1.f : Clamp(.4f + (float)drop / 100.f, .4f, 1.f));
             if (c.combatDebug) LOGD("[combat] blocked hit: stamina -%d quality %.2f into %.2f m/s%s", drop, blk.quality, blk.into, deflect ? " -> DEFLECT (refunded)" : "");

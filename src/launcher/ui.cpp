@@ -1,4 +1,5 @@
 #include "ui.hpp"
+#include "body_calibration_logic.h"
 #include "imgui_internal.h"
 #include <algorithm>
 #include <cfloat>
@@ -1806,7 +1807,8 @@ void App::options(ImVec2 origin, ImVec2 size) {
             ask_ = Ask::defaults;
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled))
-            tip("Puts this launcher's ERVR.ini in place of the game folder's; yours is kept beside it.");
+            tip("Puts this launcher's ERVR.ini in place of the game folder's; yours is kept beside it. Your body "
+                "calibration stays.");
         ImGui::EndDisabled();
         top += height + gap;
     }
@@ -1999,6 +2001,32 @@ void App::options(ImVec2 origin, ImVec2 size) {
                flip, [&] { onOff("##fp", "FirstPerson", "Enabled", true); });
         option("Hand-tracked arms", "The character's arms and weapons follow your controllers.", flip,
                [&] { onOff("##hands", "FirstPerson", "HandTracking", true); });
+        // The T-pose calibration made in the headset ([Body]). Redo empties it, and ERVR asks again at the next moment
+        // of play - mid-game too, through the ini's hot reload.
+        {
+            const int eyeMm = std::atoi(iniValue("Body", "EyeHeightMm", "0").c_str());
+            const int armMm = std::atoi(iniValue("Body", "ArmLengthMm", "0").c_str());
+            const bool calibrated = ervr::CalibValid(eyeMm, armMm);
+            const bool prompt = truthy(iniValue("Body", "CalibrationPrompt", "true"));
+            const std::string words =
+                calibrated ? format("Height %.2f m, arms %.2f m, from your T-pose in the headset: the Tarnished's arms "
+                                    "take your length and the belt hangs at your waist. Redo asks for it again.",
+                                    ervr::CalibHeight(eyeMm / 1000.f), armMm / 1000.0)
+                : prompt ? std::string("In the headset, stand in a T-pose and hold both triggers: the Tarnished's arms "
+                                       "take your length and the belt your height. B skips it.")
+                         : std::string("Skipped: the Tarnished keeps his own arms. Ask again for the T-pose at the next "
+                                       "moment of play.");
+            option("Body calibration", words.c_str(), S(116), [&] {
+                if ((calibrated || !prompt) && button(calibrated ? "Redo" : "Ask again", S(116))) {
+                    setIni("Body", "EyeHeightMm", "0");
+                    setIni("Body", "ArmLengthMm", "0");
+                    setIni("Body", "CalibrationPrompt", "true");
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+                    tip(gameRunning_ ? "The panel comes up in the headset at the next moment of play."
+                                     : "The panel comes up in the headset when you next play.");
+            });
+        }
         option("Weapon angle", "How the weapon sits in your hand. Higher tips the blade forward, away from you; lower "
                                "stands it back toward you. Set it so you can hold the controller naturally.",
                gauge, [&] { amount("##weaponAngle", "FirstPerson", "HandRotOffsetX", 45, 0, 120, 1, 5, "%.0f\xC2\xB0", 0); });
@@ -2017,6 +2045,11 @@ void App::options(ImVec2 origin, ImVec2 size) {
                flip, [&] { onOff("##melee", "Combat", "Enabled", true); });
         option("Damage follows the swing", "Faster swings with a full windup hit harder; a flick only chips.", flip,
                [&] { onOff("##kinetic", "Combat", "Kinetic", true); });
+        ImGui::BeginDisabled(!truthy(iniValue("Combat", "Kinetic", "true")));
+        option("Swing threshold", "How fast the blade's tip must move to strike. Raise it if slow moves or a blade "
+                                  "resting on a wall keep attacking; lower it if gentle swings don't register.",
+               gauge, [&] { amount("##contactOn", "Combat", "ContactOnSpeed", 0.8f, 0.5f, 4, 1, 0.1f, "%.1f m/s", 1); });
+        ImGui::EndDisabled();
         option("Damage", "Every swing's damage, the difficulty knob: 50% hits for half.", gauge,
                [&] { amount("##damage", "Combat", "KineticDamageScale", 1.f, 25, 200, 100, 5, "%.0f%%", 2); });
         option("Weapon weight", "Heavy weapons lag behind your hand and resist turning; two hands steer them better.",

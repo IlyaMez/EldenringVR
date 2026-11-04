@@ -25,6 +25,8 @@
 #include "frame_probe.h"
 #include "stereo.h"
 #include "belt.h"
+#include "body_calibration.h"
+#include "body_calibration_logic.h"
 #include "weapon_wheel.h"
 #include "body_haptics_er.h"
 #include <windows.h>
@@ -1035,7 +1037,10 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now,
     if (s.init && s.frame == fr) { p = s.pos; q = s.q; return; }
     s.frame = fr;
     const float dt = s.init ? (float)(now - s.t) : 0.f;
-    const bool goodDt = dt >= 0.001f && dt <= 0.1f && (p - s.pos).Length() <= 1.5f;
+    // A controller that moved faster than any hand can (20 m/s) jumped: a tracking loss coming back, a runtime
+    // recentre. That frame measures nothing, so it cannot open a strike.
+    const float moved = (p - s.pos).Length();
+    const bool goodDt = dt >= 0.001f && dt <= 0.1f && moved <= 1.5f && moved <= 20.f * dt;
     s.t = now;
     const Quat wrist = q;
     q = s.twoHandAim.Update(q, handLine, twoHandAim, goodDt ? dt : 0.f, shaftAxis);
@@ -1414,7 +1419,12 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false) {
                     twoHandAim = true; handLine = p - ToGame(other.pos);
                 }
             }
-            { Vec3 pPlay = p - psOrigin; InertiaStep(h, pPlay, q, NowSec(), twoHandAim, handLine, shaftAxis); p = pPlay + psOrigin; }
+            // The weapon's speed is measured in the runtime's tracking space, as the controllers report it, not
+            // against our play-space origin: that origin swings about the head on every stick turn and snaps to the
+            // head when you step 35 cm away, and both read as the blade moving. A 120 deg/s smooth turn added up to
+            // ~0.7 m/s to every tip, a snap turn or a snap a one-frame spike, against a 0.8 m/s ContactOnSpeed: strikes
+            // nobody swung (2026-11-04 reports: "constant attacking", stamina gone in fights).
+            InertiaStep(h, p, q, NowSec(), twoHandAim, handLine, shaftAxis);
             // All three origins end up drift-free: "head" is head-relative by construction (the head offset is
             // added back at the target), the other two are measured from our own play-space origin.
             if (c.handOrigin == "head") p = p - hp;
@@ -1815,6 +1825,26 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
 }
 
 // ---------------------------------------------------------------- arms
+// How much longer the Tarnished's arm (upper arm + forearm = `rigArm` m) on `side` (0 the left) is drawn for the
+// calibrated player: 1 without a calibration or with [Body] FitArms off. Said in the log whenever it changes.
+float ArmFit(float rigArm, int side) {
+    const Config& c = Cfg();
+    const float arm = c.bodyFitArms ? BodyArmLength() : 0.f;
+    const float fit = arm > 0.f ? CalibArmScale(arm, rigArm, c.handScale) : 1.f;
+    static std::atomic<int> s_said[2] = {-1, -1};
+    const int key = (int)std::lround(fit * 1000.f) * 4096 + (int)std::lround(rigArm * 1000.f);
+    if (s_said[side & 1].exchange(key) != key) {
+        if (arm > 0.f)
+            LOGI("[body] %s arm fitted to your calibration: yours %.3f m%s, the Tarnished's %.3f m - drawn x%.3f%s",
+                 side ? "right" : "left", arm, c.handScale != 1.f ? " (times HandScale)" : "", rigArm, fit,
+                 fit <= kCalibMinArmScale + 1e-4f || fit >= kCalibMaxArmScale - 1e-4f ? " (the most ERVR changes them)" : "");
+        else
+            LOGI("[body] %s arm at the Tarnished's own length (%.3f m): %s", side ? "right" : "left", rigArm,
+                 c.bodyFitArms ? "no body calibration yet" : "[Body] FitArms=false");
+    }
+    return fit;
+}
+
 void SolveArm(const Skeleton& s, HkQsTransform* pose, std::vector<HkQsTransform>& local, WorldPose& w, int iUA, int iFA, int iHand,
               const Vec3& target, const Quat& targetQ, const Vec3& pole) {
     if (iUA < 0 || iFA < 0 || iHand < 0) return;
@@ -1824,6 +1854,10 @@ void SolveArm(const Skeleton& s, HkQsTransform* pose, std::vector<HkQsTransform>
     float L1 = axisUA.Length(), L2 = axisFA.Length();
     if (L1 < 0.05f || L2 < 0.05f) return;
     axisUA = axisUA * (1.f / L1); axisFA = axisFA * (1.f / L2);
+    // [Body] FitArms: the arm at the calibrated player's length, about the shoulder (body_calibration_logic.h), so
+    // a straight arm of yours is a straight arm of his; ArmStretch then only adds to it past that reach.
+    const float fit = ArmFit(L1 + L2, iUA == s.L_ua ? 0 : 1);
+    L1 *= fit; L2 *= fit;
 
     Vec3 S = w.pos[iUA];
     Vec3 toT = target - S; float d = toT.Length();
@@ -1870,7 +1904,7 @@ void SolveArm(const Skeleton& s, HkQsTransform* pose, std::vector<HkQsTransform>
         SafeWrite(&pose[i].t[0], t.t, 16);
     };
     writeQ(iUA, lUA); writeQ(iFA, lFA); writeQ(iHand, lHand);
-    if (stretch != 1.f) { writeT(iFA, stretch); writeT(iHand, stretch); }
+    if (stretch * fit != 1.f) { writeT(iFA, stretch * fit); writeT(iHand, stretch * fit); }
     w.q[iUA] = qUA; w.q[iFA] = qFA; w.q[iHand] = targetQ; w.pos[iFA] = E; w.pos[iHand] = T;
 }
 

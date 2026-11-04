@@ -7,6 +7,7 @@
 #include "log.h"
 #include "weapon_wheel.h"
 #include "belt.h"
+#include "body_calibration.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -57,6 +58,9 @@ WheelPadOut WeaponWheelUpdate(const VRTracking&, const VRInputState&, double, bo
 BeltPadOut beltOut;
 BeltPadOut BeltUpdate(const VRTracking&, const VRInputState&, double, bool) { return beltOut; }
 bool BeltOwnsHand(int) { return false; }
+CalibPadOut calibOut;
+VRInputState calibSaw;
+CalibPadOut BodyCalibrationUpdate(const VRTracking&, const VRInputState& in, double, bool) { calibSaw = in; return calibOut; }
 }
 
 int main() {
@@ -198,6 +202,30 @@ int main() {
     Check((Poll().wButtons & (XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_DPAD_RIGHT)) == (XINPUT_GAMEPAD_Y | XINPUT_GAMEPAD_DPAD_RIGHT),
           "the belt's pouch shortcut (Event Action + D-pad) reaches the game");
     beltOut = {};
+
+    // The body calibration's T-pose panel: it sees the controls as they are, and while it holds the triggers, grips,
+    // A and B back the game sees them released; the sticks, X and Y still reach the game.
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    input.indexTrigger[HandRight] = 1.f; input.handTrigger[HandLeft] = 1.f;   // RightTrigger=RB, LeftGrip=LT
+    input.buttons = VRB_A | VRB_B | VRB_X;
+    calibOut = {};
+    {
+        const auto free = Poll();
+        Check((free.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) && free.bLeftTrigger == 255 && (free.wButtons & XINPUT_GAMEPAD_A) &&
+                  (free.wButtons & XINPUT_GAMEPAD_B), "with no calibration panel the triggers, grips, A and B reach the game");
+    }
+    calibOut.trigger[HandRight] = calibOut.grip[HandLeft] = true; calibOut.buttons = VRB_A | VRB_B; calibOut.showing = true;
+    {
+        const auto held = Poll();
+        Check(calibSaw.indexTrigger[HandRight] == 1.f && (calibSaw.buttons & VRB_B), "the calibration reads the controls before anything holds them back");
+        Check(!(held.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) && held.bLeftTrigger == 0,
+              "a trigger or grip the calibration holds never reaches the game");
+        Check(!(held.wButtons & XINPUT_GAMEPAD_A) && !(held.wButtons & XINPUT_GAMEPAD_B), "neither do A (jump) and B (dodge)");
+        Check((held.wButtons & XINPUT_GAMEPAD_X) != 0, "X still reaches the game while the panel asks");
+    }
+    calibOut = {};
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    Poll();
 
     // Valve Index trackpads (LeftPad=MENU, RightPad=DPAD by default): the left press is the menu button -
     // tap START, hold the map - and the right press holds the D-pad in the direction it started in.

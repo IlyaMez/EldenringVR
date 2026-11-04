@@ -928,14 +928,26 @@ Change restoreDefaultIni(const Scan& scan) {
     if (sameFolder(scan.payload, scan.gameDir))
         return {false, false, {"The launcher's ERVR.ini is the game's: there is no other copy to restore from."}};
     Changer c{{}, scan.gameDir};
+    const std::string before = isFile(live) ? readText(live, 1 << 22) : std::string();
     if (isFile(live)) {
         const std::wstring keep = live.wstring() + L"." + stampNow() + L".bak";
         if (!c.copy(live, keep))
             return c.change;
         c.change.lines.push_back("Kept your settings as " + c.name(keep) + ".");
     }
-    if (c.copy(fs::path(scan.payload) / L"ERVR\\ERVR.ini", live))
+    if (c.copy(fs::path(scan.payload) / L"ERVR\\ERVR.ini", live)) {
         c.change.lines.push_back("ERVR.ini is back to ERVR " + scan.payloadVersion + "'s defaults.");
+        // The body calibration is a measurement of you, not a setting: it stays.
+        std::string now = readText(live, 1 << 22);
+        bool carried = false;
+        for (const char* key : {"EyeHeightMm", "ArmLengthMm", "CalibrationPrompt"})
+            if (const auto value = text::iniGet(before, "Body", key)) {
+                now = text::iniSet(now, "Body", key, *value);
+                carried = true;
+            }
+        if (carried && replaceWhole(live.wstring(), now))
+            c.change.lines.push_back("Your body calibration stays.");
+    }
     return c.change;
 }
 

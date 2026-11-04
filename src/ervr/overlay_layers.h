@@ -9,12 +9,15 @@
 namespace ervr {
 struct Dx12Frame;
 
-// New content for overlay `which`: `side` px square, 8-bit sRGB of premultiplied linear colour
+// New content for overlay `which`: `w` x `h` px (rows top first), 8-bit sRGB of premultiplied linear colour
 // (r | g << 8 | b << 16 | a << 24). Taken by swap. Any thread.
-void OverlayPublishImage(int which, int side, std::vector<uint32_t>& rgba);
-// Where it hangs now, in stage space (the image faces +Z), `sizeM` across. Call every update, hidden or not: an
-// overlay whose owner stops refreshing it (controllers gone, a stall) disappears after 300 ms. Any thread.
-void OverlayPublishPose(int which, bool visible, const Pose& pose, float sizeM);
+void OverlayPublishImage(int which, int w, int h, std::vector<uint32_t>& rgba);
+inline void OverlayPublishImage(int which, int side, std::vector<uint32_t>& rgba) { OverlayPublishImage(which, side, side, rgba); }
+// Where it hangs now, in stage space (the image faces +Z, its top along +Y), `widthM` x `heightM`. Call every
+// update, hidden or not: an overlay whose owner stops refreshing it (controllers gone, a stall) disappears after
+// 300 ms. Any thread.
+void OverlayPublishPose(int which, bool visible, const Pose& pose, float widthM, float heightM);
+inline void OverlayPublishPose(int which, bool visible, const Pose& pose, float sizeM) { OverlayPublishPose(which, visible, pose, sizeM, sizeM); }
 // Render thread, before each xrEndFrame.
 void OverlayLayersCompose(IVRBackend* vr, const Dx12Frame& f, VRSubmitLayer& layer);
 void OverlayLayersReleaseGpu();   // render thread: the device is going away

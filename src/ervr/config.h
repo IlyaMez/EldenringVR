@@ -454,6 +454,14 @@ struct Config {
     float beltChordPress = 0.20f;         // s the direction is held with it
     float beltChordTail = 0.15f;          // s Event Action stays down after the direction is let go
 
+    // [Body]  the T-pose body calibration (body_calibration.h): your eye height and arm length, measured in the
+    // headset. ERVR writes the first two; the launcher's Options > Body calibration shows them and its Redo clears them.
+    int   bodyEyeHeightMm = 0;            // standing eye height above the floor, mm; 0 = not calibrated
+    int   bodyArmLengthMm = 0;            // shoulder joint to wrist, mm; 0 = not calibrated
+    bool  bodyCalibrationPrompt = true;   // ask for the T-pose while there is none (B on the panel turns this off)
+    bool  bodyFitArms = true;             // the Tarnished's arms take your arm's length
+    bool  bodyFitBelt = true;             // the belt's Drop follows your height
+
     // [SettingsTab]  an ERVR tab in the game's own Settings (pause menu > System), to the right of Graphics,
     // with the settings players change while playing (settings_tab.h). Enabled is read at startup.
     bool  settingsTab = true;

@@ -1,5 +1,7 @@
 #include "belt.h"
 #include "belt_logic.h"
+#include "body_calibration.h"
+#include "body_calibration_logic.h"
 #include "weapon_wheel.h"
 #include "weapon_wheel_logic.h"   // WheelFrameFacing / WheelOrientation: a quad upright and facing the eyes
 #include "config.h"
@@ -354,7 +356,17 @@ BeltPadOut BeltUpdate(const VRTracking& tr, const VRInputState& in, double now, 
     const double dt = g_lastNow > 0.0 ? Clamp((float)(now - g_lastNow), 0.f, 0.1f) : 0.0;
     g_lastNow = now;
     const Vec3 neck = BeltNeck(tr.head);
-    const float radius = Clamp(c.beltRadius, 0.05f, 0.6f), drop = Clamp(c.beltDrop, 0.1f, 1.5f);
+    // [Belt] Drop is for a 1.76 m player; with a body calibration the belt hangs at your own waist.
+    const float eye = c.bodyFitBelt ? BodyEyeHeight() : 0.f;
+    const float radius = Clamp(c.beltRadius, 0.05f, 0.6f), drop = Clamp(CalibBeltDrop(c.beltDrop, eye), 0.1f, 1.5f);
+    {
+        static float s_said = -1.f;
+        if (std::fabs(drop - s_said) > 0.005f) {
+            s_said = drop;
+            if (eye > 0.f) LOGI("[belt] hangs %.2f m below the eyes: Drop %.2f for a 1.76 m player, fitted to your calibrated %.2f m", drop, c.beltDrop, CalibHeight(eye));
+            else LOGD("[belt] hangs %.2f m below the eyes (Drop; no body calibration%s)", drop, c.bodyFitBelt ? "" : " used: [Body] FitBelt=false");
+        }
+    }
     const float grabR = Clamp(c.beltGrabRadius, 0.03f, 0.3f);
     Vec3 pos[kBeltSlots];
     auto place = [&](float yaw) { for (int k = 0; k < kBeltSlots; ++k) pos[k] = BeltSlotPos(neck, yaw, Deg2Rad(g_angle[k]), radius, drop); };
