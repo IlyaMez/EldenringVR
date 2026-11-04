@@ -129,7 +129,7 @@ are and which hands take them are in `[Belt]` in `ERVR.ini`.
 | Left stick click held 0.5 s | Menu navigation by hand on or off, for menus ERVR does not notice opening (grace sites, shops, level up) |
 
 While a game menu is open, combat stands down: no swings, no injected attacks, and the left stick moves the
-cursor.
+cursor. ERVR's own settings are a tab of the game's System menu ([Settings](#settings)).
 
 ### Valve Index
 
@@ -147,14 +147,20 @@ each trackpad does is `[Buttons] LeftPad` / `RightPad` (`MENU`, `DPAD`, a button
 
 ## Settings
 
-The launcher's Options tab covers the settings players change most. Everything else is in
+In the game: open the menu, choose **System**, and go to the **ERVR Settings** tab, to the right of Graphics
+(its icon is a game pad). Its twelve rows work like the game's own: Walk toward, Turning, Smooth turn speed,
+Physical melee, Damage, Weapon weight, Weapon angle, World scale, Resolution, HUD follows, HUD distance and
+Rumble strength. A change applies within a second and is saved in `ERVR.ini`. (Exe 2.7.2.0, patch 1.17.2.)
+
+The launcher's Options tab has those and the other settings players change most. Everything else is in
 `ELDEN RING\Game\ERVR\ERVR.ini`, and most keys apply within a second while you play.
 
 - **View** (`[VR] StereoMode`): *Full stereo* renders each eye; *Big screen* (`cinema`) shows the flat game
   on a screen in the headset, which is cheap and always works. Menus, loading screens and cutscenes use the big
   screen in either mode.
 - **Resolution** (`[VR] GameResScale`, 86% by default): the share of the headset's pixels the game renders.
-  Lower it if the log warns about stereo pairs per second.
+  Lower it if the log warns about stereo pairs per second. The game renders a frame shaped like your view
+  (`[VR] GameResShape=eye`), so 86% is sharper than 100% was in 0.6.5, for less GPU work.
 - **Frame rate follows the headset** (`[VR] LimiterFollowsHeadset`, on): lifts the game's frame cap above the
   headset's refresh so the runtime never drops to half rate. Game speed is untouched.
 - **The HUD** (`[HUD]`): health, stamina and the rest float on their own panel at headset resolution.

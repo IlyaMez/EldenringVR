@@ -1,4 +1,5 @@
 #include "game_res.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -47,6 +48,40 @@ int main() {
                 if (rh >= 504 && rh <= 4608)
                     Check(h + 36 >= rh && h <= rh + 36, "auto size is the nearest grid point");
             }
+
+    // The eye-shaped frame. Quest 3 through Virtual Desktop reports L54 R40 U44 D55: one
+    // symmetric frustum holding both eyes is tan 54 wide per tan 55 tall.
+    const double kDeg = 3.14159265358979 / 180.0;
+    const double q3 = FrameAspectForFov(std::tan(54 * kDeg), std::tan(40 * kDeg),
+                                        std::tan(44 * kDeg), std::tan(55 * kDeg));
+    Check(q3 > 0.963 && q3 < 0.965, "Quest 3 frame aspect is tan54/tan55 = 0.964");
+    Check(FrameAspectForFov(-1.2, 0.8, 1.0, -1.5) == 1.2 / 1.5, "frame aspect takes the widest |tan| per axis");
+    // At 1.0 it is the 2736x2832 frame measured in-headset on 2026-11-03 (2154x2327 per eye).
+    AutoEyeTarget(2688, 2880, 0.964, 1.0, w, h);
+    SnapGameRes(w, h);
+    Check(Is(w, h, 2736, 2832), "Quest 3 eye-shaped frame at 1.0 is 2736x2832");
+    AutoEyeTarget(2688, 2880, 0.964, 0.86, w, h);
+    SnapGameRes(w, h);
+    Check(Is(w, h, 2352, 2440), "Quest 3 eye-shaped frame at 0.86 is 2352x2440");
+    // Every eye-shaped size keeps its shape (multiples of 8, not pulled onto the 16:9 grid)
+    // and its pixel budget, within the rounding.
+    for (uint32_t ew = 1200; ew <= 4400; ew += 52)
+        for (double a = 0.70; a <= 1.30; a += 0.05)
+            for (double s = 0.5; s <= 1.5001; s += 0.1) {
+                AutoEyeTarget(ew, ew, a, s, w, h);
+                const bool floored = w < 648 || h < 488;   // SnapGameRes's 640x480 floor reshapes these
+                SnapGameRes(w, h);
+                Check(w % 8 == 0 && h % 8 == 0, "eye-shaped size is on multiples of 8");
+                if (floored) continue;
+                if (std::fabs((double)w / h - a) >= 0.02)
+                    std::fprintf(stderr, "eye %u a %.2f s %.1f -> %ux%u\n", ew, a, s, w, h);
+                Check(std::fabs((double)w / h - a) < 0.02, "eye-shaped size keeps its aspect");
+                const double budget = (double)ew * ew * s * s, got = (double)w * h;
+                if (h > 480 && h < 8000) Check(std::fabs(got / budget - 1.0) < 0.02, "eye-shaped size keeps the budget");
+            }
+    // A bogus cached aspect falls back to square rather than a degenerate frame.
+    AutoEyeTarget(2688, 2880, 0.0, 1.0, w, h);
+    Check(w == h, "a bogus aspect gives a square frame");
 
     // Exact 16:9 requests already on the grid are kept, built-in sizes included.
     const uint32_t kept[][2] = {{1920, 1080}, {2560, 1440}, {3200, 1800}, {3840, 2160}, {3584, 2016}};

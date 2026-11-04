@@ -26,6 +26,8 @@
 #include "weapon_wheel.h"
 #include "belt.h"
 #include "body_haptics_er.h"
+#include "settings_tab.h"
+#include "pass2_interact.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -163,6 +165,8 @@ DWORD WINAPI Worker(LPVOID) {
     StereoInit();
     if (Cfg().fpEnabled) GameERInit();
     PatchesInit();   // [Patches] FpsTarget etc.; no-op when unset
+    SettingsTabInit();   // the ERVR tab in the game's Settings
+    Pass2InteractInit();    // action buttons once per frame across the second eye's pass, and what that pass changes
 
     FILETIME iniTime = IniWriteTime(ini);
     bool xinputHooked = false, addonInstalled = false;
@@ -202,6 +206,7 @@ DWORD WINAPI Worker(LPVOID) {
                 uint32_t ew = 0, eh = 0;
                 if (vb->IsReady() && vb->GetRecommendedEyeSize(ew, eh))
                     PatchesNoteHmdEyeSize(ew, eh);
+                if (vb->IsReady()) PatchesNoteHmdFrameAspect(StereoHmdFrameAspect());
             }
         }
         // Hot-reload the ini (any key except VRRuntime/LogLevel/PollHz takes effect immediately).
@@ -213,6 +218,7 @@ DWORD WINAPI Worker(LPVOID) {
                 Cfg().Load(ini);
                 VirtualPadInit();
                 PatchesApplyGameResolution();   // GameRes/GameResScale hot-edit
+                SettingsTabIniChanged();
                 LOGI("ERVR.ini reloaded");
                 ConfigLogNotes();
             }
@@ -222,6 +228,7 @@ DWORD WINAPI Worker(LPVOID) {
         VirtualPadUpdate(t);
         GameERTick();
         BodyHapticsTick(t);   // [bHaptics]: no-op at Level=0
+        SettingsTabTick(t);   // the ERVR tab's changes go into ERVR.ini
         if ((++tick % (int)(5.0 / period)) == 0) {   // heartbeat every ~5s at debug level
             VRTracking tr; VRInputState in;
             long calls, merged, fab; XInputHookStats(calls, merged, fab);
@@ -277,7 +284,7 @@ DWORD WINAPI Worker(LPVOID) {
             // Where a stereo pair's time goes: the two engine passes, and inside them our present
             // work, the DXGI Present block and the runtime's xrWaitFrame.
             const PumpPassTimes pt = FramePumpTakePassTimes();
-            if (pumpHz > 0)
+            if (pumpHz > 0 || ss.stereoFrames > 0)   // alternate-eye stereo runs no pump
                 LOGD("hb: timing ms avg/max: pass1 %.1f/%.1f, pass2 %.1f/%.1f | ervr present p1 %.1f/%.1f "
                      "p2 %.1f/%.1f | dxgi Present p1 %.1f/%.1f p2 %.1f/%.1f | xrWaitFrame %.1f/%.1f | headset %.0f Hz",
                      pt.msAvg[0], pt.msMax[0], pt.msAvg[1], pt.msMax[1], rs.ervrMsAvg[0], rs.ervrMsMax[0],
@@ -294,6 +301,24 @@ DWORD WINAPI Worker(LPVOID) {
                 LOGW("[stereo] %.0f stereo pairs/s against a %.0f Hz headset: the runtime reprojects "
                      "the missing frames (judder, added latency). Game speed is unaffected (in-game "
                      "clock x%.2f of real time).", pumpHz, targetHz, igtRate);
+                // Which side is short, at every log level: the engine passes minus the presents
+                // inside them is CPU work; presents blocked beyond the headset's own frame wait
+                // (DXGI's queue full, our blits waiting on the GPU) point at the GPU.
+                const float work = pt.msAvg[0] + pt.msAvg[1] - rs.ervrMsAvg[0] - rs.ervrMsAvg[1] -
+                                   rs.dxgiMsAvg[0] - rs.dxgiMsAvg[1];
+                const float blocked = rs.ervrMsAvg[0] + rs.ervrMsAvg[1] + rs.dxgiMsAvg[0] +
+                                      rs.dxgiMsAvg[1] - ss.waitFrameMsAvg;
+                const float period = 1000.f / (float)targetHz;
+                LOGI("[stereo] per pair: engine work %.1f ms (pass 1 %.1f, pass 2 %.1f), presents "
+                     "blocked %.1f ms, headset frame wait %.1f ms, of the %.1f ms a %.0f Hz frame allows "
+                     "-> %s", work, pt.msAvg[0] - rs.ervrMsAvg[0] - rs.dxgiMsAvg[0],
+                     pt.msAvg[1] - rs.ervrMsAvg[1] - rs.dxgiMsAvg[1], blocked, ss.waitFrameMsAvg,
+                     period, targetHz,
+                     work > period * 0.9f ? "the CPU is the limit (graphics settings will not help; "
+                                            "[VR] Pass2Characters=false or a lower headset refresh will)"
+                     : blocked > 1.5f      ? "the GPU is the limit (lower Resolution or the game's "
+                                            "shadow/lighting/effects quality)"
+                                           : "neither side is saturated on average - hitches");
             }
             CombatStatus cs = CombatGetStatus();
             LOGD("hb: combat: taeHook %d physical %d learned L%d H%d Left%d stamina %d | 5s: swings %ld, injected %ld | kinetic: params %d last q %.2f x%.2f | shield %d guard %d q %.2f | 2H: arm style %d grab %d | skill %s (%d recorded) fp %d | cast aim %s%s",

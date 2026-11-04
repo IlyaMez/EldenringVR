@@ -66,6 +66,23 @@ const char* XrStr(XrResult r) {
         if (XR_FAILED(_r)) { LOGE("[xr] %s failed: %s (%d)", what, XrStr(_r), (int)_r); return false; } \
     } while (0)
 
+// Where the render thread waits inside the runtime besides xrWaitFrame (which the hb timing
+// line reports): xrBeginFrame, xrEndFrame and the swapchain-image waits, summed per 5 s at
+// LogLevel=debug. Render thread only. Added 2026-11-03: alternate-eye frames spent ~3.6 ms a
+// frame in our present beyond xrWaitFrame, and these say which call holds it.
+struct XrCallClock {
+    double sumMs = 0, maxMs = 0;
+    long n = 0;
+    void Add(double ms) { sumMs += ms; if (ms > maxMs) maxMs = ms; ++n; }
+    double Avg() const { return n ? sumMs / n : 0.0; }
+};
+XrCallClock g_clkBegin, g_clkEnd, g_clkImage;
+double QpcMs() {
+    static const double f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return (double)x.QuadPart; }();
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / f;
+}
+
 inline Vec3  ToVec(const XrVector3f& v) { return {v.x, v.y, v.z}; }
 inline Quat  ToQuat(const XrQuaternionf& q) { return {q.x, q.y, q.z, q.w}; }
 inline VRFov ToFov(const XrFovf& f) { return {f.angleLeft, f.angleRight, f.angleUp, f.angleDown}; }
@@ -312,7 +329,9 @@ public:
 
         std::lock_guard<std::recursive_mutex> g(g_mtx);
         XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
+        const double b0 = QpcMs();
         r = xrBeginFrame(session_, &bi);
+        g_clkBegin.Add(QpcMs() - b0);
         if (XR_FAILED(r) && r != XR_FRAME_DISCARDED) return frameFail("xrBeginFrame", r);
         s_frameFails.store(0, std::memory_order_relaxed);
 
@@ -496,7 +515,20 @@ public:
         ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         ei.layerCount = count;
         ei.layers = count ? layers : nullptr;
+        const double e0 = QpcMs();
         XrResult r = xrEndFrame(session_, &ei);
+        const double e1 = QpcMs();
+        g_clkEnd.Add(e1 - e0);
+        static double s_clkLog = 0;
+        if (e1 - s_clkLog > 5000.0) {
+            if (s_clkLog > 0)
+                LOGD("[xr] 5s runtime waits ms avg/max: xrBeginFrame %.2f/%.2f, xrEndFrame %.2f/%.2f, "
+                     "swapchain image %.2f/%.2f (%ld frames, %ld images)",
+                     g_clkBegin.Avg(), g_clkBegin.maxMs, g_clkEnd.Avg(), g_clkEnd.maxMs,
+                     g_clkImage.Avg(), g_clkImage.maxMs, g_clkEnd.n, g_clkImage.n);
+            s_clkLog = e1;
+            g_clkBegin = g_clkEnd = g_clkImage = XrCallClock{};
+        }
         if (XR_FAILED(r)) {
             static XrResult s_last = XR_SUCCESS;
             if (s_last != r) { s_last = r; LOGW("[xr] xrEndFrame: %s", XrStr(r)); }
@@ -940,10 +972,13 @@ private:
         if (s.handle == XR_NULL_HANDLE || s.acquired != UINT32_MAX) return nullptr;
         uint32_t idx = 0;
         XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        const double a0 = QpcMs();
         if (XR_FAILED(xrAcquireSwapchainImage(s.handle, &ai, &idx))) return nullptr;
         XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wi.timeout = 100000000;   // 100 ms; never block the render thread indefinitely
-        if (XR_FAILED(xrWaitSwapchainImage(s.handle, &wi))) {
+        const XrResult wr = xrWaitSwapchainImage(s.handle, &wi);
+        g_clkImage.Add(QpcMs() - a0);
+        if (XR_FAILED(wr)) {
             XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             xrReleaseSwapchainImage(s.handle, &ri);
             return nullptr;

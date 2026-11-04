@@ -2,6 +2,7 @@
 #include "debug_keys.h"
 #include "dx12_blit.h"
 #include "frame_probe.h"
+#include "game_res.h"
 #include "hud.h"
 #include "reshade_addon.h"
 #include "vr_backend.h"
@@ -9,6 +10,7 @@
 #include "config.h"
 #include "log.h"
 #include <windows.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <mutex>
@@ -30,6 +32,7 @@ bool               g_pumpStalled = false;   // render thread only; drives the lo
 std::atomic<float> g_lastSubmitMs{0.f};
 std::atomic<int>   g_mode{(int)StereoMode::Off};
 std::atomic<float> g_cropU{1.f}, g_cropV{1.f};
+std::atomic<float> g_hmdFrameAspect{0.f};   // StereoHmdFrameAspect
 
 // xrWaitFrame runs on the game's own frame thread (inside a Present, inside pass 2 under
 // PresentLag=1), so every millisecond the runtime holds it is a millisecond of the stereo
@@ -135,21 +138,22 @@ struct Crop {
 // headset is the only thing that knows what it needs, and on a Quest 3 it is ~110 deg
 // vertical - two and a half times ELDEN RING's own 43, which is why the un-widened image
 // looked like a small screen floating in the middle of the view.
-// The height Cam_Fov actually spans, in pixels: the CURRENT frame height. Settled by the
-// 2026-08-23 pitch probe (ForcePitchDeg 10 deg at fov-write 80 on a 3072x3264 frame moved a
-// mid-field landmark ~37 window-scaled px; current-height predicts 40, boot-height 18):
-// WRITING Cam_Fov rebuilds the projection against the CURRENT viewport. The 08-22 "boot-
-// locked frustum" A/B was real but only describes the NO-WRITE case - those flat runs never
-// wrote a fov, and stereo always does. The week the two heights differed (oversize landed,
-// ref believed = boot 1440) the crops claimed 1.9x more angle than the image held: world
-// magnified 1.9x, head-rotation gain 0.53 (the "image skews when I pan/tilt"), hyper-
-// magnified disparities (the "depth was better in the morning").
-// [VR] GameRasterRefHeight: 0 = auto (current height), >0 = explicit override for
-// experiments. (-1 was "legacy = current height" while auto meant boot; both now agree.)
+// The height Cam_Fov actually spans, in pixels: the height a 16:9 frame of the CURRENT
+// WIDTH would have. The game keeps the horizontal extent at tan(fov/2) x 16/9 whatever the
+// buffer's shape and lets the vertical follow the buffer at square pixels. Measured
+// 2026-11-03 in-headset from ReShade back-buffer shots of one view at the same written fov:
+// a 2736x2832 frame held the world at 0.73-0.74x the 3712x2088 frame's scale (sx == sy,
+// NCC 0.96) - this model predicts 0.737, "current height" predicted 1.356. On a 16:9 frame
+// the two rules are the same number, which is why every 16:9 measurement (the 2026-08-23
+// pitch probe that retired the boot-height rule included) agreed with "current height", and
+// why every eye-shaped frame since August was mis-scaled: its crops claimed less angle than
+// the image held, so the world showed at ~0.54x - small, and wrong against head motion.
+// WRITING Cam_Fov still rebuilds against the CURRENT viewport; only the axis was wrong.
+// [VR] GameRasterRefHeight: 0 = auto (width x 9/16), >0 = explicit override for experiments.
 float RasterRefHeight(const Dx12Frame& f) {
     const float o = Cfg().vrGameRasterRefHeight;
     if (o > 0.f) return std::fmin(o, (float)f.height);
-    return (float)f.height;
+    return (float)f.width * 9.f / 16.f;
 }
 
 // Half-tangents of the frame's true raster frustum for a given Cam_Fov value.
@@ -197,6 +201,31 @@ Crop MakeCrop(const FrameTans& ft, const VRFov& want) {
     return c;
 }
 
+
+// The crop on whole source pixels, exactly as many as the eye image holds (over RenderScale).
+// MakeCrop's rectangle sits at a fractional offset and the swapchain is only rebuilt on a >3%
+// size change, so the old blit stretched a crop a pixel or two off the image's size from a
+// sub-pixel start: every eye pixel was a bilinear mix of two source pixels, its phase drifting
+// across the image - a blur on exactly the finest detail the frame held. On texel boundaries
+// at 1:1, each eye pixel samples one texel centre: a copy. The FOV is re-derived from the
+// snapped edges, so what is submitted is still exactly what the image shows.
+Crop SnapCropToPixels(const Crop& c, const FrameTans& ft, uint32_t srcW, uint32_t srcH,
+                      uint32_t dstW, uint32_t dstH, float ss) {
+    auto axis = [ss](float o, uint32_t src, uint32_t dst, float& o2, float& s2) {
+        const int n = std::max(1, std::min((int)src, (int)std::lround((float)dst / ss)));
+        const int x0 = std::max(0, std::min((int)std::lround(o * (float)src), (int)src - n));
+        o2 = (float)x0 / (float)src;
+        s2 = (float)n / (float)src;
+    };
+    Crop p = c;
+    axis(c.ou, srcW, dstW, p.ou, p.su);
+    axis(c.ov, srcH, dstH, p.ov, p.sv);
+    // MakeCrop's mapping run backwards: u = 0.5 + 0.5 tan/tanH, v = 0.5 - 0.5 tan/tanV.
+    const float l = (2.f * p.ou - 1.f) * ft.th, r = (2.f * (p.ou + p.su) - 1.f) * ft.th;
+    const float u = (1.f - 2.f * p.ov) * ft.tv, d = (1.f - 2.f * (p.ov + p.sv)) * ft.tv;
+    p.fov = {std::atan(l), std::atan(r), std::atan(u), std::atan(d)};
+    return p;
+}
 
 // Tear down GPU-side state. Caller holds g_mtx.
 void ReleaseLocked() {
@@ -415,9 +444,11 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
 
     bool ok = false;
     if (ID3D12Resource* dst = vr->AcquireEyeImage((VREye)e)) {
+        const D3D12_RESOURCE_DESC dd = dst->GetDesc();
+        const Crop px = SnapCropToPixels(cr, ft, f.width, f.height, (uint32_t)dd.Width, dd.Height, ss);
         BlitParams ep = bpBase;
-        ep.uvScaleX = cr.su; ep.uvOffsetX = cr.ou;
-        ep.uvScaleY = cr.sv; ep.uvOffsetY = cr.ov;
+        ep.uvScaleX = px.su; ep.uvOffsetX = px.ou;
+        ep.uvScaleY = px.sv; ep.uvOffsetY = px.ov;
         ep.dstFormat = vr->EyeFormat();
         if (!g_blit.Copy(f.queue, f.backBuffer, D3D12_RESOURCE_STATE_PRESENT,
                          dst, D3D12_RESOURCE_STATE_RENDER_TARGET, ep))
@@ -425,7 +456,7 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
         else {
             g_submit[e].pose.pos = rep.headPos + rep.headRot.Rotate(want.pose.pos);
             g_submit[e].pose.rot = (rep.headRot * want.pose.rot).Normalized();
-            g_submit[e].fov = cr.fov;
+            g_submit[e].fov = px.fov;
             g_submitValid[e] = true;
             g_eyeBlits[e].fetch_add(1, std::memory_order_relaxed);
             ok = true;
@@ -443,6 +474,16 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
 void PublishEyeRequest(IVRBackend* vr, const Dx12Frame& f, const VRFrameInfo& fi) {
     VREyeView rel[2];
     if (!vr->LocateEyeOffsets(fi.displayTimeNs, rel)) return;
+    {
+        double l = 0, r = 0, u = 0, d = 0;   // widest half-tangent of either eye, per side
+        for (int i = 0; i < 2; ++i) {
+            l = std::fmax(l, std::fabs(std::tan(rel[i].fov.angleLeft)));
+            r = std::fmax(r, std::fabs(std::tan(rel[i].fov.angleRight)));
+            u = std::fmax(u, std::fabs(std::tan(rel[i].fov.angleUp)));
+            d = std::fmax(d, std::fabs(std::tan(rel[i].fov.angleDown)));
+        }
+        g_hmdFrameAspect.store((float)FrameAspectForFov(l, r, u, d), std::memory_order_relaxed);
+    }
     float fovWrite = RequiredFovY(rel, f);
     // FovAxis=horizontal: same reference-height frustum, the field just names the other
     // axis - the ratio between the two is width/height whatever the reference is.
@@ -596,6 +637,8 @@ void FadeGuardSample(const Dx12Frame& f) {
 }
 
 bool StereoFadeGuardActive() { return g_fadeGuard.load(std::memory_order_relaxed); }
+
+float StereoHmdFrameAspect() { return g_hmdFrameAspect.load(std::memory_order_relaxed); }
 
 void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
     // [VR] FadeGuard, DEFAULT OFF: the luma readback inside the present event is the

@@ -39,6 +39,10 @@ bool FramePumpSafeSetActive();   // pass 2 currently runs the SAFE keep set (fin
 // Read from the present callback - presents are synchronous with the pass (measured: 58/58
 // presents inside their pass windows, all on the main-loop thread).
 int  FramePumpCurrentPass();
+// The task runner's current_concurrent_task_group field ([[CSTask+0x78]+0x18]), below -1 when unreadable.
+// NOT the running group's index on 2.7.2.0: it read 18 inside the world step's action-button update and 103
+// inside a menu read (2026-11-03) - a raw tag that tells call sites apart. Safe from an exception handler.
+int  FramePumpCurrentTaskGroup();
 // stereo.cpp calls this from any present arriving while the pass is 2 - the proof the
 // engine really ran the second pass to Flip. Feeds the wedged-runner watchdog.
 void FramePumpNotePass2Present();

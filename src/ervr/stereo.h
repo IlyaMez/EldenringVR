@@ -28,6 +28,9 @@ void StereoOnDeviceLost();
 // (fast travel, death warp) is in progress and the frame pump must not run a second pass.
 bool StereoFadeGuardActive();
 void StereoOnSwapchainResize();
+// Width/height of the one symmetric frustum that holds both eyes, from the runtime's latest
+// FOV (0 until a VR frame has been located). The shape of the GameResShape=eye frame.
+float StereoHmdFrameAspect();
 
 // ---- the eye baton (render thread <-> game thread) ---------------------------------
 //

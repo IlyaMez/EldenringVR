@@ -45,4 +45,7 @@ void PatchesMakeDpiAware();
 // boot can patch the table before the game reads its saved graphics settings; re-applies
 // the resolution patch live when it changes an "auto" target.
 void PatchesNoteHmdEyeSize(uint32_t w, uint32_t h);
+// The width/height of the one symmetric frustum holding both eyes, from the runtime's FOV.
+// Cached as HmdFrameAspect for the GameResShape=eye auto frame; lands on the next launch.
+void PatchesNoteHmdFrameAspect(float aspect);
 }

@@ -30,6 +30,8 @@ param(
     [int]$ResizeH = 1420,
     [int]$Shots = 0,          # screenshot interval in seconds; 0 = none
     [string]$ShotDir = "$env:TEMP\claude\ervr_shots",
+    [switch]$ShotWindow,      # screenshots of the game's window only, not the whole screen
+    [int]$ShotWidth = 960,    # screenshots are scaled down to at most this width
     [string]$GameDir = "${env:ProgramFiles(x86)}\Steam\steamapps\common\ELDEN RING\Game",
     [string]$Launcher = "eldenring.exe",   # e.g. ersc_launcher.exe (Seamless Co-op starts eldenring.exe itself)
     [string]$Filter = '\[m2\]|\[xr\]|\[stereo\]|\[blit\]|ERROR|WARN',
@@ -89,6 +91,7 @@ $shotN = 0
 $nextShot = (Get-Date).AddSeconds($Shots)
 if ($Shots -gt 0) {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    Add-Type -Namespace ShotWin -Name WR -MemberDefinition '[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; } [DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr h, out RECT r);'
     New-Item -ItemType Directory -Force $ShotDir | Out-Null
     Get-ChildItem $ShotDir -Filter *.png -ErrorAction SilentlyContinue | Remove-Item -Force
     Write-Host "  screenshots every ${Shots}s -> $ShotDir" -ForegroundColor DarkGray
@@ -126,12 +129,18 @@ while ((Get-Date) -lt $deadline) {
         $shotN++
         try {
             $scr = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            # The game's window when it is on screen (menu text stays readable), else the whole screen.
+            $gp = Get-Process eldenring -ErrorAction SilentlyContinue | Select-Object -First 1
+            $rect = New-Object ShotWin.WR+RECT
+            if ($ShotWindow -and $gp -and $gp.MainWindowHandle -ne 0 -and [ShotWin.WR]::GetWindowRect($gp.MainWindowHandle, [ref]$rect)) {
+                $scr = [System.Drawing.Rectangle]::Intersect($scr, [System.Drawing.Rectangle]::FromLTRB($rect.Left, $rect.Top, $rect.Right, $rect.Bottom))
+            }
             $full = New-Object System.Drawing.Bitmap $scr.Width, $scr.Height
             $gfx = [System.Drawing.Graphics]::FromImage($full)
-            $gfx.CopyFromScreen(0, 0, 0, 0, $full.Size)
+            $gfx.CopyFromScreen($scr.X, $scr.Y, 0, 0, $full.Size)
             $gfx.Dispose()
             # Downscale: these get read back by eye, and full-res PNGs are needlessly large.
-            $w = 960; $h = [int]($scr.Height * 960 / $scr.Width)
+            $w = [Math]::Min($ShotWidth, $scr.Width); $h = [int]($scr.Height * $w / $scr.Width)
             $small = New-Object System.Drawing.Bitmap $w, $h
             $g2 = [System.Drawing.Graphics]::FromImage($small)
             $g2.DrawImage($full, 0, 0, $w, $h); $g2.Dispose()

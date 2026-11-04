@@ -141,8 +141,10 @@ add_library(ERVR SHARED
   src/ervr/body_haptics.cpp
   src/ervr/bhaptics_output.cpp
   src/ervr/body_haptics_er.cpp
+  src/ervr/settings_tab.cpp
+  src/ervr/pass2_interact.cpp
   ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
-target_include_directories(ERVR PRIVATE src/ervr ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
+target_include_directories(ERVR PRIVATE src/ervr src/launcher ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
 target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi bcrypt)
 target_compile_definitions(ERVR PRIVATE ERVR_VERSION="${PROJECT_VERSION}")
 set_target_properties(ERVR PROPERTIES OUTPUT_NAME "ERVR" PREFIX "")
@@ -219,6 +221,10 @@ if(ERVR_BUILD_REGRESSION_TESTS)
   add_test(NAME config COMMAND test_config)
   target_sources(test_icon_decode PRIVATE src/ervr/icon_decode.cpp)
   target_sources(test_body_haptics PRIVATE src/ervr/body_haptics.cpp)
+  # The ERVR tab's rows: what ERVR.ini shows on each and what a choice writes.
+  add_executable(test_settings_tab tools/test_settings_tab.cpp)
+  target_include_directories(test_settings_tab PRIVATE src/ervr src/launcher)
+  add_test(NAME settings_tab COMMAND test_settings_tab)
   # The launcher's ERVR.ini edits, log reading and Steam parsing.
   add_executable(test_launcher_text tools/test_launcher_text.cpp)
   target_include_directories(test_launcher_text PRIVATE src/launcher src/ervr)

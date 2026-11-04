@@ -19,6 +19,31 @@ inline void Auto169Target(uint32_t eyeW, uint32_t eyeH, double scale, uint32_t& 
     w = (uint32_t)(fh * 16.0 / 9.0 + 0.5);
 }
 
+// The eye-shaped auto target: one frame of `aspect` (width/height) carrying the same pixel
+// budget times `scale`. The aspect is the one symmetric frustum that holds both eyes - the
+// widest horizontal half-tangent over the widest vertical one (FrameAspectForFov) - so the
+// frame is no wider than an eye needs and every row the 16:9 frame spent on unused side
+// field becomes eye pixels: 2026-11-03 on a Quest 3 at the same 7.7 MP, 2154x2327 per eye
+// against the 16:9 frame's 1588x1716. Unrounded: SnapGameRes rounds it.
+inline void AutoEyeTarget(uint32_t eyeW, uint32_t eyeH, double aspect, double scale,
+                          uint32_t& w, uint32_t& h) {
+    const double budget = (double)eyeW * (double)eyeH;
+    if (!(aspect > 0.3 && aspect < 3.0)) aspect = 1.0;
+    double fh = std::sqrt(budget / aspect) * scale;
+    if (fh < 480.0) fh = 480.0;
+    h = (uint32_t)(fh + 0.5);
+    w = (uint32_t)(fh * aspect + 0.5);
+}
+
+// Width/height of the one symmetric frustum that contains both eyes' fields of view, from
+// the four half-tangents of the widest eye (the runtime's angles as |tan|). 0.964 on a Quest
+// 3 through Virtual Desktop (L54 R40 U44 D55: tan 54 / tan 55).
+inline double FrameAspectForFov(double tanLeft, double tanRight, double tanUp, double tanDown) {
+    const double th = std::fmax(std::fabs(tanLeft), std::fabs(tanRight));
+    const double tv = std::fmax(std::fabs(tanUp), std::fabs(tanDown));
+    return tv > 1e-3 ? th / tv : 1.0;
+}
+
 // A size the game renders 1:1. Its renderer clamps the render size to 16:9 (width = height
 // x 16/9, rounded up to a multiple of 4) and pads the rest of the window with black bars, so
 // a window even a few pixels off 16:9 renders every target narrower than the back buffer.

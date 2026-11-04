@@ -2,8 +2,11 @@
 #include "config.h"
 #include "game_er.h"
 #include "log.h"
+#include "reshade_addon.h"
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 namespace ervr {
 namespace {
@@ -24,6 +27,12 @@ WORD ButtonByName(const std::string& n) {
     if (n == "Y") return XINPUT_GAMEPAD_Y;
     if (n == "START") return XINPUT_GAMEPAD_START;
     if (n == "BACK") return XINPUT_GAMEPAD_BACK;
+    if (n == "UP") return XINPUT_GAMEPAD_DPAD_UP;
+    if (n == "DOWN") return XINPUT_GAMEPAD_DPAD_DOWN;
+    if (n == "LEFT") return XINPUT_GAMEPAD_DPAD_LEFT;
+    if (n == "RIGHT") return XINPUT_GAMEPAD_DPAD_RIGHT;
+    if (n == "LB") return XINPUT_GAMEPAD_LEFT_SHOULDER;
+    if (n == "RB") return XINPUT_GAMEPAD_RIGHT_SHOULDER;
     return XINPUT_GAMEPAD_A;
 }
 
@@ -114,6 +123,45 @@ bool AutoPilotMerge(XINPUT_GAMEPAD& pad) {
                     return true;
                 }
                 return false;   // still inside the probe window: hold the input released
+            }
+        }
+        // The script: tap a button, wait, tap the next (a menu walked unattended, e.g. to the ERVR tab).
+        if (!c.autoPilotScript.empty()) {
+            static std::atomic<double> s_s0{0};
+            static std::atomic<int> s_step{-1};
+            double s0 = s_s0.load(std::memory_order_relaxed);
+            if (s0 == 0.0) {
+                s_s0.store(now); s0 = now;
+                LOGI("[autopilot] player active; script: %s", c.autoPilotScript.c_str());
+            }
+            double at = s0;
+            int index = 0;
+            size_t i = 0;
+            const std::string& s = c.autoPilotScript;
+            while (i < s.size()) {
+                while (i < s.size() && (s[i] == ' ' || s[i] == ',')) ++i;
+                size_t j = i;
+                while (j < s.size() && s[j] != ' ' && s[j] != ',') ++j;
+                if (j == i) break;
+                const std::string step = s.substr(i, j - i);
+                i = j;
+                const size_t plus = step.find('+');
+                const std::string name = step.substr(0, plus);
+                const double wait = plus == std::string::npos ? 1.0 : atof(step.c_str() + plus + 1);
+                if (now < at + wait) {
+                    if (name == "WAIT" || now - at > 0.12) return false;
+                    if (s_step.exchange(index) != index) {
+                        LOGI("[autopilot] script step %d: %s", index + 1, name.c_str());
+                        if (name == "SHOT") ReShadeAddonRequestScreenshot();   // ReShade saves the next frame
+                    }
+                    if (name == "SHOT") return false;
+                    if (name == "LT") pad.bLeftTrigger = 255;
+                    else if (name == "RT") pad.bRightTrigger = 255;
+                    else pad.wButtons |= ButtonByName(name);
+                    return true;
+                }
+                at += wait;
+                ++index;
             }
         }
         if (!g_finished.exchange(true)) LOGI("[autopilot] player is in the world; input released");

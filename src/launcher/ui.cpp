@@ -189,13 +189,8 @@ void tip(const char* text) {
     ImGui::PopStyleColor(3);
 }
 
-// A number as ERVR.ini spells it: up to `decimals` places, at least one ("1.0", "0.86").
-std::string number(float value, int decimals) {
-    std::string text = format("%.*f", decimals, value);
-    while (text.size() > 1 && text.back() == '0' && text[text.size() - 2] != '.')
-        text.pop_back();
-    return text;
-}
+// A number as ERVR.ini spells it: up to `decimals` places, at least one ("1.0", "0.86"), whole numbers whole.
+std::string number(float value, int decimals) { return text::iniNumber(value, decimals); }
 
 bool truthy(const std::string& value) {
     return text::sameText(value, "1") || text::sameText(value, "true") || text::sameText(value, "yes") ||

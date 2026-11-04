@@ -38,6 +38,12 @@ int main() {
     Check(edited.find("WorldScale=9\r\n\r\n[Combat]\r\nEnabled=false\r\n") != std::string::npos, "appended at the end");
 
     Check(iniGet(iniSet("[A]\nx=1", "A", "y", "2"), "A", "y") == "2", "last line without a line end");
+
+    // Numbers the Options tab writes: whole numbers keep their zeros (0.6.5 wrote 90 as 9, 200 as 2).
+    Check(iniNumber(90, 0) == "90" && iniNumber(200, 0) == "200" && iniNumber(100, 0) == "100", "whole numbers");
+    Check(iniNumber(0, 0) == "0" && iniNumber(45, 0) == "45", "zero and plain whole numbers");
+    Check(iniNumber(1.f, 2) == "1.0" && iniNumber(0.86f, 2) == "0.86" && iniNumber(0.5f, 2) == "0.5", "decimals");
+    Check(iniNumber(2.5f, 2) == "2.5" && iniNumber(10.f, 2) == "10.0", "trailing zeros after the point only");
     Check(iniSet("[A]\nx=1", "A", "y", "2") == "[A]\nx=1\ny=2\n", "the new key starts its own line");
     Check(iniSet("[A]\nx=\n", "A", "x", "3") == "[A]\nx=3\n", "empty value");
 

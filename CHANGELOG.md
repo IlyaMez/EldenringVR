@@ -3,6 +3,64 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## Unreleased
+
+### Fixes
+* The card shown after picking up a new item no longer stays on screen, ignoring every button and menu until
+  you die or travel. Cause, measured: the game decides once per frame which prompt (door, lever, grace, item
+  on the ground) the interact button answers, and the second eye's pass made that decision a second time.
+  The same press was then answered twice and the item handled twice, leaving a card that nothing closed. The
+  same double decision is why 0.6.0's doors ignored the button: which prompts survived to the next frame
+  depended on which task groups the second pass re-ran. That decision now happens once per frame, as in the
+  game without ERVR, and the second pass's prompts answer "not pressed" (`[VR] Pass2ActionButtons=false`).
+* The log records every interact press the game accepts and what each pass changed in the prompts, the
+  item-get popups and the menu's UI elements (`[p2watch]` lines, `[VR] Pass2Watch`), so a stuck card or a
+  dead door can be traced from a log.
+
+### Sharper at the same GPU cost
+* The game now renders a frame shaped like the view the two eyes share (2736x2832 on a Quest 3 at
+  Resolution 100%), not a 16:9 one. Each eye used to be cut from a 16:9 frame that was mostly field nobody
+  sees, about 35% of the pixels the GPU drew; now it is about 67%. At the same pixel count, so the same GPU
+  cost, a Quest 3 eye gets 2154x2327 px instead of 1588x1716: 1.36x sharper in both directions. Resolution
+  86% (2352x2440) is now sharper than 100% was, for a quarter less GPU work.
+  The shape comes from the headset's field of view and is cached in `ERVR.cache.ini`;
+  `[VR] GameResShape=wide` brings the 16:9 frame back.
+* Why the eye-shaped frame of August looked wrong (a smaller world that dragged with head motion): the game
+  holds the horizontal field at its 16:9 width and lets the vertical follow the frame, so its camera's field
+  of view spans the 16:9 height of the frame's width, not the frame's height. ERVR now crops against that,
+  measured in-headset: the eye-shaped frame shows the world at exactly the scale the 16:9 one does
+  (`[VR] GameRasterRefHeight=0` means width x 9/16 now; on a 16:9 frame nothing changes).
+* Each eye is now a pixel-for-pixel copy of its part of the game's frame. The crop used to start at a
+  fraction of a pixel and be stretched a pixel or two onto the eye image, so every eye pixel blended two of
+  the game's, softening the finest detail (foliage, text, distant edges).
+* The ERVR tab's Resolution row says what was always true: the game reads its render size when it starts,
+  so a new Resolution takes effect at the next launch.
+
+### Frame rate
+* Below the headset's refresh, the log now says which side is short, at every log level: the engine passes'
+  CPU work, the time presents spent blocked on the GPU, and the headset's own frame wait.
+* `[VR] Pass2Characters=false` (opt-in, read at launch): the second eye's pass skips the character pipeline
+  and shows the poses the first pass computed, the same moment either way. About 1 ms less per stereo pair
+  on a 9800X3D (the second pass ~4.6 -> ~3.6 ms), which is headroom under a 90 Hz headset. Stereo depth stays;
+  fast travel, deaths and fights have not been played with it yet, so it is off by default.
+* `StereoMode=debugalt` (one eye per frame) renders stereo again: its eye reports are pushed by the same
+  frame hook as full stereo, which it never installed, so it had shown the flat screen since August. Each
+  frame costs one engine pass, but `xrEndFrame` holds ~3.4 ms of every frame under Virtual Desktop, so it does
+  not yet clear 120 Hz.
+* At `LogLevel=debug` the log reports how long `xrBeginFrame`, `xrEndFrame` and the swapchain-image waits
+  hold the render thread, every 5 s.
+
+### ERVR in the game's menu
+* The game's System menu has an **ERVR Settings** tab, to the right of Graphics: Walk toward, Turning, Smooth
+  turn speed, Physical melee, Damage, Weapon weight, Weapon angle, World scale, Resolution, HUD follows, HUD
+  distance and Rumble strength, as rows like the game's own. A change applies within a second and is written to
+  `ERVR.ini`. The game builds the tab and its rows with its own code; ERVR answers for the values. Exe 2.7.2.0
+  (1.17.2) only; `[SettingsTab] Enabled=false` leaves the game's Settings as they are, and `Icon` picks the tab's
+  icon from the game's own (the game has no headset icon; 1 is a game pad).
+* For unattended test runs, `[Experimental] AutoPilotScript` taps a list of buttons once the player is in the
+  world (`START+3 UP+2 A+3`), and `SHOT+N` has ReShade save the frame; `tools\run_game.ps1 -ShotWindow`
+  captures the game's window only.
+
 ## 0.6.5 (2026-11-02)
 
 Doors, levers, lifts and new graces open again; Valve Index controls; the belt; Torrent rework.

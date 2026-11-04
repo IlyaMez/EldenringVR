@@ -105,13 +105,24 @@ constexpr int         kOffAspectNew = 0;
 
 std::atomic<bool> g_letterboxOff{false};   // PatchAspectClamp applied: the frame fills the window
 
-bool PatchAspectClamp() {
-    static int s_state = -1;   // -1 untried, 0 unavailable, 1 patched
-    if (s_state >= 0) return s_state == 1;
+// The clamp's `je`, found once (after the patch it reads `jmp` and no longer matches).
+uint8_t* FindAspectClamp() {
+    static uint8_t* s_je = nullptr;
+    static bool s_tried = false;
+    if (s_tried) return s_je;
+    s_tried = true;
     uint8_t* je = nullptr;
     if (uint8_t* a = AobScan(kPatAspectOld)) je = a + kOffAspectOld;
     else if (uint8_t* b = AobScan(kPatAspectNew)) je = b + kOffAspectNew;
-    if (!je || *je != 0x74) {
+    s_je = (je && *je == 0x74) ? je : nullptr;
+    return s_je;
+}
+
+bool PatchAspectClamp() {
+    static int s_state = -1;   // -1 untried, 0 unavailable, 1 patched
+    if (s_state >= 0) return s_state == 1;
+    uint8_t* je = FindAspectClamp();
+    if (!je) {
         s_state = 0;
         LOGW("[patch] 16:9 letterbox patch not found; a non-16:9 GameRes will show black bars "
              "and the eye crop will not match the image (set [VR] GameRes to a 16:9 size)");
@@ -612,6 +623,49 @@ std::wstring CachePath() {
     return (p == std::wstring::npos ? std::wstring(L".") : ini.substr(0, p)) + L"\\ERVR.cache.ini";
 }
 
+// The auto frame's aspect: the headset's frame aspect (HmdFrameAspect, cached from the
+// runtime's FOV) for GameResShape=eye, 0 for the 16:9 frame. Reads the ini and the cache
+// straight from disk, kernel32 + CRT only, because the DllMain-time GraphicsConfig write calls
+// it too and must land on exactly the worker's number. That write cannot AOB-scan, so it
+// trusts the worker's last verdict on the letterbox patch (`trustPatchFlag`, LetterboxPatch=0
+// in the cache); the worker scans for itself and keeps the verdict current.
+constexpr double kDefaultFrameAspect = 0.964;   // Quest 3 through Virtual Desktop: tan 54 / tan 55
+double AutoFrameAspect(const std::wstring& ini, const std::wstring& cache, bool trustPatchFlag) {
+    wchar_t buf[64]{};
+    GetPrivateProfileStringW(L"VR", L"GameResShape", L"eye", buf, 64, ini.c_str());
+    if (_wcsicmp(buf, L"wide") == 0) return 0.0;
+    GetPrivateProfileStringW(L"VR", L"GameResAspectFix", L"true", buf, 64, ini.c_str());
+    if (_wcsicmp(buf, L"false") == 0 || wcscmp(buf, L"0") == 0) return 0.0;
+    if (trustPatchFlag && GetPrivateProfileIntW(L"Cache", L"LetterboxPatch", 1, cache.c_str()) == 0)
+        return 0.0;
+    GetPrivateProfileStringW(L"Cache", L"HmdFrameAspect", L"", buf, 64, cache.c_str());
+    const double a = _wtof(buf);
+    return (a > 0.3 && a < 3.0) ? a : kDefaultFrameAspect;
+}
+
+// The worker's answer: AutoFrameAspect after its own check for the letterbox patch (an
+// eye-shaped window without it renders 16:9 inside black bars, the HUD loses the UI and the
+// crops miss), kept in the cache as the attach-time write's verdict for the next launch.
+double g_bootFrameAspect = -1.0;   // the first answer: the shape this launch's frame has
+
+double WorkerFrameAspect() {
+    const std::wstring cache = CachePath();
+    const double aspect = AutoFrameAspect(Cfg().iniPath, cache, false);
+    if (aspect <= 0.0) { if (g_bootFrameAspect < 0.0) g_bootFrameAspect = 0.0; return 0.0; }
+    const bool patchable = FindAspectClamp() != nullptr;
+    if ((int)GetPrivateProfileIntW(L"Cache", L"LetterboxPatch", 1, cache.c_str()) != (patchable ? 1 : 0))
+        WritePrivateProfileStringW(L"Cache", L"LetterboxPatch", patchable ? L"1" : L"0", cache.c_str());
+    if (g_bootFrameAspect < 0.0) g_bootFrameAspect = patchable ? aspect : 0.0;
+    if (patchable) return aspect;
+    static bool s_warned = false;
+    if (!s_warned) {
+        s_warned = true;
+        LOGW("[patch] GameResShape=eye needs the 16:9 letterbox patch, which this game version "
+             "does not match: the auto frame stays 16:9 (each eye gets a ~35%% crop of it)");
+    }
+    return 0.0;
+}
+
 // The target the settings file should hold; false = feature off / stereo off. The auto size
 // and the final snap (game_res.h) are shared with the DllMain-time config write, which must
 // land on the identical numbers or the settings-apply rejects the request.
@@ -648,12 +702,19 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
     if (oversize) {
         const uint32_t askW = w, askH = h;
         if (c.vrGameRes == "auto") {
-            // No ceiling: a 16:9 frame at the eye recommendation's pixel budget (see
-            // Auto169Target), GameResScale scaling that height.
-            Auto169Target(askW, askH, s, w, h);
+            // No ceiling: the eye recommendation's pixel budget, GameResScale scaling it, as the
+            // eye-shaped frame (GameResShape=eye, AutoEyeTarget) or the 16:9 one (Auto169Target).
+            const double aspect = WorkerFrameAspect();
+            if (aspect > 0.0) AutoEyeTarget(askW, askH, aspect, s, w, h);
+            else Auto169Target(askW, askH, s, w, h);
             SnapGameRes(w, h);
-            LOGI("[patch] GameRes auto: 16:9 frame %ux%u at the headset's %ux%u pixel budget"
-                 " (x%.2f) - fitted-frame geometry, oversize density", w, h, askW, askH, s);
+            if (aspect > 0.0)
+                LOGI("[patch] GameRes auto: eye-shaped frame %ux%u (%.3f wide per tall, the headset's "
+                     "field of view) at the headset's %ux%u pixel budget (x%.2f)",
+                     w, h, aspect, askW, askH, s);
+            else
+                LOGI("[patch] GameRes auto: 16:9 frame %ux%u at the headset's %ux%u pixel budget"
+                     " (x%.2f) - fitted-frame geometry, oversize density", w, h, askW, askH, s);
         } else {
             SnapGameRes(w, h);
             if (w != askW || h != askH)
@@ -687,6 +748,23 @@ bool ResolveResTarget(uint32_t& w, uint32_t& h) {
         // GameResScale lands HERE, on the fitted height, so it reads as "fraction of the
         // sharpest frame this desktop allows". Applied to the headset's raw recommendation
         // instead it would do nothing at all until it dropped below the desktop cap.
+        // GameResShape=eye: the same rule at the headset's own shape (the letterbox patch is
+        // what makes a non-16:9 window safe now; WorkerFrameAspect checked it).
+        const double aspect = WorkerFrameAspect();
+        if (aspect > 0.0) {
+            const uint32_t eyeMaxH = std::min(screenH, (uint32_t)(screenW / aspect));
+            const uint32_t full = (uint32_t)(std::sqrt((double)w * (double)h / aspect) + 0.5);
+            uint32_t fh = std::min((uint32_t)(std::min(full, eyeMaxH) * s), eyeMaxH);
+            uint32_t fw = (uint32_t)(fh * aspect + 0.5);
+            SnapGameRes(fw, fh, eyeMaxH);
+            LOGI("[patch] GameRes target %ux%u -> %ux%u: the tallest eye-shaped frame (%.3f wide "
+                 "per tall) that fits the %ux%u desktop%s.",
+                 w, h, fw, fh, aspect, screenW, screenH,
+                 c.vrGameResOversize ? " (size-check patch unavailable on this game version)"
+                                     : " (GameResOversize=false)");
+            w = fw; h = fh;
+            return true;
+        }
         const uint32_t maxH = std::min({screenH, (uint32_t)((uint64_t)screenW * 9 / 16)});
         uint32_t fh = std::min({(uint32_t)(std::min(h, maxH) * s), maxH});
         uint32_t fw = (uint32_t)((uint64_t)fh * 16 / 9);
@@ -897,10 +975,13 @@ void PatchesEarlyGraphicsConfigWrite(void* module) {
         h = (uint32_t)GetPrivateProfileIntW(L"Cache", L"HmdEyeH", 0, cache.c_str());
         if (!w || !h) { w = 2064; h = 2208; }   // first run: Quest 3-sized default
         GetPrivateProfileStringW(L"VR", L"GameResScale", L"0.86", buf, 64, ini.c_str());   // = config.h default
-        const double s = std::min(2.0, std::max(0.25, _wtof(buf) > 0.01 ? _wtof(buf) : 0.86));
+        // Through float, as Cfg() holds it: an eye-shaped size rounds to 8 px, not the 16:9 grid.
+        const double s = std::min(2.0, std::max(0.25, _wtof(buf) > 0.01 ? (double)(float)_wtof(buf) : 0.86));
         // Same arithmetic as ResolveResTarget's oversize branch - the two MUST agree.
         const uint32_t ew = w, eh = h;
-        Auto169Target(ew, eh, s, w, h);
+        const double aspect = AutoFrameAspect(ini, cache, true);
+        if (aspect > 0.0) AutoEyeTarget(ew, eh, aspect, s, w, h);
+        else Auto169Target(ew, eh, s, w, h);
     } else if (swscanf_s(buf, L"%ux%u", &w, &h) != 2 && swscanf_s(buf, L"%uX%u", &w, &h) != 2) {
         return;
     }
@@ -1028,6 +1109,26 @@ void PatchesNoteHmdEyeSize(uint32_t w, uint32_t h) {
         LOGI("[patch] headset recommends %ux%u per eye; cached as the GameRes=auto target", w, h);
     }
     // The game read GraphicsConfig.xml at startup, so a change here lands on the NEXT launch.
+    PatchesApplyGameResolution();
+}
+
+void PatchesNoteHmdFrameAspect(float aspect) {
+    if (!(aspect > 0.3f && aspect < 3.f)) return;
+    wchar_t want[32];
+    swprintf_s(want, L"%.3f", aspect);   // the cache's precision: both readers parse this text
+    static std::wstring s_seen;
+    if (s_seen == want) return;          // called at scan cadence; dedupe first
+    s_seen = want;
+    const std::wstring cache = CachePath();
+    wchar_t cur[32]{};
+    GetPrivateProfileStringW(L"Cache", L"HmdFrameAspect", L"", cur, 32, cache.c_str());
+    if (wcscmp(cur, want) == 0) return;
+    WritePrivateProfileStringW(L"Cache", L"HmdFrameAspect", want, cache.c_str());
+    const bool inUse = g_bootFrameAspect > 0.0 && std::fabs(g_bootFrameAspect - _wtof(want)) < 0.0005;
+    LOGI("[patch] headset field of view: a frame %S wide per tall holds both eyes; cached as the "
+         "GameResShape=eye target%s", want,
+         inUse ? " (this launch's frame already has that shape)"
+               : " (the game read its resolution at boot, so it lands next launch)");
     PatchesApplyGameResolution();
 }
 

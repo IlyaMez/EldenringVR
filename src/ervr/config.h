@@ -42,14 +42,13 @@ struct Config {
     // resolution while too narrow costs field of view. 0 = derive it from the headset.
     float vrFovDeg = 0.f;
     std::string vrFovAxis = "vertical";    // which axis Cam_Fov means: vertical | horizontal
-    // The reference height Cam_Fov spans, for the FOV request and the eye crop. Settled by
-    // the 2026-08-23 pitch probe: WRITING Cam_Fov rebuilds the projection against the
-    // CURRENT viewport height, and stereo writes it every frame - so the reference is the
-    // current frame height, full stop. (The 08-22 "boot-locked frustum" A/B was real but
-    // only describes frames where the fov is never written; treating it as the in-play
-    // model claimed 1.9x too much angle per crop on the oversized frame = magnified world,
-    // 0.53x head-rotation gain (the skew), hyper-magnified stereo (the depth regression).)
-    //   0  = auto: the current frame height (the measured written-fov behavior)
+    // The reference height Cam_Fov spans, for the FOV request and the eye crop. WRITING
+    // Cam_Fov rebuilds the projection against the CURRENT viewport (2026-08-23 pitch probe),
+    // and the axis it spans is the 16:9 height of that viewport's width: the game holds the
+    // horizontal extent at tan(fov/2) x 16/9 and the vertical follows the buffer (measured
+    // 2026-11-03 - a 2736x2832 frame showed the world at 0.737x the 3712x2088 frame's scale,
+    // square pixels). On a 16:9 frame that is simply the frame height.
+    //   0  = auto: width x 9/16 (the measured written-fov behavior)
     //   >0 = explicit reference height in px, for experiments only
     // Hot-reloads.
     float vrGameRasterRefHeight = 0.f;
@@ -72,6 +71,13 @@ struct Config {
     // GPU-bound there). The target lands exactly now (see EarlyLastSlotWrite), no more snap,
     // so it is made exact 16:9 first (SnapGameRes in game_res.h).
     float vrGameResScale = 0.86f;
+    // Shape of the auto frame. "eye" = the one symmetric frustum holding both eyes (0.964 wide
+    // per tall on a Quest 3, from the runtime's FOV, cached in ERVR.cache.ini as HmdFrameAspect)
+    // - each eye crops ~67% of it. "wide" = the 16:9 frame of 0.6.x, where each eye cropped
+    // ~35%. Same pixel budget, same GPU cost: 2026-11-03 on a Quest 3 at 7.7 MP, 2154x2327 px
+    // per eye against 1588x1716. Needs the letterbox patch (GameResAspectFix); without it the
+    // auto frame stays 16:9.
+    std::string vrGameResShape = "eye";
     // Make the game accept a target LARGER than the desktop - the native alternative to
     // NVIDIA DSR, and the difference between 1440 and full headset-height frames on a
     // 3440x1440 monitor. Two parts: the settings-apply pass's own too-big-for-the-screen
@@ -448,6 +454,11 @@ struct Config {
     float beltChordPress = 0.20f;         // s the direction is held with it
     float beltChordTail = 0.15f;          // s Event Action stays down after the direction is let go
 
+    // [SettingsTab]  an ERVR tab in the game's own Settings (pause menu > System), to the right of Graphics,
+    // with the settings players change while playing (settings_tab.h). Enabled is read at startup.
+    bool  settingsTab = true;
+    int   settingsTabIcon = 1;            // the tab's icon, one of the game's own by number (1 = a game pad; none is a headset)
+
     // [Cheats]  offline convenience for testing (writes the save's PlayerGameData)
     int   cheatSetAllStats = 0;           // >0: set every stat to exactly this value (level adjusted); 0 = off
     int   cheatSetLevel = 0;              // >0: reach exactly this level (points off the highest stats / onto the lowest), once - the key clears itself
@@ -597,16 +608,15 @@ struct Config {
     // but in a session every connect state machine and packet flush ran twice per pair - a
     // connect crashed at the transition null-call site with no other guard holding.
     // EVENT SCRIPTS gated too (2026-10-31): 22-24 EmkSystem_Pre/ConditionStatus/Post, the
-    // event-script VM - run twice per stereo pair, a centre dialog raised after an item pickup
-    // stayed on screen ignoring every button and menu until a respawn.
+    // event-script VM (CSEmkSystemImp + 64 CSEmkEventIns tasks in the 2026-11-03 task dump).
     // 25 EventMan is KEPT (2026-11-02): 0.6.0 gated it with the scripts, and doors, levers,
     // lifts and undiscovered graces stopped answering the interact button (several players:
-    // the prompt shows, the press does nothing). A player's bisect on 0.6.0: 16-21,25 opens
-    // the doors with no stuck popup; 16-25 opened them but brought the popup back. Likely
-    // mechanism, not traced: CSEventManImp holds the object-action executor (doors, levers,
-    // chests; fromsoftware-rs event_man.rs), and the player code that reads the action
-    // button (it references CSActionButtonMan) runs in both passes, so a press handled in
-    // pass 2 found no request from EventMan to act on.
+    // the prompt shows, the press does nothing). Group 25 holds one task, MoveMapStep's
+    // EventMan phase. TRACED 2026-11-03 (pass2_interact.h): the action-button system's
+    // per-frame decision ran in BOTH passes, so the keep set chose which prompts reached the
+    // next frame's decision - doors dead with 25 gated, the same press answered twice with it
+    // kept (the item card stuck on screen until a reload, back in 0.6.5). vrPass2ActionButtons
+    // makes that system single-pass whatever these sets keep.
     std::string vrPass2FullFrameKeep = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168";
     // SAFE variant, active during the settle window after any pass-2 guard releases (and
     // whenever a guard holds, trivially). Differs from the full set by gating ONLY the
@@ -619,6 +629,11 @@ struct Config {
     std::string vrPass2SafeKeep = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168";
     // Set by Load when the ini still carried a retired keep set it replaced (logged by ConfigLogNotes).
     std::string pass2KeepNote;
+    // false = the second eye's pass skips the whole character pipeline (54-63, 65-79, 81, 83-84,
+    // 113-114, 117, 127-129) and renders pass 1's poses, ~1 ms cheaper per stereo pair (2026-11-03,
+    // depth intact). Default true until it has been played: the August crash notes describe partial
+    // chr pipelines, not this whole one. Read once, at the first second pass.
+    bool vrPass2Characters = true;
     // Seconds of SAFE keep set after the last guard releases. Was 20 (timer-guess era),
     // then 8; now 1.5 (2026-08-24 pt2, user asked for 1-2 s transitions): post-load
     // streaming is not a special state for full-set pass 2 - the open world streams
@@ -688,6 +703,15 @@ struct Config {
     // Skip restoration after animation/equipment changes, explicit input flushes/restrictions, transitions,
     // or changes to player/module/storage ownership. New-press history remains game-owned. Hot-reloads.
     bool  vrPass2KeepActionRequest = true;
+    // false = the action-button system (the prompt the interact button answers) runs once per frame, in
+    // pass 1, like the single-pass game: pass 2 skips its update and its prompts answer "not pressed"
+    // (pass2_interact.h). Measured 2026-11-03: pass 2 re-ran the update every frame, so pass 2's keep set
+    // decided which prompts reached the next frame's decision - doors dead with EventMan (25) gated, the same
+    // press answered twice with it kept (an item card left on screen). Hot-reloads.
+    bool  vrPass2ActionButtons = false;
+    // Log what each pass changes in the interaction state (pass2_interact.h): interact presses accepted per
+    // pass, the item-get popup queue, the menu's UI-element states. Capped; read once at startup.
+    bool  vrPass2Watch = true;
     // Complete each pass's eye report with the camera the renderer REALLY used (read at
     // pass end) instead of the one we wrote. The game's step re-smooths the camera after
     // our write on ~every frame (yaw ~100%, position >5 cm ~50%, measured 20:13) - an
@@ -730,6 +754,7 @@ struct Config {
     bool  camWatchDt = false;       // watch the frame-timing dt block instead of the camera
     bool  camWatchIgt = false;      // watch the IGT counter's writer (game-time advance)
     bool  camWatchDst = false;      // watch the task-runner's staged frame-state block
+    bool  camWatchAbm = false;      // watch the action-button manager's flag bytes (pass2_interact.h)
     bool  igtTrace = false;         // hook the IGT-advance fn; log caller/dt/pass
 
     bool  m2TaskProbe = false;
@@ -784,6 +809,11 @@ struct Config {
     int   autoPilotMenuSeconds = 0;
     float autoPilotMenuPeriod = 6.f;
     std::string autoPilotMenuButton = "START";
+    // Post-spawn script (after any wiggle and menu probe): "START+3 RIGHT+1 A+2" taps each button, then waits
+    // its seconds; WAIT+N only waits, SHOT+N has ReShade save a screenshot. Buttons: A B X Y START BACK UP DOWN
+    // LEFT RIGHT LB RB LT RT. It presses what it is told in the user's world, so keep it to menus (A is a jump
+    // outside one).
+    std::string autoPilotScript;
 
     void Load(const std::wstring& iniPath);
 };

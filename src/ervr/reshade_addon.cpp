@@ -25,6 +25,7 @@ std::atomic<ID3D12Device*>       g_device{nullptr};
 std::atomic<ID3D12CommandQueue*> g_queue{nullptr};
 std::atomic<bool> g_isD3D12{false};
 std::atomic<long> g_presents{0};
+std::atomic<int> g_screenshots{0};   // ReShadeAddonRequestScreenshot
 std::atomic<uint32_t> g_width{0}, g_height{0};
 std::atomic<uint32_t> g_format{0};
 
@@ -68,6 +69,12 @@ struct PresentEventClock {
         }
     }
 };
+
+// ReShade's own screenshot path, when an unattended run asked for one (ReShadeAddonRequestScreenshot).
+void OnReShadePresent(reshade::api::effect_runtime* runtime) {
+    if (g_screenshots.exchange(0))
+        runtime->save_screenshot("ervr");
+}
 
 void OnFinishPresent(reshade::api::command_queue*, reshade::api::swapchain* sc) {
     if (!t_presentEnd || sc->get_device()->get_api() != reshade::api::device_api::d3d12) return;
@@ -247,6 +254,7 @@ bool ReShadeAddonInstall(void* selfModule) {
     reshade::register_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
     reshade::register_event<reshade::addon_event::present>(&OnPresent);
     reshade::register_event<reshade::addon_event::finish_present>(&OnFinishPresent);
+    reshade::register_event<reshade::addon_event::reshade_present>(&OnReShadePresent);
     HudRegisterEvents();
     g_eventsUp.store(true);
     return true;
@@ -265,11 +273,14 @@ void ReShadeAddonShutdown() {
         reshade::unregister_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
         reshade::unregister_event<reshade::addon_event::present>(&OnPresent);
         reshade::unregister_event<reshade::addon_event::finish_present>(&OnFinishPresent);
+        reshade::unregister_event<reshade::addon_event::reshade_present>(&OnReShadePresent);
         HudUnregisterEvents();
     }
     reshade::unregister_addon(g_self);
     LOGI("[reshade] add-on unregistered");
 }
+
+void ReShadeAddonRequestScreenshot() { g_screenshots.fetch_add(1); }
 
 void ReShadeAddonPresentTraceStart() {
     g_traceN.store(0);

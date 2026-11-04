@@ -11,6 +11,7 @@ each choice and the knobs in `ERVR.ini` that steer them. Players want the [READM
 - [Physical melee](#physical-melee-swings-invoke-the-games-attack-event)
 - [Two-handing and the Ash of War](#two-handing-by-grabbing-the-weapon-and-the-ash-of-war-without-its-animation)
 - [Cast aim](#cast-aim-spells-ranged-skills-and-bows-fly-where-the-casting-hand-points)
+- [The ERVR tab in the game's Settings](#the-ervr-tab-in-the-games-settings)
 - [Body haptics](#body-haptics-internals)
 - [Hand aim (experimental)](#hand-aim-experimental)
 - [Troubleshooting notes](#troubleshooting-notes-learned-the-hard-way)
@@ -219,6 +220,40 @@ own OpenXR session.
   visibility flags enabled. Startup logs warn when the launcher differs from the adjacent `eldenring.exe`.
   AOB check script:
   see `tools/verify_signatures.py`.
+
+## The frame each eye is cropped from (`[VR] GameRes*`)
+
+Each pass renders one symmetric frustum wide enough for either eye, and each eye is a crop of it, submitted
+with the runtime's exact asymmetric FOV (`stereo.cpp` `MakeCrop`). ERVR writes the game camera's FOV
+(`Cam_Fov`, camera +0x50) every frame so the frustum holds both eyes (`RequiredFovY`), and writes the render
+size into `GraphicsConfig.xml` so the frame is as large as the headset's pixel budget (`patches_er.cpp`).
+
+**What the written FOV spans.** The game holds the horizontal field at the FOV's 16:9 width,
+`tan(fov/2) x 16/9`, whatever the frame's shape, and the vertical follows the frame at square pixels. So the FOV
+spans the 16:9 height of the frame's *width* (`RasterRefHeight` = width x 9/16), not the frame's height.
+Measured 2026-11-03 in-headset with ReShade back-buffer shots of one view at the same written FOV: a 2736x2832
+frame held the world at 0.737x the 3712x2088 frame's scale (fitted 0.73-0.74, x and y equal); with the reference
+fixed, 1.35-1.36x, the predicted 1.356. On a 16:9 frame the two rules give the same number, which is why
+nothing looked wrong there and why August's eye-shaped frames, cropped against their full height, showed a
+shrunken world that dragged with head motion.
+
+**The frame's shape.** The best frame for a pixel budget is the one frustum both eyes share: the widest
+horizontal half-tangent of either eye over the widest vertical one (`FrameAspectForFov`, 0.964 on a Quest 3
+through Virtual Desktop: L54 R40 U44 D55). `GameResShape=eye` (default) renders that shape at the budget
+(`AutoEyeTarget`), cached as `HmdFrameAspect` in `ERVR.cache.ini` so the DllMain-time `GraphicsConfig.xml`
+write can size it before the game reads its settings. Each eye then crops ~79%x82% of the frame instead of
+the 16:9 frame's ~43%x82%: at the same 7.7 MP on a Quest 3, 2154x2327 px per eye instead of 1588x1716. A
+non-16:9 window needs uberhalit's letterbox patch (`PatchAspectClamp`); a game version it does not match falls
+back to the 16:9 frame and records `LetterboxPatch=0` in the cache. The remaining waste is the frustum being
+symmetric while each eye's is not (~20% per axis); removing it needs either an off-axis projection or a
+per-eye camera turn, and pass 1's camera is also the one gameplay reads.
+
+**What a stereo pair costs.** Measured 2026-11-03 on a 9800X3D, standing still in-world, 90 Hz Quest 3:
+pass 1 (the game's own frame) 5.5-5.7 ms, pass 2 ~4.6 ms of work plus `xrWaitFrame`, so ~10.1 ms of the
+11.1 ms a 90 Hz pair allows. Gating the character pipeline in pass 2 (54-63, 65-79, 81, 83-84, 113-114, 117,
+127-129) cut pass 2 by ~1 ms with depth intact (camera hooks 450/450 in both passes); AI, damage and
+silhouettes (115-116, 119-122, 130-132) cost nothing measurable; gating 48-53 crashed at once (Geom 48-49 is a
+known landmine). A locked 120 Hz in full stereo would need ~8.3 ms per pair.
 
 ## The HUD on its own floating quad (`[HUD]`)
 
@@ -485,6 +520,62 @@ drives the same three things for its first-person camera; ERVR drives them from 
   attack)`, with `Debug=true` the 238 rewrite (`SetBulletAimAngle limits ... -> ...`), and the heartbeat's
   `cast aim right hand (cast live)`.
 
+## The ERVR tab in the game's Settings
+
+`src/ervr/settings_tab.cpp` (hooks), `settings_tab_logic.h` (the rows; `tools/test_settings_tab.cpp`). The pause
+menu's System screen gets an *ERVR Settings* tab between Graphics and Quit Game, built by the game's own menu code,
+the way Spidy's SPIDY VR tab is. Exe 2.7.2.0 only: every function it hooks or calls is checked against its first
+12 bytes and every vtable against its RTTI name before anything is touched; any mismatch logs one `[tab]` line and
+leaves the Settings alone.
+
+**How the Settings are built** (found from RTTI and `CS::OptionSettingTopDialog`'s constructor, 0x967770):
+
+| | RVA (2.7.2.0) | |
+|---|---:|---|
+| Tab list push_back (`BasicViewItemList<MenuOptionCategory, 10>`) | `0x9691a0` | 9 calls, all in the constructor; storage at dialog+0x1208, count at +0x558, 0x88 per tab |
+| `MenuOptionCategory` ctor / dtor | `0x86a550` / `0x86a640` | (this, MenuString&& name, kind, icon descriptor); kind at +0x40 |
+| Page switch (`CompositeOptionSettingDialog`, dialog+0x1768) | `0x93cdb0` | pages per kind at +0x68 (10), current at +0xb8; made lazily by `0x93dbe0`, a factory per kind |
+| Kind 4's factory (the console Brightness page) | `0x93cf40` | never reached on PC: the free kind ERVR takes |
+| Page factory | `0x9601e0` | (window list, tab, option data, flag, window 0-14, row builder, after-rows, 1, 0); the builder is called as (page, page+0x1b38) |
+| OFF/ON list, OFF/ON row, list row | `0x955a00`, `0x94a5f0`, `0x94a470` | a row is (page, label {title, help MenuStrings}, value\*, choices, default\*, enabled); it edits the byte behind value\* |
+| `ComboItemList<uchar, 32>` push, `MenuString(text)`, label dtor | `0x86b4c0`, `0x676ba0`, `0x743f90` | |
+| Tab bar cursor grid scroll (`GridControl::SetScroll`) | `0x73d070` | the dialog's TabList grid at dialog+0xa38, column scroll at +0xe0 |
+| Tab icon binder, scene-object lookup | `0x968290`, `0x74b5f0` | (&dialog, `BackTabList/Item_0_N` slot, tab index) |
+
+Tabs in game: Game Options (kind 0), Camera (1), Display (2), Sound (3), Network (5), Controller (6), Keyboard/Mouse
+(7), Graphics (8), Quit Game (9). The list holds 10, so ERVR's (kind 4) fits before Quit Game; at the title, with
+no Quit Game, it goes after Graphics.
+
+**What the layout leaves out** (`menu/win/02_040_optionsetting.gfx` in Data0, read with a SWF tag walk):
+
+* *Nine tab icons* (`BackTabList/Item_0_0..8`, bound to tabs 0..8 once as the dialog opens) under a nine-cell cursor
+  grid (`TabList`). With ten tabs the grid scrolls and the icons would not: ERVR hooks the grid's SetScroll and, for
+  the Settings dialog only, binds slot *s* to tab *s* + scroll with the game's own binder. The icon is a frame of the
+  tab icon sprite (34 frames, `[SettingsTab] Icon`); none is a headset, 1 is a game pad.
+* *No spare window.* `WindowList` holds only the tabs' own windows (Camera, GameEnd, Brightness, Controll, Network,
+  Audio, Environment, PCMouseKey, PCGraphic, PadSetting); the factory's other names (Top, LanguageSetting, PCSetting,
+  MouseOption, GraphicOption) are not in it, and a page there draws nothing. ERVR's page uses Sound's,
+  `AudioSetting` (window 5, 12 rows, Sound fills 4). Two pages on one window fight over it (the switch hides every
+  page but the current one in kind order, so Sound's page vanished after ERVR's had been made), so the page switch
+  hook deletes the other one first, the way the composite's destructor does (heap from `0xe1d770`, vtable slot 1,
+  heap slot 13). If it is the page being left, the composite forgets it first and the switch skips handing its
+  option data on. The game makes the deleted page again, fresh, the next time its tab opens.
+* *Twelve rows.* A page holds 16 (`BasicViewItemList<EditProperty, 16>`), but a list longer than its window scrolls
+  the cursor, not the rows; the tab has 12.
+
+**The values.** Each row edits a byte of ERVR's (`g_value`): the choice's index, or 0/1 for OFF/ON. The rows are
+built from `ERVR.ini` as the page is made (a value the list does not offer is shown as itself, `0.6 (ERVR.ini)`,
+and choosing it again writes it back). The worker writes a row that has held still for 0.3 s with the launcher's
+`iniSet` (every other byte of the file kept), whole and renamed into place; the hot-reload applies it and logs
+`[tab] ERVR.ini: Haptics.RumbleScale=1.25`.
+
+**Testing it without a headset.** `[Experimental] AutoPilotScript` taps buttons once the player is in the world
+(`WAIT+12 START+3 UP+2 A+3 LB+1.5 LB+3` reaches the tab: UP wraps the pause menu to System, LB wraps from Game
+Options to Quit Game and then ERVR), and `SHOT+N` has ReShade save the whole frame. `tools/run_game.ps1 -ShotWindow`
+captures the game window only. Desktop captures crop: the window is larger than the screen at headset
+resolutions. Untested: the title screen's Settings, the game's Defaults key on ERVR's page, clicking a tab icon
+with the mouse.
+
 ## Body haptics internals
 
 The player-facing side (what each device plays, the `[bHaptics]` switches) is in the
@@ -529,11 +620,14 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise: it 
 
 ## Limitations
 
-* **Full stereo is expensive.** The engine's simulation step is a fixed 1/60 s, so a loop under 60 Hz slows the
-  whole game down, and the second eye pass roughly doubles the GPU cost. Lower the game's resolution/settings
-  before blaming the headset; `StereoMode=cinema` is the cheap fallback and always works.
-* Visual/comfort options live in `[VR]` (`RenderScale`, `WorldScale`, `FovDeg`, `IpdMm`, snap turn). There is no
-  in-headset settings menu yet: edit `ERVR.ini` or the launcher's Options tab; both hot-reload.
+* **Full stereo is expensive.** Each stereo pair runs the game's frame and then a second engine pass for the
+  other eye, so the CPU cost is ~1.8x a flat frame and the GPU cost about double (see "The frame each eye is
+  cropped from"). Below the headset's refresh the runtime reprojects the missing frames; game speed is
+  unaffected (the simulation consumes the measured frame time). Lower Resolution before blaming the headset;
+  `StereoMode=cinema` is the cheap fallback and always works.
+* Visual/comfort options live in `[VR]` (`RenderScale`, `WorldScale`, `FovDeg`, `IpdMm`, snap turn). In the
+  headset, twelve of them are the game's System > ERVR Settings tab (exe 2.7.2.0 only); the rest are `ERVR.ini`
+  and the launcher's Options tab, which hot-reload.
 * While any game menu is open, physical combat stands down completely (`[Combat] MenuGate`, default on):
   no swing detection, no injected attacks, no guard hold, no two-hand chords, and the live param edits
   are restored. The equipment menu refuses weapon changes while the game sees combat state

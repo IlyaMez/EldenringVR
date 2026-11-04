@@ -17,6 +17,7 @@
 #include "dx12_blit.h"
 #include "game_er.h"
 #include "combat.h"
+#include "pass2_interact.h"
 #include "virtual_pad.h"
 #include "patches_er.h"
 #include "game_memory.h"
@@ -682,6 +683,26 @@ void ParseKeepSpec(const char* spec, bool out[256]) {
     }
 }
 
+// [VR] Pass2Characters=false: the second eye's pass skips the character pipeline, so it
+// renders the poses pass 1 just computed - the same sim instant either way. Measured
+// 2026-11-03 (9800X3D, 90 Hz Quest 3, standing in-world): ~1 ms of pass 2's ~4.6 ms of work,
+// stereo depth intact (the camera chain is in MoveMap 118/123-125, which stays). The whole
+// pipeline goes at once: pre-physics without post-physics crashed in August. Latched at the
+// first pass - adding chr groups back mid-session poisoned queue_tasks (2026-08-22).
+constexpr int kChrPipeline[] = {54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 65, 66, 67, 68, 69, 70, 71,
+                                72, 73, 74, 75, 76, 77, 78, 79, 81, 83, 84, 113, 114, 117, 127, 128, 129};
+
+bool Pass2SkipsCharacters() {
+    static const bool s_skip = [] {
+        const bool skip = !Cfg().vrPass2Characters;
+        if (skip)
+            LOGI("[stereo] Pass2Characters=false: the second eye's pass skips the character "
+                 "pipeline (groups 54-63, 65-79, 81, 83-84, 113-114, 117, 127-129) for this launch");
+        return skip;
+    }();
+    return s_skip;
+}
+
 // The active keep set: a Numpad-2 override wins in either mode; otherwise the mode's own
 // ini default (`defaultSpec`). Cached parse, re-logged whenever the effective spec changes.
 const bool* Pass2KeepSet(const std::string& defaultSpec) {
@@ -695,6 +716,8 @@ const bool* Pass2KeepSet(const std::string& defaultSpec) {
     if (spec != s_spec) {
         s_spec = spec;
         ParseKeepSpec(spec.c_str(), s_keep);
+        if (Pass2SkipsCharacters())
+            for (int g : kChrPipeline) s_keep[g] = false;
         std::string names;
         for (int i = 0; i < g_table.count && i < 256; ++i)
             if (s_keep[i]) { names += std::to_string(i); names += ' '; }
@@ -1530,8 +1553,10 @@ void DoSecondPass(void* self, void* a, void* b) {
     // at steps 0 and can drop; restored after the pass unless pass 2 started an animation.
     uint8_t* const arPlayer = fullFrame ? GameERMainPlayer() : nullptr;
     if (arPlayer) CombatPass2Begin(arPlayer);
+    Pass2InteractBeforePass2();
     g_curPass.store(2, std::memory_order_release);
     g_origQueueTasks(self, a, b);
+    Pass2InteractAfterPass2();
     // Pass 2 is complete: finish and push the second eye's report with the camera its
     // render really used (stashed by GameERApplySecondEyeCamera before the pass). Done
     // while the pass tag still reads 2 and before the keep-set restore below.
@@ -1650,6 +1675,7 @@ uint64_t __fastcall Hook_QueueTasks(void* self, void* a, void* b) {
     g_qtLastEnterQpc = t0.QuadPart;
     g_qtArgA = a; g_qtArgB = b;
     FlowTransitionCheck();
+    Pass2InteractFrameBegin(i);
     if (i <= 3) {
         void* frames[12] = {};
         const USHORT got = RtlCaptureStackBackTrace(1, 12, frames, nullptr);
@@ -1737,6 +1763,59 @@ int DumpOneGroup(void* mapHolder, uint32_t id, void** outTasks, int maxTasks) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 
+std::string NameOfObject(void* obj) {
+    if (!obj || !Readable(obj, 8)) return {};
+    void** vt = *(void***)obj;
+    return LooksLikeVTable(vt, 1) ? RttiNameOfVTable(vt) : std::string();
+}
+
+// Most groups hold CSEzTaskProxy objects, whose class says nothing about the work. The proxy
+// points at its CSEzTask at +0x10 (fromsoftware-rs task.rs), and the update/void task templates
+// keep the subsystem they step right after the task base: +0x18 behind a plain CSEzTask, +0x20
+// behind the rabbit bases. Naming that subject maps each group to the systems pass 2 re-runs.
+std::string DescribeTask(void* task) {
+    std::string cls = NameOfObject(task);
+    if (cls.empty()) return "?";
+    if (cls.find("Proxy") == std::string::npos || !Readable((uint8_t*)task + 0x10, 8)) return cls;
+    void* inner = *(void**)((uint8_t*)task + 0x10);
+    const std::string innerCls = NameOfObject(inner);
+    if (innerCls.empty()) return cls + "->?";
+    for (size_t off : {0x18, 0x20}) {
+        if (!Readable((uint8_t*)inner + off, 8)) continue;
+        const std::string subject = NameOfObject(*(void**)((uint8_t*)inner + off));
+        if (!subject.empty()) return "{" + subject + "}";
+    }
+    return "<" + innerCls + ">";
+}
+
+void DumpTaskListsNow(const char* when, bool showEmpty) {
+    void* holder = g_qtArgB;
+    if (!holder) { LOGW("[m2] TaskDumpLists: queue_tasks never captured its args"); return; }
+    BuildRegionMap();   // the snapshot from probe time is stale by now
+    LOGI("[m2] ---- task lists per group, %s (map holder %p) ----", when, holder);
+    int totalTasks = 0, groupsWithTasks = 0;
+    for (int i = 0; i < g_table.count; ++i) {
+        uint8_t* e = g_table.entry0 + (size_t)i * g_table.stride;
+        const uint32_t id = *(const uint32_t*)e;
+        char nameA[80]{};
+        WideCharToMultiByte(CP_UTF8, 0, (const wchar_t*)(e + kNameOff), -1, nameA, sizeof(nameA) - 1, nullptr, nullptr);
+        void* tasks[64] = {};
+        const int n = DumpOneGroup(holder, id, tasks, 64);
+        if (n <= 0) {
+            if (n < -1 || showEmpty) LOGI("[m2] group %3d %-40s %s", i, nameA, n == 0 ? "[0] empty" : n == -1 ? "<faulted>" : "<lookup failed>");
+            continue;
+        }
+        ++groupsWithTasks; totalTasks += n;
+        std::string line;
+        for (int k = 0; k < n; ++k) {
+            line += DescribeTask(tasks[k]) + " ";
+            if (line.size() > 140) { LOGI("[m2] group %3d %-28s [%d] %s", i, nameA, n, line.c_str()); line.clear(); }
+        }
+        LOGI("[m2] group %3d %-28s [%d] %s", i, nameA, n, line.c_str());
+    }
+    LOGI("[m2] ---- %d groups hold %d registered tasks ----", groupsWithTasks, totalTasks);
+}
+
 void DumpTaskLists() {
     if (!Cfg().taskDumpLists) return;
     // Wait for the hook to capture the frame-driver args.
@@ -1746,35 +1825,11 @@ void DumpTaskLists() {
     for (int w = 0; w < 120 && !GameERPlayerActive(); ++w) Sleep(1000);
     LOGI("[m2] TaskDumpLists: player %s", GameERPlayerActive() ? "active - dumping the in-game task lists"
                                                                : "NEVER became active - dumping menu-time lists");
-    void* holder = g_qtArgB;
-    if (!holder) { LOGW("[m2] TaskDumpLists: queue_tasks never captured its args"); return; }
-    BuildRegionMap();   // the snapshot from probe time is stale by now
-    LOGI("[m2] ---- task lists per group (map holder %p) ----", holder);
-    int totalTasks = 0, groupsWithTasks = 0;
-    for (int i = 0; i < g_table.count; ++i) {
-        uint8_t* e = g_table.entry0 + (size_t)i * g_table.stride;
-        const uint32_t id = *(const uint32_t*)e;
-        char nameA[80]{};
-        WideCharToMultiByte(CP_UTF8, 0, (const wchar_t*)(e + kNameOff), -1, nameA, sizeof(nameA) - 1, nullptr, nullptr);
-        void* tasks[64] = {};
-        const int n = DumpOneGroup(holder, id, tasks, 64);
-        if (n <= 0) { if (n < -1) LOGI("[m2] group %3d %-40s <lookup %d>", i, nameA, n); continue; }
-        ++groupsWithTasks; totalTasks += n;
-        std::string line;
-        for (int k = 0; k < n; ++k) {
-            void* task = tasks[k];
-            std::string cls;
-            if (task && Readable(task, 8)) {
-                void** vt = *(void***)task;
-                if (LooksLikeVTable(vt, 1)) cls = RttiNameOfVTable(vt);
-            }
-            if (cls.empty()) cls = "?";
-            line += cls + " ";
-            if (line.size() > 140) { LOGI("[m2] group %3d %-28s [%d] %s", i, nameA, n, line.c_str()); line.clear(); }
-        }
-        LOGI("[m2] group %3d %-28s [%d] %s", i, nameA, n, line.c_str());
-    }
-    LOGI("[m2] ---- %d groups hold %d registered tasks ----", groupsWithTasks, totalTasks);
+    DumpTaskListsNow("at player-active", false);
+    // Some managers register only once the world has settled, and an empty group looks the same
+    // as a missing one above - so look again later and say which groups are empty.
+    Sleep(30000);
+    DumpTaskListsNow("30 s in the world", true);
 }
 
 float PresentsPerSecond(float secs);   // defined with the toggle experiment below
@@ -2190,12 +2245,16 @@ bool FrameProbeSetActiveApi(int index, bool active) {
 
 void FrameProbeTick() {
     const bool fullStereo = Cfg().vrStereoMode == "full";
-    if (!Cfg().m2TaskProbe && !fullStereo && !Cfg().m2ForcePass2) return;
+    // Alternate-eye stereo needs the same frame hook - each eye's report is pushed with the
+    // camera the renderer really used, at the end of queue_tasks - but never a second pass.
+    // Without it no report ever reached the queue and the mode stayed flat (2026-11-03).
+    const bool altStereo = Cfg().vrStereoMode == "debugalt";
+    if (!Cfg().m2TaskProbe && !fullStereo && !altStereo && !Cfg().m2ForcePass2) return;
     if (g_started.exchange(true)) return;
     // Its OWN thread, deliberately. This can scan a lot; the worker thread it used to run on
     // also drives BackendsTick(), so blocking there meant xrCreateInstance never ran and the
     // headset never came up. Nothing the probe does needs to be in step with anything else.
-    std::thread([fullStereo] {
+    std::thread([fullStereo, altStereo] {
         // The table is built during engine init, so early attempts can legitimately miss.
         for (int attempt = 1; attempt <= 6; ++attempt) {
             if (RunOnce(attempt)) {
@@ -2222,6 +2281,13 @@ void FrameProbeTick() {
                     } else {
                         LOGW("[stereo] frame pump unavailable (hook failed); full stereo cannot run");
                     }
+                } else if (altStereo) {
+                    QueueTasksProbeInstall(true);
+                    if (g_origQueueTasks)
+                        LOGI("[stereo] alternate-eye: frame hook installed (eye reports at frame end, "
+                             "no second pass)");
+                    else
+                        LOGW("[stereo] alternate-eye: frame hook unavailable; no eye reports, stays flat");
                 }
                 if (Cfg().m2TaskProbe) {
                     RegisterExperiment();
@@ -2276,6 +2342,15 @@ bool FramePumpReady() { return g_origQueueTasks != nullptr && g_pumpMode == 2; }
 void FramePumpNotePass2Present() { g_p2PresentTick.store(GetTickCount64(), std::memory_order_relaxed); }
 bool FramePumpSafeSetActive() { return g_safeSetActive.load(std::memory_order_relaxed); }
 int  FramePumpCurrentPass() { return g_curPass.load(std::memory_order_acquire); }
+
+int FramePumpCurrentTaskGroup() {
+    void* task = g_table.owner;
+    if (!task) return -2;
+    __try {
+        uint8_t* runner = *(uint8_t**)((uint8_t*)task + 0x78);
+        return runner ? *(int32_t*)(runner + 0x18) : -3;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -4; }
+}
 long FramePumpTakePasses() { return InterlockedExchange(&g_pumpPasses, 0); }
 PumpPassTimes FramePumpTakePassTimes() {
     PumpPassTimes t;

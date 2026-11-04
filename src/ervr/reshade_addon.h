@@ -46,6 +46,10 @@ struct ReShadeStats {
 };
 ReShadeStats ReShadeAddonGetStats();
 
+// Unattended runs (the autopilot's SHOT step): ReShade saves the next frame as a screenshot, its own PrintScreen
+// path - the whole back buffer, which a desktop capture of a window larger than the screen is not.
+void ReShadeAddonRequestScreenshot();
+
 // Present tracing for the M2/M3 pairing experiments: records the QPC timestamp and thread
 // of every Present until stopped (or the buffer fills). Cheap enough to run for a second.
 struct PresentSample { long long qpc; unsigned long tid; };

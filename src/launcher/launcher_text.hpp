@@ -8,6 +8,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -118,6 +119,20 @@ inline std::optional<std::string> iniGet(std::string_view text, std::string_view
             return std::string(p->value);
     }
     return std::nullopt;
+}
+
+// A number as ERVR.ini spells it: up to `decimals` places, at least one when there are any ("1.0", "0.86"),
+// and a whole number as itself ("90", "200"). Only zeros after the point are trimmed: 0.6.0/0.6.5 trimmed them
+// from whole numbers too and wrote a 90-degree weapon angle as 9, a 200-degree turn speed as 2.
+inline std::string iniNumber(float value, int decimals) {
+    char buffer[64];
+    std::snprintf(buffer, sizeof buffer, "%.*f", decimals < 0 ? 0 : decimals, static_cast<double>(value));
+    std::string text = buffer;
+    if (text.find('.') == std::string::npos)
+        return text;
+    while (text.back() == '0' && text[text.size() - 2] != '.')
+        text.pop_back();
+    return text;
 }
 
 // The text with Key set to `value`, every other byte as it was. A missing key goes after the last key of its

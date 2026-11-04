@@ -99,6 +99,8 @@ void Config::Load(const std::wstring& path) {
     vrColorFix       = GetS(ini, L"VR", L"ColorFix", vrColorFix);
     vrGameRes        = GetS(ini, L"VR", L"GameRes", vrGameRes);
     vrGameResScale   = GetF(ini, L"VR", L"GameResScale", vrGameResScale);
+    vrGameResShape   = GetS(ini, L"VR", L"GameResShape", vrGameResShape);
+    vrPass2Characters = GetB(ini, L"VR", L"Pass2Characters", vrPass2Characters);
     vrGameResOversize = GetB(ini, L"VR", L"GameResOversize", vrGameResOversize);
     vrGameResScan    = GetB(ini, L"VR", L"GameResScan", vrGameResScan);
     vrGameResScanSeconds = GetF(ini, L"VR", L"GameResScanSeconds", vrGameResScanSeconds);
@@ -140,6 +142,8 @@ void Config::Load(const std::wstring& path) {
     vrPass2FinalizeReplay = GetB(ini, L"VR", L"Pass2FinalizeReplay", vrPass2FinalizeReplay);
     vrPass2SafeOnA = GetF(ini, L"VR", L"Pass2SafeOnA", vrPass2SafeOnA);
     vrPass2KeepActionRequest = GetB(ini, L"VR", L"Pass2KeepActionRequest", vrPass2KeepActionRequest);
+    vrPass2ActionButtons = GetB(ini, L"VR", L"Pass2ActionButtons", vrPass2ActionButtons);
+    vrPass2Watch = GetB(ini, L"VR", L"Pass2Watch", vrPass2Watch);
     vrReportFinalCamera = GetB(ini, L"VR", L"ReportFinalCamera", vrReportFinalCamera);
     vrPass2Steps     = GetI(ini, L"VR", L"Pass2Steps", vrPass2Steps);
     vrPass2EatAsserts = GetB(ini, L"VR", L"Pass2EatAsserts", vrPass2EatAsserts);
@@ -368,6 +372,9 @@ void Config::Load(const std::wstring& path) {
     beltChordPress     = GetF(ini, L"Belt", L"ChordPress", beltChordPress);
     beltChordTail      = GetF(ini, L"Belt", L"ChordTail", beltChordTail);
 
+    settingsTab        = GetB(ini, L"SettingsTab", L"Enabled", settingsTab);
+    settingsTabIcon    = GetI(ini, L"SettingsTab", L"Icon", settingsTabIcon);
+
     fpEnabled = GetB(ini, L"FirstPerson", L"Enabled", fpEnabled);
     fpEyeHeight = GetF(ini, L"FirstPerson", L"EyeHeight", fpEyeHeight);
     fpCameraAnchor = GetS(ini, L"FirstPerson", L"CameraAnchor", fpCameraAnchor);
@@ -475,6 +482,7 @@ void Config::Load(const std::wstring& path) {
     camWatchDt      = GetB(ini, L"Experimental", L"CamWatchDt", camWatchDt);
     camWatchIgt     = GetB(ini, L"Experimental", L"CamWatchIgt", camWatchIgt);
     camWatchDst     = GetB(ini, L"Experimental", L"CamWatchDst", camWatchDst);
+    camWatchAbm     = GetB(ini, L"Experimental", L"CamWatchAbm", camWatchAbm);
     igtTrace        = GetB(ini, L"Experimental", L"IgtTrace", igtTrace);
     m2TaskProbe    = GetB(ini, L"Experimental", L"TaskProbe", m2TaskProbe);
     m2ForcePass2   = GetB(ini, L"Experimental", L"ForcePass2", m2ForcePass2);
@@ -500,6 +508,7 @@ void Config::Load(const std::wstring& path) {
     autoPilotMenuSeconds = GetI(ini, L"Experimental", L"AutoPilotMenuSeconds", autoPilotMenuSeconds);
     autoPilotMenuPeriod  = GetF(ini, L"Experimental", L"AutoPilotMenuPeriod", autoPilotMenuPeriod);
     autoPilotMenuButton  = GetS(ini, L"Experimental", L"AutoPilotMenuButton", autoPilotMenuButton);
+    autoPilotScript      = GetS(ini, L"Experimental", L"AutoPilotScript", autoPilotScript);
 }
 
 Config& Cfg() { return g_cfg; }
