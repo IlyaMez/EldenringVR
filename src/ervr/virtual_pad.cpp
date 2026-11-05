@@ -198,7 +198,16 @@ void VirtualPadUpdate(double now) {
     }
 
     // ---- Menu: tap = START, hold = BACK (map) ---------------------------------
-    bool menuDown = (in.buttons & VRB_Menu) != 0 || padMenu;
+    // Both stick clicks together are the menu button too ([Buttons] MenuStickChord): SteamVR keeps a Quest's left
+    // menu button for its own dashboard (Link, Air Link, Steam Link, Virtual Desktop's SteamVR mode), so there
+    // the game's menu could not be opened at all (2026-11-04, Quest 2 and 3). While the chord is held neither
+    // click reaches the game (no crouch, no lock-on) and the left click's hold does not toggle menu navigation.
+    static bool s_stickChord = false;
+    const uint32_t bothSticks = VRB_LThumb | VRB_RThumb;
+    s_stickChord = c.menuStickChord &&
+                   ((in.buttons & bothSticks) == bothSticks || (s_stickChord && (in.buttons & bothSticks) != 0));
+    if (s_stickChord) { in.buttons &= ~bothSticks; g_lthumbHold.consumed = true; }
+    bool menuDown = (in.buttons & VRB_Menu) != 0 || padMenu || s_stickChord;
     if (menuDown && !g_menuHold.down) { g_menuHold = {true, now, false}; }
     bool pressedStart = false, pressedBack = false;
     if (menuDown && !g_menuHold.consumed && now - g_menuHold.since >= c.menuHoldForBack) {
@@ -234,6 +243,11 @@ void VirtualPadUpdate(double now) {
         // Title screen, loading, character creation: these screens navigate from the ANALOG
         // stick, and a held D-pad there stopped the selection moving (reported 2026-08-21).
         g_menuMode = g_menuManual = g_menuOverride = false;
+    } else if (GameERPlayerDead()) {
+        // Dead: the only thing left to steer is the "Stake of Marika / last site of grace" choice, which neither
+        // menu reader sees - its cursor did not move and the stake was the only answer (2026-11-04). The left
+        // stick is its D-pad until the player is back; the manual toggle is left as it was.
+        g_menuMode = true;
     } else {
         int flag = GameMenuOpen(now);   // -1 = no trusted game-state reader yet
         gameMenu = flag;
@@ -261,7 +275,8 @@ void VirtualPadUpdate(double now) {
     // ANALOG sticks - the map pans with the left and zooms with the right - even when the menu
     // readers still say "menu open" (the map entered through the pause menu keeps menuman's
     // open bit set, and 14:39 on 2026-08-31 shows menu-nav D-pad mode hijacking the pan there).
-    const bool mapCam = GameERForeignCamActive();
+    // Not while dead: the death camera is no map, and the stake/grace choice needs the D-pad.
+    const bool mapCam = GameERForeignCamActive() && !GameERPlayerDead();
     if (mapCam && g_menuMode) g_menuMode = false;
     if (g_menuMode != wasMenu) {
         LOGI("[menu] navigation mode %s", g_menuMode ? "ON (left stick = D-pad, gestures muted)" : "off");

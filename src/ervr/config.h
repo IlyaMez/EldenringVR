@@ -153,6 +153,9 @@ struct Config {
     float triggerThreshold = 0.55f;
     float gripThreshold = 0.60f;
     float menuHoldForBack = 0.45f;         // hold Menu this long -> BACK (map) instead of START
+    // Both stick clicks together = the menu button (tap: menu, hold: map). SteamVR keeps a Quest's left menu
+    // button for its own dashboard, so over Link / Air Link / Steam Link the game's menu had no button at all.
+    bool  menuStickChord = true;
     bool  leftGripPlusStickIsDpad = true;  // hold left grip: left stick acts as D-pad (quick slots)
     // Valve Index trackpads, pressed: MENU (the Touch menu button: tap START, hold BACK), DPAD (the D-pad
     // in the direction pressed), any button name, or none.
@@ -329,6 +332,14 @@ struct Config {
     // ended at rest, which a long weapon's tip rarely reaches mid-fight (2026-10-31: swings stopped registering).
     float contactValleyFrac = 0.4f;
     float contactSpentSeconds = 1.0f;
+    // A live strike is one swing (weapon_contact.h LiveContactEnd): it ends once the tip has stayed under the
+    // swing's valley this long (the follow-through slowed) or after ContactMaxSeconds, and the next opens on a
+    // new acceleration. Before 2026-11-05 it lasted while the tip moved at ContactOffSpeed, without a limit: a
+    // carried or resting blade stayed a live hitbox ("constant attacking", walls hit over and over).
+    float contactDwellSeconds = 0.12f;
+    float contactMaxSeconds = 1.5f;
+    // After a strike that landed, the next opens this long after it ended (a missed one re-arms at once).
+    float contactCooldownSeconds = 0.3f;
     float kineticContinuousMult = 0.2f;
     std::string kineticStaminaMode = "off";   // off (bar out of the loop, game's on-hit charge refunded) | game | full
     float kineticHitPause = 0.25f;        // gated model only: s the attack pauses after a landed hit (0 = the strike ends on its first hit)
@@ -372,6 +383,12 @@ struct Config {
     float blockMinCut = 0.4f;             // guard cut rate multiplier at block quality 0
     float blockMinStability = 0.5f;       // stability (stamina_guard_def) multiplier at quality 0
     float shieldNormalPitchDeg = -90.f;   // shield face normal = controller forward pitched by this (-90 = the controller's -Y, measured 2026-08-24)
+    // The shield is UP (the guard button held) only raised: the left hand at most ShieldUpHeight below the eyes
+    // and ShieldUpForward in front of them (15 cm of slack once up). It was "anywhere in front above the hips"
+    // (-0.8 m, -0.05 m): an arm at rest qualified, so a shield held the guard all the time (0.7.0 player log:
+    // LB in every pad line while walking) - stamina regenerates slowly while guarding.
+    float shieldUpHeight = -0.45f;
+    float shieldUpForward = 0.10f;
     float deflectSpeed = 1.2f;            // m/s shield speed INTO the attack at impact = deflect (stamina refunded)
     int   blockImpactStamina = 4;         // one-frame stamina drop while guarding that counts as a blocked hit
     // Two-handing by grabbing: the free hand closes on the weapon hand's weapon shaft -> the game's own
@@ -623,8 +640,10 @@ struct Config {
     // EventMan phase. TRACED 2026-11-03 (pass2_interact.h): the action-button system's
     // per-frame decision ran in BOTH passes, so the keep set chose which prompts reached the
     // next frame's decision - doors dead with 25 gated, the same press answered twice with it
-    // kept (the item card stuck on screen until a reload, back in 0.6.5). vrPass2ActionButtons
-    // makes that system single-pass whatever these sets keep.
+    // kept (the item card stuck on screen until a reload, back in 0.6.5). 0.7.0 made that update
+    // single-pass and doors, levers and chests died again (the event manager ran twice, the update
+    // once); now both run in both passes and vrPass2RepeatPressGuard drops the repeated answer
+    // instead (pass2_interact.h).
     std::string vrPass2FullFrameKeep = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168";
     // SAFE variant, active during the settle window after any pass-2 guard releases (and
     // whenever a guard holds, trivially). Differs from the full set by gating ONLY the
@@ -711,14 +730,24 @@ struct Config {
     // Skip restoration after animation/equipment changes, explicit input flushes/restrictions, transitions,
     // or changes to player/module/storage ownership. New-press history remains game-owned. Hot-reloads.
     bool  vrPass2KeepActionRequest = true;
-    // false = the action-button system (the prompt the interact button answers) decides once per frame, in
-    // pass 1, like the single-pass game: pass 2 skips its update, every prompt is still asked in either pass,
-    // and a prompt answering the same decision's press twice gets "not pressed" the second time
-    // (pass2_interact.h). Measured 2026-11-03: pass 2 re-ran the update every frame, so pass 2's keep set
-    // decided which prompts reached the next frame's decision - doors dead with EventMan (25) gated, the same
-    // press answered twice with it kept (an item card left on screen). Graces and NPCs are asked only in pass
-    // 2 (2026-11-04), so pass 2's calls must reach the game. true = both passes decide (0.6.5). Hot-reloads.
-    bool  vrPass2ActionButtons = false;
+    // The action-button system's update (which prompt the interact button answers) in the second eye's pass too.
+    // It must step with the event manager (25, kept in pass 2), whose door/lever/chest executor it serves: 0.7.0
+    // skipped it in pass 2 and every door, lever and chest accepted the press and did nothing; 0.6.0 had it in
+    // both passes with the event manager in one, same dead doors (pass2_interact.h has the table). false =
+    // 0.7.0's single update, only to compare. Replaces 0.7.0's Pass2ActionButtons (retired, logged if present).
+    // Hot-reloads.
+    bool  vrPass2ActionButtonUpdate = true;
+    // A prompt that answers "pressed" again within two action-button updates of its last "pressed" (one stereo
+    // pair) is told "not pressed": one press, one answer, as in the single-pass game. What keeps 0.6.5's stuck
+    // item card away now that the update runs twice per pair. Hot-reloads.
+    bool  vrPass2RepeatPressGuard = true;
+    bool  retiredActionButtonsKey = false;   // ERVR.ini still has 0.7.0's Pass2ActionButtons (ConfigLogNotes)
+    // Opt-in test (2026-11-05): the event manager (25) AND the action-button update once per frame, in pass 1 -
+    // the single-pass game's order for the whole interaction pipeline (event scripts 22-24 already run once).
+    // For a lift that ignores its lever (EscalatorBoy, Ruin-Strewn Precipice: with the update in both passes
+    // the lever moved, the lift did not) - if the lever's one-frame signal is cleared by the event manager's
+    // second run before the event script sees it. Untested in a game: off by default. Hot-reloads.
+    bool  vrPass2EventsOnce = false;
     // Log what each pass changes in the interaction state (pass2_interact.h): interact presses accepted per
     // pass, the item-get popup queue, the menu's UI-element states. Capped; read once at startup.
     bool  vrPass2Watch = true;
@@ -821,8 +850,9 @@ struct Config {
     std::string autoPilotMenuButton = "START";
     // Post-spawn script (after any wiggle and menu probe): "START+3 RIGHT+1 A+2" taps each button, then waits
     // its seconds; WAIT+N only waits, SHOT+N has ReShade save a screenshot. Buttons: A B X Y START BACK UP DOWN
-    // LEFT RIGHT LB RB LT RT. It presses what it is told in the user's world, so keep it to menus (A is a jump
-    // outside one).
+    // LEFT RIGHT LB RB LT RT. Sticks are held for their step: LU LD LL LR (walk), RL RR RU RD (camera). It
+    // presses what it is told in the user's world, so keep it to menus and short test walks (A is a jump outside
+    // one, Y talks and opens).
     std::string autoPilotScript;
 
     void Load(const std::wstring& iniPath);

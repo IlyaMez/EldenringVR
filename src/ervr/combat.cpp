@@ -232,8 +232,11 @@ struct HandSM {
     double spentAt = 0;           // when the game thread retired this strike (budget spent), 0 = live
     float restSpeed = 0;          // continuous cooldown: tip speed under which the hand may arm again (0 = ContactOffSpeed)
     float rearmMin = 0;           // after a valley end: lowest tip speed since; a new strike must rise above it (RearmReady)
+    double slowSince = 0;         // live strike: when the tip went under the swing's valley (0 = above it)
+    bool landed = false;          // the strike landed (the game thread spent it): the next waits ContactCooldownSeconds
 } g_sm[2];
 std::atomic<int> g_spentValleyEnds{0}, g_spentTimeoutEnds{0};   // worker -> 5 s combat summary
+std::atomic<int> g_liveSlowEnds{0}, g_liveLongEnds{0};          // live strikes ended as one swing (slowed / too long)
 
 // Shield / block (worker writes under g_mtx, game thread reads)
 struct BlockState {
@@ -1338,6 +1341,7 @@ void FlushTally(double now) {
     g_tallyAt = now;
     CombatTally& t = g_tally;
     const int spentEnds = g_spentValleyEnds.exchange(0), spentTimeouts = g_spentTimeoutEnds.exchange(0);
+    const int slowEnds = g_liveSlowEnds.exchange(0), longEnds = g_liveLongEnds.exchange(0);
     // On Torrent: did the strikes reach anyone? "never within a metre" (out of reach from the saddle) and "touched
     // an enemy, no HP moved" (the game ignored the strike) are different problems.
     char ride[160] = "";
@@ -1352,10 +1356,12 @@ void FlushTally(double now) {
                  t.stamFrames[1], t.stamLost[1], t.stamGained[1], t.stamFrames[0], t.stamLost[0], t.stamGained[0], t.stamRefunded,
                  t.stamLow == INT_MAX ? 0 : t.stamLow, t.stamMax);
     if (t.strikes[0] + t.strikes[1] + t.hitFrames + t.foreign + t.outside + t.rises + spentEnds + spentTimeouts + t.stamLost[1] > 0)
-        LOGI("[combat] 5 s: strikes right %d (%d landed, %d budget-spent) left %d (%d landed, %d budget-spent); spent strikes re-armed at a speed valley %d, by timeout %d | "
+        LOGI("[combat] 5 s: strikes right %d (%d landed, %d budget-spent) left %d (%d landed, %d budget-spent); spent strikes re-armed at a speed valley %d, by timeout %d; "
+             "missed swings ended as they slowed %d, at the longest strike %d | "
              "own hit-frames %d, %d damage, mean hit %.2f of a vanilla hit, %d on-hit stamina marks (%d with no HP drop seen) | HP drops: %d without a recorded attacker (counted as ours), "
              "%d not ours (%d damage), %d of ours outside a strike | HP rose %d times (+%d)%s%s%s",
              t.strikes[HandRight], t.landed[HandRight], t.spent[HandRight], t.strikes[HandLeft], t.landed[HandLeft], t.spent[HandLeft], spentEnds, spentTimeouts,
+             slowEnds, longEnds,
              t.hitFrames, t.dmg, t.sliceN ? t.sliceSum / (float)t.sliceN : 0.f, t.stamMarks, t.stamOnly, t.unattributed, t.foreign, t.foreignDmg, t.outside,
              t.rises, t.riseTotal, stamina, ride, GameERCoopInSession() ? " | co-op session" : "");
     t = CombatTally{};
@@ -1507,7 +1513,11 @@ void GameFrameBody(uint8_t* player) {
     // else's hit can make. Stamina off forces that cost to kHitMarkStamina for the strike (refunded), so
     // the mark stands clear of a frame's regen; at 1 it was lost in it.
     const int stamDrop = stamKnown ? g_prevStam - stamAtEntry : 0;
-    bool stamHit = stamKnown && stamDrop >= (stamOff ? (oneHit ? kHitMarkStamina / 2 : 1) : c.kineticHitStamina);
+    // Stamina off: only a drop the size of ERVR's own mark (less a frame's regen) is a hit. It was any drop of half
+    // the mark or more, so a roll or a jump during a live strike read as a hit and was refunded (2026-11-05:
+    // "stamina is either unlimited or gone for good").
+    const int markCost = oneHit ? kHitMarkStamina : 1;
+    bool stamHit = stamKnown && (stamOff ? StaminaMarkSized(stamDrop, markCost) : stamDrop >= c.kineticHitStamina);
     if (blk.raised && stamKnown && stamDrop >= c.blockImpactStamina) stamHit = false;
     const bool striking = cmd[0].active || cmd[1].active;
     if (stamKnown) {   // the game's own change since our last frame (regen, rolls, charges) - ERVR's writes are in g_prevStam
@@ -1570,10 +1580,13 @@ void GameFrameBody(uint8_t* player) {
                 BodyHapticsPost(BodyKind::Strike, TwoHandedStyle(g_armStyle) ? -1 : h, Clamp(k.qualityCommit, 0.f, 1.f));
             }
             // The game charged its behavior cost: give it back (only an actual drop - with the
-            // watcher signalling the hit there may be nothing to refund).
-            if (stamOff && stamAtEntry < g_prevStam) {
-                WriteStamina(player, g_prevStam); stam = g_prevStam;
-                if (!refundCounted) { g_tally.stamRefunded += g_prevStam - stamAtEntry; refundCounted = true; }
+            // watcher signalling the hit there may be nothing to refund). At most our mark per enemy hit:
+            // a roll, a jump or a blocked hit in the same frame is the player's own cost.
+            if (stamOff && stamAtEntry < g_prevStam && !refundCounted) {
+                const int hits = ef.available && ef.dmgEvents > 1 ? ef.dmgEvents : 1;
+                const int back = std::min(g_prevStam - stamAtEntry, markCost * hits);
+                WriteStamina(player, stamAtEntry + back); stam = stamAtEntry + back;
+                g_tally.stamRefunded += back; refundCounted = true;
             }
             if (c.combatDebug && (!c.kineticContinuous || s_strikeHits[h] == 1)) LOGD("[combat] %s strike HIT #%d (%d damage, stamina %d -> %d)%s", HandName(h), s_strikeHits[h], ef.dmgTotal, g_prevStam, stamAtEntry, stamOff ? " refunded" : "");
             if (oneHit) {   // the swing landed its one hit: spent (the worker re-arms on the next swing)
@@ -1933,8 +1946,13 @@ void PollBlock(const VRTracking& tr, double now) {
         Vec3 lat = d - fwd * fd; lat.y = 0.f;
         const float lateral = lat.Length(), height = d.y;
         auto band = [](float v, float lo, float hi, float fade) { if (v < lo) return Clamp(1.f - (lo - v) / fade, 0.f, 1.f); if (v > hi) return Clamp(1.f - (v - hi) / fade, 0.f, 1.f); return 1.f; };
-        // Up: in front of the body (not hanging behind or at the far side), above the hips.
-        const bool up = fd > -0.05f && lateral < 0.6f && height > -0.8f && height < 0.35f;
+        // Up: RAISED in front - at most ShieldUpHeight below the eyes and ShieldUpForward in front of them
+        // (15 cm of slack once up, so a held block does not flicker). "Anywhere in front above the hips" took an
+        // arm at rest for a block: the guard was held all the time, and stamina regenerates slowly while guarding
+        // (0.7.0 player log: LB in every pad line while walking to a door, 2026-11-05).
+        const float slack = b.raised ? 0.15f : 0.f;
+        const bool up = fd > c.shieldUpForward - slack && lateral < 0.5f + slack &&
+                        height > c.shieldUpHeight - slack && height < 0.35f;
         if (up) { s_downSince = 0; if (s_upSince == 0) s_upSince = now; }
         else { s_upSince = 0; if (s_downSince == 0) s_downSince = now; }
         if (!b.raised && up && now - s_upSince >= 0.05) b.raised = true;
@@ -2427,6 +2445,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                     }
                 }
                 StartSwing(h, slot, now, q, s.arc, vq); s.st = HandSM::Swinging; s.t = now; s.spentAt = 0;
+                s.slowSince = 0; s.landed = false;
                 UpdateSwing(h, q, s.arc, vq, tip);
                 g_haptic.fetch_or(1u << h);
                 if (c.combatDebug) LOGD("[combat] %s swing start: %s (tip %.2f m/s, controller tip %.2f m/s, virtual %.2f m/s, hand %.2f m/s, arc %.2f/%.2f m, weight %.1f, reach %.2f m, quality %.2f)", HandName(h), SlotName(slot), s.peak, rawTip, s.vVirtPeak, handSpd, s.arc, ArcRefFor(weight, c), weight, reach, q);
@@ -2447,24 +2466,40 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             bool spent = false;
             if (continuous) { std::lock_guard<std::mutex> g(g_mtx); spent = !g_cmd[h].active; }
             if (spent && s.spentAt == 0) s.spentAt = now;
+            if (spent) s.landed = true;
             const int spentEnd = SpentContactEnd(spent, tip, s.peak, offSpeed, c.contactValleyFrac, now - s.spentAt, c.contactSpentSeconds);
             const bool valleyEnd = spentEnd == 1, timeoutEnd = spentEnd == 2;
             const float valley = std::max(offSpeed, c.contactValleyFrac * s.peak);
-            if (valleyEnd || timeoutEnd || !WeaponContactContinues(continuous, tip, offSpeed, now - s.t, c.swingMaxSeconds)) {
+            // A live strike is one swing: it ends once its follow-through has slowed under the valley, or after
+            // ContactMaxSeconds however the blade moves (weapon_contact.h LiveContactEnd).
+            if (continuous && tip < valley) { if (s.slowSince == 0) s.slowSince = now; }
+            else s.slowSince = 0;
+            const int liveEnd = LiveContactEnd(continuous, spent, s.slowSince > 0 ? now - s.slowSince : 0.0,
+                                               c.contactDwellSeconds, now - s.t, c.contactMaxSeconds);
+            const bool slowEnd = liveEnd == 3, longEnd = liveEnd == 4;
+            if (valleyEnd || timeoutEnd || slowEnd || longEnd ||
+                !WeaponContactContinues(continuous, tip, offSpeed, now - s.t, c.swingMaxSeconds)) {
                 if (c.combatDebug) LOGD("[combat] %s swing end after %.0f ms (peak %.2f m/s, virtual peak %.2f m/s, arc %.2f m)%s", HandName(h), (now - s.t) * 1000.0, s.peak, s.vVirtPeak, s.arc,
-                                        valleyEnd ? " - spent strike, speed valley" : timeoutEnd ? " - spent strike, timeout" : "");
+                                        valleyEnd ? " - spent strike, speed valley" : timeoutEnd ? " - spent strike, timeout"
+                                        : slowEnd ? " - the swing slowed" : longEnd ? " - longest strike reached" : "");
                 EndSwing(h); s.st = HandSM::Cooldown; s.t = now;
-                // Re-arm from the valley (or at once after a timeout) rather than from rest; after a
-                // valley only once the tip speeds up again.
-                s.restSpeed = valleyEnd ? valley : timeoutEnd ? 1e9f : 0.f;
-                s.rearmMin = valleyEnd ? std::max(tip, 0.01f) : 0.f;
+                // Re-arm from the valley (or at once after a spent strike's timeout) rather than from rest;
+                // after a valley, a slowed swing or a strike that ran too long only once the tip speeds up again.
+                const bool fromValley = valleyEnd || slowEnd || longEnd;
+                s.restSpeed = fromValley ? valley : timeoutEnd ? 1e9f : 0.f;
+                s.rearmMin = fromValley ? std::max(tip, 0.01f) : 0.f;
                 if (valleyEnd) g_spentValleyEnds.fetch_add(1, std::memory_order_relaxed);
                 if (timeoutEnd) g_spentTimeoutEnds.fetch_add(1, std::memory_order_relaxed);
+                if (slowEnd) g_liveSlowEnds.fetch_add(1, std::memory_order_relaxed);
+                if (longEnd) g_liveLongEnds.fetch_add(1, std::memory_order_relaxed);
             } else UpdateSwing(h, StrikeQuality(vEff, s.arc, weight, reach, c), s.arc, vEff, tip);
             break; }
         case HandSM::Cooldown: {
             const float rest = !continuous ? onSpeed : s.restSpeed > offSpeed ? s.restSpeed : offSpeed;
-            if (tip < rest && (continuous || now - s.t >= c.swingCooldown)) { s.st = HandSM::Idle; s.restSpeed = 0.f; }
+            // Continuous: a strike that landed waits ContactCooldownSeconds; a missed one re-arms at once.
+            const bool waited = continuous ? ContactCooldownDone(s.landed, now - s.t, c.contactCooldownSeconds)
+                                           : now - s.t >= c.swingCooldown;
+            if (tip < rest && waited) { s.st = HandSM::Idle; s.restSpeed = 0.f; }
             break; }
         }
         s.prevTip = tip;

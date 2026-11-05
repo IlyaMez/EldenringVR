@@ -713,11 +713,16 @@ const bool* Pass2KeepSet(const std::string& defaultSpec) {
         std::lock_guard<std::mutex> g(g_pass2OverrideMtx);
         spec = g_pass2Override.empty() ? defaultSpec : g_pass2Override;
     }
+    // [VR] Pass2EventsOnce: the event manager (25) out of pass 2 whatever the set says, with the action-button
+    // update (pass2_interact.cpp) - the two step together. Part of the cache key so a hot reload re-parses.
+    const bool eventsOnce = Cfg().vrPass2EventsOnce;
+    if (eventsOnce) spec += " |events once";
     if (spec != s_spec) {
         s_spec = spec;
         ParseKeepSpec(spec.c_str(), s_keep);
         if (Pass2SkipsCharacters())
             for (int g : kChrPipeline) s_keep[g] = false;
+        if (eventsOnce) s_keep[25] = false;
         std::string names;
         for (int i = 0; i < g_table.count && i < 256; ++i)
             if (s_keep[i]) { names += std::to_string(i); names += ' '; }

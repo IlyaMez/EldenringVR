@@ -80,4 +80,33 @@ inline bool RearmReady(float tip, float rearmMin) {
     return rearmMin <= 0.f || tip >= rearmMin * 1.5f + 0.5f;
 }
 
+// A live (unspent) continuous contact is one swing too. It used to last as long as the tip moved at the off
+// speed (0.25 m/s), with no time limit: a blade carried while walking, rested on a wall or waved about stayed a
+// live hitbox for whole seconds (0.7.0 player log: a strike live 296-300 of every 300 frames, "swings 0,
+// injected 271") - the "constant attacking". It now ends once the tip has stayed below the swing's valley
+// (ContactValley x its peak, at least the off speed) for dwellSeconds - the follow-through slowed - or after
+// maxSeconds however the blade moves. Returns 0 (keep), 3 (slowed), 4 (too long).
+inline int LiveContactEnd(bool continuous, bool spent, double belowValleyFor, float dwellSeconds, double elapsed,
+                          float maxSeconds) {
+    if (!continuous || spent) return 0;
+    if (belowValleyFor >= dwellSeconds) return 3;
+    if (maxSeconds > 0.f && elapsed >= maxSeconds) return 4;
+    return 0;
+}
+
+// After a contact that landed a hit the next one opens only `cooldown` seconds after it ended: one hit per
+// swing, nothing sawn out of the same motion. A contact that missed re-arms at once, so a windup that slows at
+// the top still opens for its downswing.
+inline bool ContactCooldownDone(bool landed, double sinceEnd, float cooldown) {
+    return !landed || sinceEnd >= cooldown;
+}
+
+// The one-frame stamina drop that is ERVR's own on-hit mark (stamina "off": the strike's behavior cost is forced
+// to `mark` and refunded). A frame's regen can shave up to 2 off it; a roll, a jump or a blocked hit costs
+// something else, and that cost is the player's - it used to be read as a hit and refunded (free rolls while a
+// strike was live).
+inline bool StaminaMarkSized(int drop, int mark) {
+    return mark <= 1 ? drop >= 1 : drop >= mark - 2 && drop <= mark;
+}
+
 } // namespace ervr

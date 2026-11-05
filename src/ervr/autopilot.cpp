@@ -149,6 +149,22 @@ bool AutoPilotMerge(XINPUT_GAMEPAD& pad) {
                 const std::string name = step.substr(0, plus);
                 const double wait = plus == std::string::npos ? 1.0 : atof(step.c_str() + plus + 1);
                 if (now < at + wait) {
+                    // Sticks are held for the whole step (LU/LD/LL/LR walk, RL/RR turn the camera), so the
+                    // script can walk up to a prompt; every other step is a 0.12 s tap.
+                    const bool stick = name.size() == 2 && (name[0] == 'L' || name[0] == 'R') &&
+                                       (name[1] == 'U' || name[1] == 'D' || name[1] == 'L' || name[1] == 'R') &&
+                                       !(name[0] == 'L' && name[1] == 'B') && !(name[0] == 'R' && name[1] == 'B');
+                    if (stick) {
+                        if (s_step.exchange(index) != index)
+                            LOGI("[autopilot] script step %d: %s for %.1f s", index + 1, name.c_str(), wait);
+                        const SHORT full = 32767;
+                        SHORT x = 0, y = 0;
+                        if (name[1] == 'U') y = full; else if (name[1] == 'D') y = -full;
+                        else if (name[1] == 'L') x = -full; else x = full;
+                        if (name[0] == 'L') { pad.sThumbLX = x; pad.sThumbLY = y; }
+                        else { pad.sThumbRX = x; pad.sThumbRY = y; }
+                        return true;
+                    }
                     if (name == "WAIT" || now - at > 0.12) return false;
                     if (s_step.exchange(index) != index) {
                         LOGI("[autopilot] script step %d: %s", index + 1, name.c_str());

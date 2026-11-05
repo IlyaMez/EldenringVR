@@ -3,6 +3,67 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## 0.7.1 (2026-11-05)
+
+Doors, levers and chests open again; a strike is one swing; ERVR comes back when the game's loading signal
+sticks; a menu button on SteamVR.
+
+### Fixes
+* Doors, levers and chests open again. In 0.7.0 the prompt took the press (it vanished, and ERVR.log said
+  `accepted the interact press in pass 1`) and then nothing happened, which stopped progress at the first
+  locked door or lift lever. 0.7.0 had moved the game's action-button update (which prompt the interact button
+  answers) to the first eye's pass only, while the event manager that opens doors, pulls levers and opens
+  chests still runs in both: the two have to step together (0.6.0 had the mirror image and the same dead
+  doors). The update runs in both passes again, as in 0.6.5. What 0.7.0 fixed stays fixed differently: a prompt
+  that answers the same press twice within one stereo pair is told the second time that it was not pressed, so
+  an item is still picked up once and its card still closes. `[VR] Pass2ActionButtons` from 0.7.0 is no longer
+  read (players' `=true` workaround is now the default); `Pass2ActionButtonUpdate` and `Pass2RepeatPressGuard`
+  are there to compare. Thanks to Paolo for finding the ini switch, and to EscalatorBoy, Wyrwislaw and
+  MasterXploda for the reports and logs.
+* A "the world is loading" signal stuck on no longer keeps ERVR switched off. Right after the Grafted Scion,
+  in the Stranded Graveyard, three players got a flat, third-person picture with the Tarnished's head hidden,
+  for good: ERVR's stand-down for loading screens and warps (the game's own camera, no second eye) with the
+  world plainly running. When the loading-screen byte or the game's warp request stays set for 6 s while you
+  walk the world (the stick pushed, the character moving in walking-size steps, the in-game clock running,
+  none of which happens in a load or a cutscene), ERVR treats it as stuck, says so in the log
+  (`[guard] loading-screen byte (0xNN) has stayed set ... while you walk the world`) and comes back: walk a
+  few steps. The log now prints the byte's value with every change (a real load reads `0x80`).
+
+### Combat
+* A strike is one swing. A strike opened at 0.8 m/s of blade tip speed and then stayed live for as long as the
+  tip moved at 0.25 m/s, with no limit: a blade carried while walking, resting on a wall or waved about was a
+  live hitbox for seconds at a time (a 0.7.0 log: a strike live in 296-300 of every 300 frames, and up to 7 of
+  them per hand every 5 s with no enemy near). That was the constant attacking: walls hit over and over, people
+  hit by a sword that only touched them. Now a strike ends once the swing has slowed (under 40% of its peak for
+  0.12 s) or after 1.5 s, the next one opens only when the blade speeds up again, and after a strike that
+  landed the next waits 0.3 s (`[Combat] ContactDwellSeconds`, `ContactMaxSeconds`, `ContactCooldownSeconds`).
+  A windup that slows at the top ends its strike, and the downswing opens a new one. Reported by Nickytheman12,
+  Rahtz and MasterXploda.
+* Rolls and jumps cost stamina again during a strike. With stamina "off", any drop of 4 or more while a strike
+  was live counted as ERVR's own on-hit mark and was refunded, so with strikes live most of the time stamina
+  felt unlimited, until it wasn't. Only a drop the size of the mark counts now, and a refund gives back at most
+  the mark.
+* A shield holds the guard only when you raise it: the left hand within 45 cm below your eyes and 10 cm in
+  front of them (`[Combat] ShieldUpHeight`, `ShieldUpForward`, 15 cm of slack once up). "Up" was anywhere in
+  front of you above the hips, so an arm at rest held the guard all the time, and stamina comes back slowly
+  while guarding: a fight drained it for good. Holding the left stick click "fixed" it because ERVR's menu
+  navigation mode lets go of the guard.
+
+### Controls
+* Both stick clicks pressed together are the menu button (tap: the menu, hold: the map), for SteamVR, which
+  keeps a Quest's left menu button for its own dashboard: over Link, Air Link or Steam Link the game's menu
+  could not be opened. Held together, neither click crouches or locks on (`[Buttons] MenuStickChord`).
+* After a death, the left stick moves the cursor of the "Stake of Marika / last site of grace" choice. Neither
+  of ERVR's menu readers sees that screen, so the stick stayed a stick and only the first answer could be
+  taken.
+
+### Testing
+* `[VR] Pass2EventsOnce=true` (off by default) runs the event manager and the action-button update once per
+  frame, in the first eye's pass, as the game does without ERVR. For a lift that stays put after its lever
+  is pulled: if this moves it, and doors, levers, chests, graces and items still work, it becomes the default.
+* `[Experimental] AutoPilotScript` takes sticks, held for their step: `LU LD LL LR` walk, `RL RR RU RD` turn
+  the camera.
+
 ## 0.7.0 (2026-11-04)
 
 ERVR settings in the game's own menu; body calibration; no more strikes from turning; the stuck item card fixed;

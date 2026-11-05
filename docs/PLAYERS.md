@@ -133,6 +133,7 @@ are and which hands take them are in `[Belt]` in `ERVR.ini`; with a body calibra
 | Control | What it does |
 |---|---|
 | Menu button (left controller) | Tap: the menu. Hold: the map |
+| Both stick clicks together | The menu button too, for SteamVR, which keeps a Quest's left menu button for its dashboard |
 | Left stick, in a menu | Moves the cursor like a D-pad; keep it tilted to repeat |
 | A / B | Confirm / back |
 | Left stick click held 0.5 s | Menu navigation by hand on or off, for menus ERVR does not notice opening (grace sites, shops, level up) |
@@ -256,9 +257,13 @@ in this release and not yet tried on a suit: tell us in `#ervr-help` if a side f
 | Low frame rate, or play feels sluggish | Lower *Resolution* in Options and the game's own graphics settings. In Virtual Desktop pick 72, 80 or 90 Hz yourself: games only get its current rate. *Big screen* is the cheap fallback. |
 | The stick does nothing in a menu | Hold the left stick click for half a second: menu navigation by hand turns on for menus ERVR did not notice. |
 | A swing does nothing | Swing faster: a slow push is not an attack. In a menu, combat stands down on purpose. Options > Combat > *Swing threshold* sets how fast a strike must be. |
-| Slow moves, or a blade resting on a wall, keep attacking | Raise Options > Combat > *Swing threshold* (`[Combat] ContactOnSpeed`, 0.8 m/s): the blade's tip must move faster than that to strike. |
+| Slow moves, or a blade resting on a wall, keep attacking | Update to 0.7.1 or later: a strike is one swing. If small moves still strike, raise Options > Combat > *Swing threshold* (`[Combat] ContactOnSpeed`, 0.8 m/s; try 1.5): the blade's tip must move faster than that to strike. |
+| Stamina never comes back with a shield | Update to 0.7.1 or later: the shield guards only when you raise it in front of you (left hand near chest height). |
 | A launcher slider saved a tenth of what you set (90° became 9°) | That was the 0.6.0 and 0.6.5 launcher, for *Smooth turn speed*, *Weapon angle* and *Body haptics*: update and set them again. |
-| A door, lever, lift or new grace ignores Y | That was 0.6.0: update to 0.6.5 or later. ERVR corrects 0.6.0's `Pass2FullFrameKeep` / `Pass2SafeKeep` lines in your `ERVR.ini` by itself; if you typed other values there, delete both lines. |
+| A door, lever, chest or new grace takes Y and does nothing | That was 0.7.0 (and 0.6.0 before it): update to 0.7.1 or later. ERVR corrects 0.6.0's `Pass2FullFrameKeep` / `Pass2SafeKeep` lines and ignores 0.7.0's `Pass2ActionButtons` by itself. |
+| A lift stays put after you pull its lever | Set `[VR] Pass2EventsOnce=true` in `ERVR.ini` (a test) and tell us in `#ervr-help` whether the lift moves, with your `ERVR.log`. |
+| The menu button does nothing | On SteamVR the left menu button opens SteamVR's dashboard: click both sticks together instead (tap: menu, hold: map). |
+| The picture goes flat, third person, with no head, and stays so | ERVR thinks the game is still loading. Walk a few steps: since 0.7.1 it notices and comes back. If it does not, post your `ERVR.log` in `#ervr-help`. |
 | The weapon points too far up, or you bend your wrist to hold it upright | Options > Body > *Weapon angle*. |
 | The Tarnished's arms look stretched, or his elbows stay bent with your arms straight | In the game, System > ERVR Settings > *Body calibration* > *Redo when the menu closes* (or the launcher's Options > Body > *Body calibration* > *Redo*), then stand tall in the T-pose when the panel asks. |
 | The calibration panel keeps saying *Check your headset's floor* | The headset's floor is off (it measures you under 1.20 m or over 2.20 m tall): set the floor in the headset's own settings, then hold the T-pose again. |

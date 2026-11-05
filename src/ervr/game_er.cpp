@@ -29,6 +29,7 @@
 #include "body_calibration_logic.h"
 #include "weapon_wheel.h"
 #include "body_haptics_er.h"
+#include "transition_stale.h"
 #include <windows.h>
 #include <MinHook.h>
 #include "virtual_pad.h"
@@ -3411,6 +3412,61 @@ bool GameERForeignCamActive() {
     return t != 0 && GetTickCount64() - t < 1200;
 }
 
+namespace {
+// Both signals below pass through a stale filter (transition_stale.h): one that stays set while the player
+// walks a running world is no load or warp, and is ignored until it next reads clear. Sampled here, at most
+// every 100 ms, by whichever thread asks first; the world-dying check asks every 30 ms.
+std::mutex g_walkMtx;   // guards g_walk and both StaleSignals; nothing that locks anything else runs under it
+WalkWindow g_walk;
+StaleSignal g_staleLoad, g_staleWarp;
+std::atomic<ULONGLONG> g_walkNext{0};
+std::atomic<uint32_t> g_loadingRaw{0};   // the loading byte as last read (for the log)
+
+// Read outside g_walkMtx: VirtualPadGetMove takes the pad's own lock.
+WalkSample ReadWalkSample(ULONGLONG now) {
+    WalkSample s;
+    s.ms = now;
+    if (uint8_t* player = MainPlayer())
+        if (uint8_t* phys = Physics(player)) {
+            float p[4];
+            if (SafeRead(phys + off::Phys_Position, p, sizeof(p)) && std::isfinite(p[0]) && std::isfinite(p[1]) &&
+                std::isfinite(p[2])) {
+                s.x = p[0]; s.y = p[1]; s.z = p[2];
+                s.valid = true;
+            }
+        }
+    s.igtMs = GameERIgtMs();
+    const MoveIntent mv = VirtualPadGetMove();
+    s.pushing = mv.valid && mv.x * mv.x + mv.y * mv.y > 0.25f;
+    return s;
+}
+
+bool FilterStale(StaleSignal& sig, bool raw, const char* what, uint32_t rawVal) {
+    const ULONGLONG now = GetTickCount64();
+    WalkSample sample;
+    bool sampled = false;
+    ULONGLONG next = g_walkNext.load(std::memory_order_relaxed);
+    if (now >= next && g_walkNext.compare_exchange_strong(next, now + 100)) {
+        sample = ReadWalkSample(now);
+        sampled = true;
+    }
+    std::lock_guard<std::mutex> lock(g_walkMtx);
+    if (sampled) g_walk.Add(sample);
+    float path = 0.f, rate = 0.f;
+    const bool walking = raw && !sig.stale && g_walk.Walking(now, &path, &rate);
+    const ULONGLONG since = sig.sinceMs;
+    StaleSignal::Event e = StaleSignal::kNone;
+    const bool on = sig.Filter(raw, now, walking, &e);
+    if (e == StaleSignal::kWentStale)
+        LOGW("[guard] %s (0x%02X) has stayed set for %.0f s while you walk the world (%.1f m in the last 3 s, "
+             "in-game clock x%.2f): not a load or a warp. Ignored until it clears - ERVR's view and the second eye "
+             "come back", what, rawVal, (now - since) / 1000.0, path, rate);
+    else if (e == StaleSignal::kClearedAfterStale)
+        LOGI("[guard] %s cleared (it had been ignored as stuck)", what);
+    return on;
+}
+} // namespace
+
 // The game's OWN warp commitment: GameMan.warp_requested (+0x10). Set on the request frame
 // of every warp - map-screen travel confirm, death respawn, stake of Marika, emevd
 // WarpPlayer, coop return - and never by an ordinary interact/jump A press. This is the
@@ -3421,19 +3477,25 @@ bool GameERWarpRequested() {
     if (!g_gameManPtr) return false;
     uint8_t* gm = Deref(g_gameManPtr); if (!gm) return false;
     uint8_t b = 0;
-    return RD(gm + 0x10, b) && b != 0;
+    const bool raw = RD(gm + 0x10, b) && b != 0;
+    return FilterStale(g_staleWarp, raw, "GameMan.warp_requested", b);
 }
 
 // The community "loading screen up" byte: [[CSEventFlagMan]+0x28] + 0x113 (flag_blocks of
 // the CSFD4VirtualMemoryFlag that heads CSEventFlagMan; the exact read TGA's Seamless-Coop
 // loading-screen fix polls at 100 ms until it clears). TRUE for the whole teardown/stream/
-// rebuild window between a warp request and arrival - state, not a timer.
+// rebuild window between a warp request and arrival - state, not a timer. Cutscenes raise it
+// too (2026-11-01 log). It is eight event flags read as one byte (holder 2, byte 25 of the
+// flag blocks), so a flag the game leaves set in some place reads as a load that never ends:
+// the stale filter above, and the raw value in the log ("loading-screen byte -> 1 (0xNN)").
 bool GameERLoadingScreen() {
     if (!g_eventFlagManPtr) return false;
     uint8_t* efm = Deref(g_eventFlagManPtr); if (!efm) return false;
     uint8_t* blocks = Deref(efm + 0x28); if (!blocks) return false;
     uint8_t b = 0;
-    return RD(blocks + 0x113, b) && b != 0;
+    const bool raw = RD(blocks + 0x113, b) && b != 0;
+    g_loadingRaw.store(b, std::memory_order_relaxed);
+    return FilterStale(g_staleLoad, raw, "loading-screen byte", b);
 }
 
 // Co-op roster. Seamless Co-op adds and removes other players' characters with no warp,
@@ -3563,7 +3625,10 @@ bool GameERWarpGuardActive() {
     if (warp) g_warpReqTick.store(now, std::memory_order_relaxed);
     if (load) g_loadingTick.store(now, std::memory_order_relaxed);
     if (warp != s_warpWas) { LOGI("[guard] GameMan.warp_requested -> %d", (int)warp); s_warpWas = warp; }
-    if (load != s_loadWas) { LOGI("[guard] loading-screen byte -> %d", (int)load); s_loadWas = load; }
+    if (load != s_loadWas) {
+        LOGI("[guard] loading-screen byte -> %d (0x%02X)", (int)load, g_loadingRaw.load(std::memory_order_relaxed));
+        s_loadWas = load;
+    }
     const ULONGLONG t = g_warpReqTick.load(std::memory_order_relaxed);
     return t != 0 && now - t < (ULONGLONG)(Cfg().vrPass2WarpGraceSeconds * 1000.f);
 }

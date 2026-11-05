@@ -58,10 +58,11 @@ constexpr long kLineCap[] = {300, 300, 60};
 
 bool g_watch = false;
 
-// The decisions made so far: the update below counts the ones that ran. A prompt's "pressed" answer belongs to
-// the decision current when it is asked.
+// The action-button updates run so far (both passes count). The repeat guard below measures "the same press"
+// in updates, which advance in every state that can answer a press - a frame counter freezes when the pump
+// stops (flat frames), and "same frame" alone would then swallow every later press.
 std::atomic<uint32_t> g_decision{0};
-bool g_updateHooked = false;   // without the update hook there are no decisions to key answers on
+bool g_updateHooked = false;   // without the update hook there is no update count to key answers on
 
 // Who asks: each prompt caller (return address), its calls per pass and how many came from off the frame thread.
 // Measured 2026-11-04 (in-headset, 2.7.2.0): a grace's and an NPC's prompts were asked ONLY while pass 2 ran,
@@ -97,13 +98,14 @@ void NoteCaller(uintptr_t ra, int p, int32_t id) {
     }
 }
 
-// A prompt answers "pressed" at most once per decision. With the decision made once per frame (pass 2 skips the
-// update), a prompt asked in both passes would otherwise answer the same press twice - an item handled twice,
-// its card left on screen. Kept per prompt (caller + action button id): one press is one decision's winner, so a
-// second "pressed" from the same prompt for the same decision is always the repeat. The frame bound (this frame
-// or the next) lets a prompt asked before the update - the next frame's pass 1, about the last decision - still
-// count as a repeat, and keeps a decision that stops updating (a state with no world step) from going quiet.
-struct Answer { uintptr_t caller; int32_t id; uint32_t decision; long frame; };
+// One press, one answer per prompt. The single-pass game never has a prompt answer "pressed" twice for one press;
+// with the stereo second pass it can (0.6.5: an item handled twice, its card left on screen with nothing to close
+// it). So a prompt (caller + action button id) that already answered "pressed" within the last kRepeatUpdates
+// updates is told "not pressed" - two updates is one stereo pair (both passes update) or two flat frames, far
+// shorter than any second press a hand can make (the press lands on release). A dropped repeat renews the
+// window, so a run of repeats from one press is dropped whole.
+constexpr uint32_t kRepeatUpdates = 2;
+struct Answer { uintptr_t caller; int32_t id; uint32_t decision; };
 SRWLOCK g_answersLock = SRWLOCK_INIT;
 Answer g_answers[8]{};
 int g_answersNext = 0;
@@ -111,13 +113,16 @@ std::atomic<long> g_repeats{0}, g_repeatLines{0};
 
 bool RepeatAnswer(uintptr_t caller, int32_t id) {
     const uint32_t decision = g_decision.load(std::memory_order_acquire);
-    const long frame = g_frameNo.load(std::memory_order_relaxed);
     AcquireSRWLockExclusive(&g_answersLock);
     bool repeat = false;
-    for (const Answer& a : g_answers)
-        if (a.caller == caller && a.id == id && a.decision == decision && frame - a.frame <= 1) { repeat = true; break; }
+    for (Answer& a : g_answers)
+        if (a.caller == caller && a.id == id && decision - a.decision <= kRepeatUpdates) {
+            a.decision = decision;
+            repeat = true;
+            break;
+        }
     if (!repeat) {
-        g_answers[g_answersNext] = {caller, id, decision, frame};
+        g_answers[g_answersNext] = {caller, id, decision};
         g_answersNext = (g_answersNext + 1) % 8;
     }
     ReleaseSRWLockExclusive(&g_answersLock);
@@ -126,8 +131,8 @@ bool RepeatAnswer(uintptr_t caller, int32_t id) {
 
 // ExecuteActionButton (fromsoftware-rs present_action_button): what every prompt calls each frame - it registers
 // the prompt with the manager and answers whether the interact press was for it. Arg 3 is a float (movss,
-// 2.7.2.0), 9 args, the answer in al. Every call reaches the game, in either pass; only a repeated "pressed" for
-// one decision is answered "not pressed".
+// 2.7.2.0), 9 args, the answer in al. Every call reaches the game, in either pass; only a prompt's repeated
+// "pressed" for one press is answered "not pressed".
 using FnExecuteActionButton = uint8_t(__fastcall*)(void*, int32_t, float, uint64_t, uint64_t, uint64_t, uint64_t,
                                                    uint64_t, uint64_t);
 FnExecuteActionButton g_origExecute = nullptr;
@@ -142,7 +147,7 @@ uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uin
     const uint8_t r = g_origExecute(self, id, f, a4, a5, a6, a7, a8, a9);
     if (!r) return 0;
     auto* base = (uint8_t*)GetModuleHandleW(nullptr);
-    if (g_updateHooked && !Cfg().vrPass2ActionButtons && RepeatAnswer(ra, id)) {
+    if (g_updateHooked && Cfg().vrPass2RepeatPressGuard && RepeatAnswer(ra, id)) {
         g_repeats.fetch_add(1, std::memory_order_relaxed);
         if (g_repeatLines.fetch_add(1, std::memory_order_relaxed) < 100)
             LOGI("[p2watch] action button %d answered the same press again in pass %d (frame %ld, from exe+0x%llX): "
@@ -161,15 +166,26 @@ uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uin
 
 // The action-button system's per-frame update (2.7.2.0+0xa67a20, called once per frame by the world step at
 // +0x58f6a0): it resets the 15-slot prompt candidate table, then tail-calls the manager's update (+0xa64d10)
-// that decides which prompt the interact press goes to. Skipped in pass 2.
+// that decides which prompt the interact press goes to. Runs in both passes, like the event manager (25) whose
+// door, lever and chest actions it serves: 0.7.0 ran it in pass 1 only, every door, lever and chest took the
+// press (logged "accepted ... in pass 1") and then did nothing, and players' [VR] Pass2ActionButtons=true - this
+// update back in pass 2 - opened them again. 0.6.0 had the mirror image (update in both passes, the event
+// manager in pass 1 only) and the same dead doors: the two must step together.
+// [VR] Pass2ActionButtonUpdate=false skips it in pass 2 (0.7.0's behaviour, for comparison). [VR]
+// Pass2EventsOnce=true skips it together with the event manager (frame_probe.cpp drops group 25): both once per
+// frame, the single-pass game's order - the candidate fix for a lift that ignores its pulled lever (the lever's
+// one-frame signal cleared by the event manager's second run before the event script, once per frame, sees it).
 using FnActionButtonUpdate = void(__fastcall*)(void* table, void* arg);
 FnActionButtonUpdate g_origUpdate = nullptr;
-std::atomic<long> g_updatesSkipped{0};
+std::atomic<long> g_updatesSkipped{0}, g_updatesPass2{0};
 
 void __fastcall Hook_ActionButtonUpdate(void* table, void* arg) {
-    if (FramePumpCurrentPass() == 2 && !Cfg().vrPass2ActionButtons) {
-        g_updatesSkipped.fetch_add(1, std::memory_order_relaxed);
-        return;
+    if (FramePumpCurrentPass() == 2) {
+        if (!Cfg().vrPass2ActionButtonUpdate || Cfg().vrPass2EventsOnce) {
+            g_updatesSkipped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        g_updatesPass2.fetch_add(1, std::memory_order_relaxed);
     }
     g_decision.fetch_add(1, std::memory_order_acq_rel);
     g_origUpdate(table, arg);
@@ -274,6 +290,7 @@ void Summary() {
     const long c1 = g_calls[0].exchange(0), c2 = g_calls[1].exchange(0);
     const long a1 = g_accepted[0].exchange(0), a2 = g_accepted[1].exchange(0);
     const long skipped = g_updatesSkipped.exchange(0);
+    const long ranPass2 = g_updatesPass2.exchange(0);
     const long repeats = g_repeats.exchange(0);
     long ch[kObjs][3];
     memcpy(ch, g_changes, sizeof(ch));
@@ -294,12 +311,13 @@ void Summary() {
         else     snprintf(part, sizeof(part), " exe+0x%llX %ld/%ld", rva, n1, n2);
         callers += part;
     }
-    if (!a1 && !a2 && !changes && !c1 && !c2 && !repeats) return;
+    if (!a1 && !a2 && !changes && !c1 && !c2 && !repeats && !ranPass2) return;
     LOGI("[p2watch] 5 s: interact presses accepted pass 1 %ld / pass 2 %ld (of %ld / %ld prompt calls), repeated "
-         "answers dropped %ld, action-button updates skipped in pass 2 %ld | changes in pass 1 / pass 2 / between "
-         "frames: action-button state %ld/%ld/%ld, item popup queue %ld/%ld/%ld, ui %ld/%ld/%ld%s%s",
-         a1, a2, c1, c2, repeats, skipped, ch[0][0], ch[0][1], ch[0][2], ch[1][0], ch[1][1], ch[1][2], ch[2][0],
-         ch[2][1], ch[2][2], callers.empty() ? "" : " | prompts asked from (pass 1/pass 2):", callers.c_str());
+         "answers dropped %ld, action-button updates in pass 2 run %ld / skipped %ld | changes in pass 1 / pass 2 / "
+         "between frames: action-button state %ld/%ld/%ld, item popup queue %ld/%ld/%ld, ui %ld/%ld/%ld%s%s",
+         a1, a2, c1, c2, repeats, ranPass2, skipped, ch[0][0], ch[0][1], ch[0][2], ch[1][0], ch[1][1], ch[1][2],
+         ch[2][0], ch[2][1], ch[2][2], callers.empty() ? "" : " | prompts asked from (pass 1/pass 2):",
+         callers.c_str());
 }
 
 // The managers exist from boot; look them up once the world is up (the scan reads the whole module), and
@@ -348,14 +366,19 @@ void Pass2InteractInit() {
                        MH_EnableHook(upd) == MH_OK;
     g_updateHooked = updOk;
     if (execOk && updOk)
-        LOGI("[stereo] action buttons decide once per frame: the second eye's pass skips their update (exe+0x%llX); "
-             "every prompt is still asked, in either pass, and one that answers the same press twice gets "
-             "not-pressed the second time (exe+0x%llX)%s",
-             (unsigned long long)(upd - base), (unsigned long long)(exec - base),
-             Cfg().vrPass2ActionButtons ? " - OFF for now, [VR] Pass2ActionButtons=true" : "");
+        LOGI("[stereo] action buttons: their update runs in %s (exe+0x%llX); a prompt that answers the same press "
+             "again within %u updates is told not pressed%s (exe+0x%llX)",
+             Cfg().vrPass2EventsOnce ? "pass 1 only, with the event manager ([VR] Pass2EventsOnce=true)"
+             : Cfg().vrPass2ActionButtonUpdate ? "both passes, with the event manager's doors, levers and chests"
+                                               : "pass 1 only ([VR] Pass2ActionButtonUpdate=false: doors, levers "
+                                                 "and chests ignore the button)",
+             (unsigned long long)(upd - base), kRepeatUpdates,
+             Cfg().vrPass2RepeatPressGuard ? "" : " - OFF, [VR] Pass2RepeatPressGuard=false",
+             (unsigned long long)(exec - base));
     else
         LOGW("[stereo] action-button hooks incomplete (prompt call %s, update %s): the second eye's pass can answer the "
-             "interact button again (doors, item cards)", execOk ? "ok" : "not hooked", updOk ? "ok" : "not hooked");
+             "interact button again (an item card left on screen)", execOk ? "ok" : "not hooked",
+             updOk ? "ok" : "not hooked");
     if (Cfg().vrPass2Watch) {
         std::thread(LookupLoop).detach();
         g_watch = true;

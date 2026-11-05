@@ -38,6 +38,19 @@ int main() {
     Check(RearmReady(0.9f, 0.f), "without a valley end the usual contact start applies");
     Check(!RearmReady(2.5f, 3.1f), "a decelerating follow-through must not open a second hit");
     Check(RearmReady(1.0f, 0.3f), "the next swing out of a reversal must arm");
+    Check(LiveContactEnd(true, false, 0.0, 0.12f, 0.3, 1.5f) == 0, "a swing still above its valley stays live");
+    Check(LiveContactEnd(true, false, 0.05, 0.12f, 0.3, 1.5f) == 0, "a momentary dip under the valley is not the end");
+    Check(LiveContactEnd(true, false, 0.13, 0.12f, 0.4, 1.5f) == 3, "a slowed follow-through ends the swing");
+    Check(LiveContactEnd(true, false, 0.0, 0.12f, 1.6, 1.5f) == 4,
+          "a blade carried or waved about must not stay a live hitbox for seconds");
+    Check(LiveContactEnd(true, true, 1.0, 0.12f, 5.0, 1.5f) == 0, "a spent contact ends through the spent rules");
+    Check(LiveContactEnd(false, false, 1.0, 0.12f, 5.0, 1.5f) == 0, "the gated model keeps its own limits");
+    Check(!ContactCooldownDone(true, 0.1, 0.3f), "a swing that landed waits before the next can open");
+    Check(ContactCooldownDone(true, 0.31, 0.3f), "and opens once the cooldown has passed");
+    Check(ContactCooldownDone(false, 0.0, 0.3f), "a missed swing (a windup) re-arms at once");
+    Check(StaminaMarkSized(8, 8) && StaminaMarkSized(6, 8), "ERVR's mark, less a frame's regen, is a hit mark");
+    Check(!StaminaMarkSized(15, 8) && !StaminaMarkSized(4, 8), "a roll's or a jump's cost is not ERVR's mark");
+    Check(StaminaMarkSized(1, 1) && StaminaMarkSized(3, 1), "with a 1-point mark any drop counts, as before");
     WeaponContactLifetime contact;
     contact.Begin(); contact.End();
     Check(contact.active && contact.first, "a contact shorter than a game frame must survive until delivery");

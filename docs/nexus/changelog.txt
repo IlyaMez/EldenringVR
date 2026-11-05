@@ -1,3 +1,13 @@
+0.7.1 (2026-11-05)
+
+- Doors, levers and chests open again (0.7.0 took the press and did nothing). The ERVR.ini workaround Pass2ActionButtons=true is now built in and the line is no longer read
+- A strike is one swing: it ends when the swing slows (1.5 s at the latest) and the next needs a new swing, with a short cooldown after a hit. No more constant attacking, walls hit over and over, or people hit by a sword that only touched them
+- Rolls and jumps cost stamina again during a strike, and a shield guards only when you raise it in front of your chest (an arm at rest held the guard, and stamina comes back slowly while guarding)
+- Flat, third person with no head, after the Grafted Scion: when the game's loading signal stays on while you walk around, ERVR treats it as stuck and comes back
+- Both stick clicks together are the menu button (tap: menu, hold: map), for SteamVR, which keeps a Quest's left menu button for its dashboard
+- After a death, the left stick moves the Stake of Marika / last site of grace choice
+- Test switch for a lift that stays put after its lever: [VR] Pass2EventsOnce=true in ERVR.ini
+
 0.7.0 (2026-11-04)
 
 - ERVR Settings in the game's own menu (System, to the right of Graphics; patch 1.17.2): walking, turning, physical melee, damage, weapon weight and angle, body calibration, world scale, the HUD and rumble, changed without leaving the headset

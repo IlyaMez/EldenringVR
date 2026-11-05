@@ -16,7 +16,7 @@ namespace {
 ervr::VRInputState input;
 ervr::MoveBasis basis;
 int menu = 0;
-bool foreignCam = false, combatMenu = false;
+bool foreignCam = false, combatMenu = false, dead = false;
 float yaw = 0.f;
 double now = 1.0;
 void Check(bool ok, const char* what) {
@@ -37,6 +37,7 @@ void Log(LogLevel, const char*, ...) {}
 IVRBackend* ActiveBackend() { return nullptr; }
 bool GetLatestVRState(VRTracking& tr, VRInputState& in) { tr = {}; in = input; return true; }
 bool GameERPlayerActive() { return true; }
+bool GameERPlayerDead() { return dead; }
 bool GameERForeignCamActive() { return foreignCam; }
 int GameMenuOpen(double) { return menu; }
 MoveBasis GameERGetMoveBasis() { return basis; }
@@ -270,6 +271,54 @@ int main() {
     Check(Poll().wButtons == 0, "RightPad=none presses nothing");
     input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
     c.btnRightPad = "DPAD"; VirtualPadInit();
+    Poll();
+
+    // Both stick clicks together are the menu button (SteamVR keeps a Quest's left menu button): a tap is START,
+    // and neither click reaches the game (no crouch tap, no lock-on) while they are held together.
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    menu = 0;
+    for (int i = 0; i < 5; ++i) Poll();
+    input.buttons = VRB_LThumb | VRB_RThumb;
+    bool clickLeak = false;
+    for (int i = 0; i < 3; ++i) clickLeak |= (Poll().wButtons & (XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB)) != 0;
+    Check(!clickLeak, "the stick clicks held together reach the game as neither crouch nor lock-on");
+    input.buttons = VRB_LThumb;   // the right click let go first: still the chord until both are up
+    clickLeak = false;
+    for (int i = 0; i < 2; ++i) clickLeak |= (Poll().wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+    input.buttons = 0;
+    start = false;
+    for (int i = 0; i < 10; ++i) {
+        const uint16_t b = Poll().wButtons;
+        start |= (b & XINPUT_GAMEPAD_START) != 0;
+        clickLeak |= (b & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+    }
+    Check(start, "a tap of both stick clicks is the menu button's tap: START");
+    Check(!clickLeak, "the left click let go last does not crouch either");
+    c.menuStickChord = false;
+    input.buttons = VRB_LThumb | VRB_RThumb;
+    Check((Poll().wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0, "MenuStickChord=false: the clicks are the game's own");
+    input.buttons = 0;
+    for (int i = 0; i < 10; ++i) Poll();
+    c.menuStickChord = true;
+
+    // Dead: the stake / last-grace choice is a menu neither reader sees; the left stick moves its cursor as a D-pad.
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
+    menu = 0; dead = true;
+    input.thumb[HandLeft][0] = 0.f; input.thumb[HandLeft][1] = -1.f;
+    {
+        bool down = false;
+        for (int i = 0; i < 5; ++i) down |= (Poll().wButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
+        Check(down, "while dead the left stick moves the death choice's cursor");
+    }
+    dead = false;
+    input.thumb[HandLeft][1] = 0.f;
+    for (int i = 0; i < 5; ++i) Poll();
+    input.thumb[HandLeft][1] = 1.f;
+    {
+        const auto alive = Poll();
+        Check(!(alive.wButtons & XINPUT_GAMEPAD_DPAD_UP) && alive.sThumbLY > 20000, "alive again, the stick walks");
+    }
+    input = {}; input.controllerConnected[0] = input.controllerConnected[1] = true;
     Poll();
     std::puts("Virtual pad/map zoom and directional dash/roll regression checks passed.");
 }

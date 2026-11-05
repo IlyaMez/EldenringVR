@@ -142,7 +142,12 @@ void Config::Load(const std::wstring& path) {
     vrPass2FinalizeReplay = GetB(ini, L"VR", L"Pass2FinalizeReplay", vrPass2FinalizeReplay);
     vrPass2SafeOnA = GetF(ini, L"VR", L"Pass2SafeOnA", vrPass2SafeOnA);
     vrPass2KeepActionRequest = GetB(ini, L"VR", L"Pass2KeepActionRequest", vrPass2KeepActionRequest);
-    vrPass2ActionButtons = GetB(ini, L"VR", L"Pass2ActionButtons", vrPass2ActionButtons);
+    vrPass2ActionButtonUpdate = GetB(ini, L"VR", L"Pass2ActionButtonUpdate", vrPass2ActionButtonUpdate);
+    vrPass2RepeatPressGuard = GetB(ini, L"VR", L"Pass2RepeatPressGuard", vrPass2RepeatPressGuard);
+    vrPass2EventsOnce = GetB(ini, L"VR", L"Pass2EventsOnce", vrPass2EventsOnce);
+    // 0.7.0's key (false shipped = the update skipped in pass 2, which left doors, levers and chests dead; players
+    // posted =true as the fix). Retired: the update runs in both passes whatever it says.
+    retiredActionButtonsKey = !GetS(ini, L"VR", L"Pass2ActionButtons", "").empty();
     vrPass2Watch = GetB(ini, L"VR", L"Pass2Watch", vrPass2Watch);
     vrReportFinalCamera = GetB(ini, L"VR", L"ReportFinalCamera", vrReportFinalCamera);
     vrPass2Steps     = GetI(ini, L"VR", L"Pass2Steps", vrPass2Steps);
@@ -182,6 +187,7 @@ void Config::Load(const std::wstring& path) {
     triggerThreshold = GetF(ini, L"Buttons", L"TriggerThreshold", triggerThreshold);
     gripThreshold    = GetF(ini, L"Buttons", L"GripThreshold", gripThreshold);
     menuHoldForBack  = GetF(ini, L"Buttons", L"MenuHoldForBack", menuHoldForBack);
+    menuStickChord   = GetB(ini, L"Buttons", L"MenuStickChord", menuStickChord);
     leftGripPlusStickIsDpad = GetB(ini, L"Buttons", L"LeftGripPlusStickIsDpad", leftGripPlusStickIsDpad);
     btnLeftPad  = GetS(ini, L"Buttons", L"LeftPad", btnLeftPad);
     btnRightPad = GetS(ini, L"Buttons", L"RightPad", btnRightPad);
@@ -280,6 +286,9 @@ void Config::Load(const std::wstring& path) {
     kineticSlices = GetB(ini, L"Combat", L"KineticSlices", kineticSlices);
     contactValleyFrac = Clamp(GetF(ini, L"Combat", L"ContactValley", contactValleyFrac), 0.f, 0.9f);
     contactSpentSeconds = Clamp(GetF(ini, L"Combat", L"ContactSpentSeconds", contactSpentSeconds), 0.1f, 10.f);
+    contactDwellSeconds = Clamp(GetF(ini, L"Combat", L"ContactDwellSeconds", contactDwellSeconds), 0.02f, 1.f);
+    contactMaxSeconds = Clamp(GetF(ini, L"Combat", L"ContactMaxSeconds", contactMaxSeconds), 0.f, 10.f);
+    contactCooldownSeconds = Clamp(GetF(ini, L"Combat", L"ContactCooldownSeconds", contactCooldownSeconds), 0.f, 2.f);
     inertiaAngAccel = GetF(ini, L"Combat", L"InertiaAngAccel", inertiaAngAccel);
     inertiaSpringHz = GetF(ini, L"Combat", L"InertiaSpringHz", inertiaSpringHz);
     inertiaComRef = GetF(ini, L"Combat", L"InertiaComRef", inertiaComRef);
@@ -310,6 +319,8 @@ void Config::Load(const std::wstring& path) {
     blockMinCut = GetF(ini, L"Combat", L"BlockMinCut", blockMinCut);
     blockMinStability = GetF(ini, L"Combat", L"BlockMinStability", blockMinStability);
     shieldNormalPitchDeg = GetF(ini, L"Combat", L"ShieldNormalPitch", shieldNormalPitchDeg);
+    shieldUpHeight = Clamp(GetF(ini, L"Combat", L"ShieldUpHeight", shieldUpHeight), -1.f, 0.3f);
+    shieldUpForward = Clamp(GetF(ini, L"Combat", L"ShieldUpForward", shieldUpForward), -0.3f, 0.6f);
     deflectSpeed = GetF(ini, L"Combat", L"DeflectSpeed", deflectSpeed);
     blockImpactStamina = GetI(ini, L"Combat", L"BlockImpactStamina", blockImpactStamina);
     twoHandMode = GetS(ini, L"Combat", L"TwoHand", twoHandMode);
@@ -523,5 +534,9 @@ void ConfigLogNotes() {
         LOGI("[config] %s in ERVR.ini is 0.6.0's value, which kept doors, levers and new graces from opening: "
              "using ERVR's own (the event manager back in the second eye's pass). Delete the line to stop this note.",
              g_cfg.pass2KeepNote.c_str());
+    if (g_cfg.retiredActionButtonsKey)
+        LOGI("[config] [VR] Pass2ActionButtons in ERVR.ini is 0.7.0's and no longer read: the action-button update "
+             "runs in both passes again (doors, levers, chests), Pass2ActionButtonUpdate=false would skip it. Delete "
+             "the line to stop this note.");
 }
 }
