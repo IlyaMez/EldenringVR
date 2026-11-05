@@ -2,7 +2,8 @@
 // What the launcher finds on this PC (the game, Steam, the VR runtimes, ERVR's files and what else sits in
 // the game folder), what it changes in the game folder (install.ps1 and tools/game_mode.ps1, in C++), and the
 // play session it runs: Steam, the game started with EAC off, ERVR.log followed line by line. Long work runs
-// on worker threads; the window reads snapshots. Nothing here touches the network.
+// on worker threads; the window reads snapshots. Nothing here touches the network (update.cpp is the launcher's
+// only network code).
 #include "launcher_text.hpp"
 #include <windows.h>
 #include <array>
@@ -106,6 +107,8 @@ struct Settings {
     std::wstring gameExe, runtime = kAutoRuntime;
     StartMode mode = StartMode::offline;
     bool shortcutsAsked{};
+    // Ask GitHub for a newer ERVR when the launcher starts (update.hpp); updating still waits for a click.
+    bool updateCheck = true;
     // The game's effects (text::kVrEffects) the launcher turns off; the rest stay as the game's menu sets them.
     text::EffectsOff effectsOff = text::allEffects();
 };

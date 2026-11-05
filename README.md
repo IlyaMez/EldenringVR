@@ -168,8 +168,9 @@ ERVR needs no other mod and does not use R.E.A.L. VR.
 
 </details>
 
-Like ERVR, the launcher has no network code of its own: links open in your browser, and a new version is a
-new zip.
+**Updates:** when a new ERVR is out, the launcher says so and **Update now** puts it in place in a few seconds
+(the zip from GitHub Releases, checked against its SHA-256); START VR then copies it into the game, keeping your
+`ERVR.ini`. The check is one question to GitHub when the launcher starts; About > Updates turns it off.
 
 ## Controls
 
@@ -263,9 +264,10 @@ signed provenance attestation and its SHA-256 in the release notes:
 gh attestation verify ERVR-vX.Y.Z.zip --repo IlyaMez/EldenringVR
 ```
 
-ERVR has no telemetry, no analytics, no auto-updater and no network code of its own. For body haptics it loads
-bHaptics' own library, which talks to the bHaptics Player on your PC; `[bHaptics] Level=0` keeps it from
-loading at all.
+ERVR has no telemetry and no analytics, and `ERVR.dll` never goes online. The launcher asks GitHub once at start
+whether a newer ERVR is out (About > Updates turns that off) and downloads it only when you press Update now. For
+body haptics ERVR loads bHaptics' own library, which talks to the bHaptics Player on your PC; `[bHaptics]
+Level=0` keeps it from loading at all.
 
 ## Contributing
 

@@ -3,6 +3,34 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## 0.7.2 (2026-11-05)
+
+The launcher updates ERVR itself; strikes no longer drain stamina.
+
+### The launcher updates ERVR
+* When a newer ERVR is out, the Play tab says so. **Update now** downloads the release's zip from GitHub, checks it
+  against the release's SHA-256 (GitHub's own digest of the asset) and puts its files in place of the launcher's,
+  the running launcher included, then starts the new launcher; START VR copies the new ERVR into the game folder
+  as it does for any newer ERVR, keeping your `ERVR.ini`. A failure puts every file back. *Later* asks again at the
+  next start. After an update the banner says which version replaced which, with a link to what's new. Ported from
+  Spidy's launcher.
+* The check is one question to GitHub (`api.github.com`) when the launcher starts; About > Updates shows the last
+  answer, has *Check now*, and its switch turns the start-up check off (`update_check=0` in
+  `%APPDATA%\ERVR\launcher.ini`). Nothing is downloaded until you press Update now. `ERVR.dll` still never goes
+  online; this is the launcher's only network code.
+* A launcher unpacked into the game folder itself (its files are the live install, `ERVR.ini` and `ReShade.ini`
+  your own) and one built from the source do not update themselves, and say why.
+* Only an older ERVR's program files (`.dll .exe .md .txt`) that a new zip no longer ships are retired from its
+  folders; settings, logs and anything else you put there stay. The replaced files wait in `.ervr-update\previous`
+  until the next start.
+
+### Combat
+* Stamina "off" (the default) really takes the bar out of the loop now. The game charges a strike's stamina while
+  ERVR runs the injected attack - inside ERVR's own call, so the frame-to-frame check that refunds it never saw the
+  charge (a 0.7.1 log: 0 refunds, and stamina at -50 in every 5 s with a landed hit: "drains in a second in
+  fights", "can't roll"). The stamina before and after that call is compared now and the difference given back,
+  exactly, below 0 too. The 5 s `[combat]` line says how much was taken inside ERVR's attacks.
+
 ## 0.7.1 (2026-11-05)
 
 Doors, levers and chests open again; a strike is one swing; ERVR comes back when the game's loading signal

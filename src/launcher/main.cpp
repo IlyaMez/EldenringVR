@@ -183,14 +183,18 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM w, LPARAM l) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     int count = 0;
+    std::string updatedFrom; // --updated-from: the version an update just replaced (the banner says so)
     LPWSTR* args = CommandLineToArgvW(GetCommandLineW(), &count);
     for (int i = 1; args && i < count; ++i) {
+        if (wcscmp(args[i], L"--updated-from") == 0 && i + 1 < count)
+            updatedFrom = launcher::narrow(args[i + 1]);
         // The headset check: no window, its answer on the output the launcher reads.
         if (wcscmp(args[i], L"--probe") == 0) {
             LocalFree(args);
             return launcher::runProbe();
         }
-        // Started again as administrator (restartAsAdministrator): wait for the one that started this one to close.
+        // Started again as administrator (restartAsAdministrator) or after an update (restartLauncher): wait for the
+        // one that started this one to close.
         if (wcscmp(args[i], L"--wait-for") == 0 && i + 1 < count) {
             if (HANDLE previous = OpenProcess(SYNCHRONIZE, FALSE, wcstoul(args[i + 1], nullptr, 10))) {
                 WaitForSingleObject(previous, 20000);
@@ -258,8 +262,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     applyStyle(dpiScale);
     ImGui_ImplWin32_Init(window);
     ImGui_ImplDX11_Init(device, context);
+    std::wstring restartFolder; // an update installed itself: its launcher starts once this one has let go of all
     {
-        launcher::App application(window, fonts);
+        launcher::App application(window, fonts, updatedFrom);
         bool done = false, occluded = false;
         while (!done) {
             // In the background (the game in front) a few frames a second are plenty.
@@ -277,6 +282,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 break;
             application.poll();
             if (application.shouldQuit()) {
+                restartFolder = application.restartFolder();
                 DestroyWindow(window);
                 continue;
             }
@@ -315,5 +321,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     CoUninitialize();
     if (single)
         CloseHandle(single);
+    // Only now, with the window, ImGui and the one-launcher lock gone, can the updated launcher start and own them.
+    if (!restartFolder.empty()) {
+        std::string error;
+        if (!launcher::restartLauncher(restartFolder, error))
+            MessageBoxW(nullptr, launcher::widen(error).c_str(), L"ERVR", MB_OK | MB_ICONWARNING);
+    }
     return 0;
 }

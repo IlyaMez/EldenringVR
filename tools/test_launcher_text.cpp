@@ -1,4 +1,5 @@
 #include "launcher_text.hpp"
+#include "update_text.hpp"
 #include <cstdio>
 #include <cstdlib>
 
@@ -129,4 +130,61 @@ int main() {
     const std::string report = reportSummary(facts);
     Check(report.rfind("```\nERVR 0.4.0 report\n", 0) == 0 && report.find("with ''' fence") != std::string::npos,
           "report keeps to one fence");
+
+    // ---- Updates: GitHub's answer for v0.7.1 (shape as returned 2026-11-05, trimmed) ----
+    const std::string latest =
+        R"({"html_url":"https://github.com/IlyaMez/EldenringVR/releases/tag/v0.7.1","tag_name":"v0.7.1",)"
+        R"("assets":[{"name":"ERVR-v0.7.1.zip","size":6615558,)"
+        R"("digest":"sha256:13D0D4A5A5218E1BE5847A6E46C1BDB349FACCEDF4A3CEE9655A0C5B783636EA",)"
+        R"("browser_download_url":"https://github.com/IlyaMez/EldenringVR/releases/download/v0.7.1/ERVR-v0.7.1.zip"},)"
+        R"({"name":"ERVR-v0.7.1.zip.sha256","size":83,"digest":"sha256:6406b194f4aae68023ba3db9891c5614f2bbae195655dc617b2cc68302c3e469",)"
+        R"("browser_download_url":"https://github.com/IlyaMez/EldenringVR/releases/download/v0.7.1/ERVR-v0.7.1.zip.sha256"}],)"
+        R"("body":"## Install\r\n```\r\nSHA256  13d0d4a5a5218e1be5847a6e46c1bdb349faccedf4a3cee9655a0c5b783636ea\r\n```\r\n é"})";
+    std::string why;
+    auto release = parseRelease(latest, why);
+    Check(release && release->version == "0.7.1" && release->zipName == "ERVR-v0.7.1.zip" &&
+              release->zipSize == 6615558 && release->zipUrl.rfind("https://", 0) == 0,
+          "the release, its zip and its size");
+    Check(release && release->sha256 == "13d0d4a5a5218e1be5847a6e46c1bdb349faccedf4a3cee9655a0c5b783636ea",
+          "the zip's SHA-256 from GitHub's digest, lower case");
+    std::string noDigest = latest;
+    noDigest.replace(noDigest.find("\"digest\":\"sha256:13D0"), 83, "\"digest\":null,");
+    release = parseRelease(noDigest, why);
+    Check(release && release->sha256 == "13d0d4a5a5218e1be5847a6e46c1bdb349faccedf4a3cee9655a0c5b783636ea",
+          "without a digest, the SHA256 line of the release notes");
+    std::string noHash = noDigest;
+    noHash.replace(noHash.find("SHA256  13d0"), 6, "sha-25");
+    Check(!parseRelease(noHash, why) && why.find("SHA-256") != std::string::npos, "no SHA-256 at all: refused");
+    std::string otherAsset = latest;
+    otherAsset.replace(otherAsset.find("\"name\":\"ERVR-v0.7.1.zip\""), 24, "\"name\":\"Source-0.7.1.zip\"");
+    Check(!parseRelease(otherAsset, why) && why.find("ERVR-v0.7.1.zip") != std::string::npos, "no player zip: refused");
+    std::string plainHttp = latest;
+    plainHttp.replace(plainHttp.find("https://github.com/IlyaMez/EldenringVR/releases/download/v0.7.1/ERVR-v0.7.1.zip\""), 8,
+                      "http://");
+    Check(!parseRelease(plainHttp, why), "a download that is not https: refused");
+    Check(!parseRelease(R"({"tag_name":"nightly","assets":[]})", why) && why.find("nightly") != std::string::npos,
+          "a tag that is no version: refused");
+    Check(!parseRelease("<html>rate limited</html>", why), "an answer that is not JSON: refused");
+    Check(newerVersion("0.7.2", "0.7.1") && newerVersion("0.10.0", "0.9.9") && !newerVersion("0.7.1", "0.7.1") &&
+              !newerVersion("0.6.5", "0.7.1"),
+          "version order");
+    Check(releaseVersion("0.7.1") && !releaseVersion("0.7") && !releaseVersion("0.7.1.0") && !releaseVersion("0.7.x"),
+          "release versions are three numbers");
+
+    // What an update does to the launcher's folder: the zip's files replace and add; an older ERVR's program file
+    // no longer shipped in ERVR\ goes; settings, logs and files beside the launcher stay.
+    const std::vector<std::wstring> installed = {L"ERVR Launcher.exe", L"dinput8.dll", L"ReShade.ini", L"my notes.txt",
+                                                 L"ERVR/ERVR.dll", L"ERVR/ERVR.ini", L"ERVR/old_helper.dll",
+                                                 L"ERVR/ERVR.log", L"ERVR/notes.ini", L"reshade-shaders/x.fx"};
+    const std::vector<std::wstring> package = {L"ERVR Launcher.exe", L"dinput8.dll", L"dxgi.dll", L"ReShade.ini",
+                                               L"ERVR/ERVR.dll", L"ERVR/ERVR.ini", L"ERVR/README.md"};
+    const UpdatePlan plan = updatePlan(installed, package);
+    const auto has = [](const std::vector<std::wstring>& list, const wchar_t* path) {
+        return std::find(list.begin(), list.end(), path) != list.end();
+    };
+    Check(plan.replace.size() == 5 && has(plan.replace, L"ERVR/ERVR.dll") && has(plan.replace, L"ERVR Launcher.exe"),
+          "shipped files that exist are replaced");
+    Check(plan.add.size() == 2 && has(plan.add, L"dxgi.dll") && has(plan.add, L"ERVR/README.md"), "new files are added");
+    Check(plan.retire.size() == 1 && has(plan.retire, L"ERVR/old_helper.dll"),
+          "only an older ERVR's program file goes; logs, settings and the player's files stay");
 }

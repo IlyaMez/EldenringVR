@@ -685,6 +685,7 @@ Settings loadSettings() {
         else if (key == "xr_runtime") settings.runtime = value.empty() ? kAutoRuntime : widen(value);
         else if (key == "mode") settings.mode = value == "coop" ? StartMode::coop : StartMode::offline;
         else if (key == "shortcuts_asked") settings.shortcutsAsked = value == "1";
+        else if (key == "update_check") settings.updateCheck = value != "0";
         for (size_t i = 0; i < text::kVrEffects.size(); ++i)
             if (key == effectKey(text::kVrEffects[i]))
                 settings.effectsOff[i] = value != "0";
@@ -701,7 +702,8 @@ void saveSettings(const Settings& settings) {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     file << "game=" << narrow(settings.gameExe) << "\nxr_runtime=" << narrow(settings.runtime)
          << "\nmode=" << (settings.mode == StartMode::coop ? "coop" : "offline")
-         << "\nshortcuts_asked=" << (settings.shortcutsAsked ? 1 : 0) << "\n";
+         << "\nshortcuts_asked=" << (settings.shortcutsAsked ? 1 : 0)
+         << "\nupdate_check=" << (settings.updateCheck ? 1 : 0) << "\n";
     for (size_t i = 0; i < text::kVrEffects.size(); ++i)
         file << effectKey(text::kVrEffects[i]) << "=" << (settings.effectsOff[i] ? 1 : 0) << "\n";
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include "system.hpp"
+#include "update.hpp"
 #include "imgui.h"
 #include <functional>
 #include <optional>
@@ -26,7 +27,8 @@ void theme(ImGuiStyle& style);
 
 class App {
 public:
-    App(HWND window, Fonts fonts);
+    // `updatedFrom`: the version an update replaced (--updated-from), empty on an ordinary start.
+    App(HWND window, Fonts fonts, std::string updatedFrom = {});
     ~App();
     // Reads the scan, the checks and the session; runs every loop, even while minimized.
     void poll();
@@ -34,6 +36,8 @@ public:
     // Something on screen moves (a check or a session): draw more often in the background.
     bool busy();
     bool shouldQuit() const { return quit_; }
+    // After an update installed itself: the folder whose launcher starts once this one has closed; empty otherwise.
+    std::wstring restartFolder() const { return update_.state == UpdateState::installed ? installFolder_ : std::wstring(); }
 
 private:
     enum class Tab { play, options, controls, about };
@@ -68,6 +72,12 @@ private:
     void setupCard(float width);
     void logCard(ImVec2 size);
     void shortcutBanner(float width);
+    // A newer ERVR on GitHub, its download and install, or the update just done; returns its height (0: none).
+    float updateBanner(float width);
+    // The About tab's Updates card: the last check, the start-up check switch, Check now / Update now.
+    void updatesCard(float width);
+    // Why Update now cannot run right now; empty when it can.
+    std::string updateBlocker();
     void supportCards(float width);
     void modals();
 
@@ -161,6 +171,14 @@ private:
     uint64_t lastIniCheck_{};
     // The option rows of a card draw a rule between them, not above the first.
     bool firstOption_ = true;
+    // Updates: the folder an update replaces (empty: this launcher cannot update itself, and why), the updater and
+    // its last status, "Later" for this run, and the version an update just replaced.
+    std::string installWhyNot_;
+    std::wstring installFolder_;
+    Updater updater_;
+    UpdateStatus update_;
+    bool updateLater_{};
+    std::string updatedFrom_;
 };
 
 } // namespace launcher

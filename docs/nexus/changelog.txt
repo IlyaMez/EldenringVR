@@ -1,3 +1,8 @@
+0.7.2 (2026-11-05)
+
+- The launcher updates ERVR: when a new version is out it says so, and Update now downloads it from GitHub, checks it against the release's SHA-256 and puts it in place in a few seconds (START VR then copies it into the game, keeping your ERVR.ini). One question to GitHub at start; About > Updates turns it off
+- Strikes no longer drain stamina: the game charged it inside ERVR's own attack, where the refund never looked (stamina at -50 in fights, no rolling)
+
 0.7.1 (2026-11-05)
 
 - Doors, levers and chests open again (0.7.0 took the press and did nothing). The ERVR.ini workaround Pass2ActionButtons=true is now built in and the line is no longer read

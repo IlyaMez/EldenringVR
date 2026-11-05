@@ -277,8 +277,12 @@ void theme(ImGuiStyle& style) {
     c[ImGuiCol_NavCursor] = vec(kGoldLift);
 }
 
-App::App(HWND window, Fonts fonts) : window_(window), fonts_(fonts), settings_(loadSettings()) {
+App::App(HWND window, Fonts fonts, std::string updatedFrom)
+    : window_(window), fonts_(fonts), settings_(loadSettings()), installFolder_(installFolder(&installWhyNot_)),
+      updatedFrom_(std::move(updatedFrom)) {
     scanner_.start(settings_);
+    // One question to GitHub per start, on its own thread; updating waits for the player's click.
+    updater_.start(installFolder_, !installFolder_.empty() && settings_.updateCheck);
 }
 
 App::~App() = default;
@@ -290,6 +294,10 @@ void App::rescan() {
 }
 
 void App::poll() {
+    update_ = updater_.status();
+    // An update put its files in place: this launcher closes, and main starts the new one (restartFolder).
+    if (update_.state == UpdateState::installed)
+        quit_ = true;
     const bool scanning = scanner_.busy();
     if (scanning_ && !scanning) {
         scan_ = scanner_.snapshot();
@@ -334,7 +342,9 @@ void App::poll() {
     sessionRan_ = running;
 }
 
-bool App::busy() { return session_.running() || scanner_.busy() || headset_.state() == Outcome::running; }
+bool App::busy() {
+    return session_.running() || scanner_.busy() || headset_.state() == Outcome::running || updater_.busy();
+}
 
 const Runtime* App::chosenRuntime() {
     for (const auto& r : scan_.runtimes)
@@ -364,6 +374,12 @@ App::Readiness App::readiness() {
     if (!scan_.done) {
         r.checking = true;
         r.blockers.push_back("Checking this PC...");
+        return r;
+    }
+    // The launcher's own files are being replaced: START VR would copy half an update into the game.
+    if (update_.state == UpdateState::downloading || update_.state == UpdateState::installing ||
+        update_.state == UpdateState::installed) {
+        r.blockers.push_back("ERVR is updating: wait a moment.");
         return r;
     }
     const Install& in = scan_.install;
@@ -1001,7 +1017,10 @@ void App::tabs() {
 
 void App::play(ImVec2 origin, ImVec2 size) {
     float top = origin.y;
-    if (!settings_.shortcutsAsked && scan_.done) {
+    ImGui::SetCursorScreenPos(origin);
+    if (const float banner = updateBanner(size.x); banner > 0) {
+        top += banner + S(18);
+    } else if (!settings_.shortcutsAsked && scan_.done) {
         ImGui::SetCursorScreenPos(origin);
         shortcutBanner(size.x);
         top += S(58) + S(18);
@@ -1355,6 +1374,177 @@ void App::shortcutBanner(float width) {
         settings_.shortcutsAsked = true;
         save();
     }
+}
+
+std::string App::updateBlocker() {
+    if (installFolder_.empty())
+        return installWhyNot_;
+    if (session_.running())
+        return "Stop VR first.";
+    if (gameRunning_)
+        return "Close ELDEN RING first.";
+    if (!scan_.done || scanner_.busy() || headset_.state() == Outcome::running)
+        return "Wait for the checks on this PC to finish.";
+    return {};
+}
+
+float App::updateBanner(float width) {
+    struct Button {
+        const char* label;
+        bool primary, enabled;
+        std::string tip;
+        std::function<void()> action;
+    };
+    const auto& release = update_.release;
+    const UpdateState state = update_.state;
+    const bool working = release && (state == UpdateState::downloading || state == UpdateState::installing ||
+                                     state == UpdateState::installed);
+    const bool offer = !installFolder_.empty() && release && !updateLater_ &&
+                       (state == UpdateState::available || state == UpdateState::installFailed);
+    if (!working && !offer && updatedFrom_.empty())
+        return 0;
+    std::string message;
+    std::vector<Button> buttons;
+    const bool failed = offer && state == UpdateState::installFailed;
+    if (working) {
+        const char* version = release->version.c_str();
+        if (state == UpdateState::downloading) {
+            const double total = static_cast<double>(std::max<uint64_t>(update_.total, 1));
+            message = format("Downloading ERVR %s...  %.0f%%  (%.1f of %.1f MB)", version,
+                             100.0 * static_cast<double>(update_.received) / total,
+                             static_cast<double>(update_.received) / 1048576.0, total / 1048576.0);
+            buttons.push_back({"Cancel", false, true, "", [&] { updater_.cancel(); }});
+        } else {
+            message = format(state == UpdateState::installing ? "Installing ERVR %s..." : "ERVR %s is installed. Starting it...",
+                             version);
+        }
+    } else if (offer) {
+        const std::string page = release->page.empty() ? kReleasesUrl : release->page;
+        const std::string blocker = updateBlocker();
+        message = failed ? format("Updating to ERVR %s failed: %s", release->version.c_str(), update_.message.c_str())
+                         : format("ERVR %s is out: you have %s. Updating takes a few seconds; START VR then puts it in "
+                                  "the game. Your settings stay.",
+                                  release->version.c_str(), kVersion);
+        buttons.push_back({"What's new", false, true, "The release on GitHub, with its changelog.",
+                           [page] { openUrl(page.c_str()); }});
+        buttons.push_back({failed ? "Try again" : "Update now", true, blocker.empty(), blocker,
+                           [&] { updater_.install(); }});
+        buttons.push_back({"Later", false, true, "Asks again the next time the launcher starts.",
+                           [&] { updateLater_ = true; }});
+    } else {
+        message = format("ERVR is updated: %s to %s. START VR puts it in the game.", updatedFrom_.c_str(), kVersion);
+        const std::string page = std::string(kReleasesUrl) + "/tag/v" + kVersion;
+        buttons.push_back({"What's new", false, true, "", [page] { openUrl(page.c_str()); }});
+        buttons.push_back({"OK", false, true, "", [&] { updatedFrom_.clear(); }});
+    }
+
+    auto* draw = ImGui::GetWindowDrawList();
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const std::string issue = working ? "v" + release->version : failed ? "Update failed" : offer ? "New version" : "Updated";
+    const float stampSize = S(13.5f);
+    const float stampWidth = spacedWidth(fonts_.label, stampSize, upper(issue).c_str(), 0.08f) + stampSize * 1.4f;
+    const float buttonW = S(124), gap = S(10);
+    const float buttonsWidth = buttons.empty() ? 0 : static_cast<float>(buttons.size()) * (buttonW + gap) - gap;
+    const float textX = at.x + S(42) + stampWidth + S(14);
+    const float textWidth = at.x + width - S(16) - (buttons.empty() ? 0 : buttonsWidth + S(18)) - textX;
+    const ImVec2 textSize = measure(fonts_.semibold, S(15), message.c_str(), textWidth);
+    const float height = std::max(S(58), textSize.y + S(30));
+    const ImVec2 end(at.x + width, at.y + height);
+    draw->AddRectFilled(at, end, col(kSurface));
+    draw->AddRect(at, end, col(kLine));
+    corners(draw, at, end, S(9), col(failed ? kRed : kGoldDeep), S(1.5f));
+    diamond(draw, ImVec2(at.x + S(24), at.y + height * 0.5f), S(5), col(failed ? kRedLift : kGold));
+    // The release as a stamp: gold to take, red when it failed, green once it is in.
+    const Rgb tint = failed ? kRedLift : working || offer ? kGoldLift : kGreen;
+    stamp(draw, ImVec2(at.x + S(42), at.y + height * 0.5f), issue.c_str(), col(kSurface), col(tint), col(tint),
+          stampSize);
+    draw->AddText(fonts_.semibold, S(15), ImVec2(textX, at.y + (height - textSize.y) * 0.5f), col(kPaper),
+                  message.c_str(), nullptr, textWidth);
+    if (state == UpdateState::downloading && update_.total) {
+        const float done = std::clamp(
+            static_cast<float>(static_cast<double>(update_.received) / static_cast<double>(update_.total)), 0.f, 1.f);
+        const float left = textX, right = textX + textWidth, y = end.y - S(10);
+        draw->AddRectFilled(ImVec2(left, y), ImVec2(right, y + S(4)), col(kWell));
+        draw->AddRectFilled(ImVec2(left, y), ImVec2(left + (right - left) * done, y + S(4)), col(kGold));
+    }
+    float x = end.x - S(16) - buttonsWidth;
+    for (const auto& b : buttons) {
+        ImGui::SetCursorScreenPos(ImVec2(x, at.y + (height - ImGui::GetFrameHeight()) * 0.5f));
+        ImGui::PushID(b.label);
+        ImGui::BeginDisabled(!b.enabled);
+        const bool clicked = button(b.label, buttonW, b.primary ? Ink::primary : Ink::plain);
+        ImGui::EndDisabled();
+        if (!b.tip.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            tip(b.tip.c_str());
+        ImGui::PopID();
+        if (clicked)
+            b.action();
+        x += buttonW + gap;
+    }
+    ImGui::SetCursorScreenPos(ImVec2(at.x, end.y));
+    return height;
+}
+
+void App::updatesCard(float width) {
+    if (!beginCard("##updates", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY))
+        return endCard();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(10), S(8)));
+    cardTitle("Updates");
+    ImGui::PopStyleVar();
+    const auto& release = update_.release;
+    const bool available =
+        release && (update_.state == UpdateState::available || update_.state == UpdateState::installFailed);
+    std::string status;
+    switch (update_.state) {
+    case UpdateState::idle: status = installFolder_.empty() ? installWhyNot_ : "Not checked yet."; break;
+    case UpdateState::checking: status = "Asking GitHub for the newest ERVR..."; break;
+    case UpdateState::current:
+        status = format("ERVR %s is the newest version (checked at %s).", kVersion, update_.checkedAt.c_str());
+        break;
+    case UpdateState::available: status = format("ERVR %s is out: you have %s.", release->version.c_str(), kVersion); break;
+    case UpdateState::checkFailed: status = "The check failed. " + update_.message; break;
+    case UpdateState::downloading:
+    case UpdateState::installing:
+    case UpdateState::installed: status = format("Updating to ERVR %s.", release->version.c_str()); break;
+    case UpdateState::installFailed: status = "The update failed. " + update_.message; break;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, vec(kLogText));
+    ImGui::TextWrapped("%s", status.c_str());
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, S(4)));
+    option("Check when the launcher starts",
+           "Asks GitHub (api.github.com) once whether a newer ERVR is out. Nothing is downloaded until you press Update now.",
+           S(42), [&] {
+               if (toggle("##updateCheck", &settings_.updateCheck))
+                   save();
+           });
+    ImGui::Dummy(ImVec2(0, S(6)));
+    const float half = (ImGui::GetContentRegionAvail().x - S(10)) * 0.5f;
+    if (available && !installFolder_.empty()) {
+        // The Play tab's banner shows how it goes.
+        const std::string blocker = updateBlocker();
+        ImGui::BeginDisabled(!blocker.empty());
+        if (button("Update now", half, Ink::primary)) {
+            updateLater_ = false;
+            tab_ = Tab::play;
+            updater_.install();
+        }
+        ImGui::EndDisabled();
+        if (!blocker.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            tip(blocker.c_str());
+    } else {
+        ImGui::BeginDisabled(updater_.busy() || update_.state == UpdateState::installed);
+        if (button("Check now", half, Ink::plain, kRefresh)) {
+            updateLater_ = false;
+            updater_.check();
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine(0, S(10));
+    if (button("All releases", half, Ink::plain, kDocument))
+        openUrl(kReleasesUrl);
+    ImGui::Dummy(ImVec2(0, S(4)));
+    endCard();
 }
 
 void App::setupRow(Mark mark, const char* title, const std::string& detail, float actionWidth,
@@ -2235,9 +2425,10 @@ void App::about(ImVec2 origin, ImVec2 size) {
                                "play: that risks a ban. Seamless Co-op is the multiplayer that works.");
         ImGui::PopStyleColor();
         ImGui::PushStyleColor(ImGuiCol_Text, vec(kLogText));
-        ImGui::TextUnformatted("No telemetry, no analytics, no auto-updater, no network code of their own: neither ERVR "
-                               "nor this launcher goes online. Body haptics use bHaptics' own library, which talks to the "
-                               "bHaptics Player on this PC. New versions are on GitHub Releases and Nexus Mods.");
+        ImGui::TextUnformatted("No telemetry, no analytics. ERVR itself never goes online. This launcher asks GitHub "
+                               "once at start whether a newer ERVR is out (Updates, below, turns that off) and downloads "
+                               "it only when you press Update now, checked against the release's SHA-256. Body haptics "
+                               "use bHaptics' own library, which talks to the bHaptics Player on this PC.");
         ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, S(2)));
@@ -2297,6 +2488,8 @@ void App::about(ImVec2 origin, ImVec2 size) {
         ImGui::Dummy(ImVec2(0, S(2)));
     }
     endCard();
+    ImGui::SetCursorScreenPos(ImVec2(base.x, ImGui::GetItemRectMax().y + gap));
+    updatesCard(leftWidth);
     // Right: the tip jar and the Discord, as the README has them.
     ImGui::SetCursorScreenPos(ImVec2(base.x + leftWidth + gap, base.y));
     ImGui::BeginGroup();

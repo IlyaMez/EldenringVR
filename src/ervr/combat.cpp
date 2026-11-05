@@ -277,6 +277,13 @@ bool WriteStamina(uint8_t* player, int value) {
     if (value < 0) value = 0;
     return SafeWrite(data + Data_Stamina, &value, 4);
 }
+// Puts back exactly a value read a moment ago, negative included (ER lets stamina go below 0): a refund must not
+// hand out the difference to 0 as well.
+bool WriteStaminaExact(uint8_t* player, int value) {
+    uint8_t* mods = Deref(player + Chr_Modules); uint8_t* data = mods ? Deref(mods + Mod_Data) : nullptr;
+    if (!data) return false;
+    return SafeWrite(data + Data_Stamina, &value, 4);
+}
 int ReadFp(uint8_t* player, int* maxOut = nullptr) {
     uint8_t* mods = Deref(player + Chr_Modules); if (!mods) return -1;
     uint8_t* data = Deref(mods + Mod_Data); if (!data) return -1;
@@ -1320,6 +1327,7 @@ struct CombatTally {
     // a bar that empties in fights and never recovers; these say whether strikes cost it or stop its regen.
     int stamFrames[2] = {}, stamLost[2] = {}, stamGained[2] = {};   // [0] no strike live, [1] a strike live
     int stamRefunded = 0, stamLow = INT_MAX, stamMax = 0;
+    int execCharges = 0, execCharged = 0;   // stamina the game took INSIDE our attack exec (stamina off: given back)
 } g_tally;
 double g_tallyAt = 0;
 
@@ -1350,11 +1358,11 @@ void FlushTally(double now) {
         else if (t.rideBlade > 1e8f) snprintf(ride, sizeof(ride), " | on Torrent: %d strikes, nearest enemy %.1f m, blade not measured", t.rideStrikes, t.rideNearest);
         else snprintf(ride, sizeof(ride), " | on Torrent: %d strikes, the blade came within %.2f m of an enemy's body (nearest enemy %.1f m)", t.rideStrikes, t.rideBlade, t.rideNearest);
     }
-    char stamina[200] = "";
+    char stamina[280] = "";
     if (t.stamMax > 0)
-        snprintf(stamina, sizeof(stamina), " | stamina (game's own changes): striking %d frames -%d +%d, otherwise %d frames -%d +%d; ERVR refunded %d; low %d of %d",
+        snprintf(stamina, sizeof(stamina), " | stamina (game's own changes): striking %d frames -%d +%d, otherwise %d frames -%d +%d; ERVR refunded %d (%d taken inside its attacks, %d times); low %d of %d",
                  t.stamFrames[1], t.stamLost[1], t.stamGained[1], t.stamFrames[0], t.stamLost[0], t.stamGained[0], t.stamRefunded,
-                 t.stamLow == INT_MAX ? 0 : t.stamLow, t.stamMax);
+                 t.execCharged, t.execCharges, t.stamLow == INT_MAX ? 0 : t.stamLow, t.stamMax);
     if (t.strikes[0] + t.strikes[1] + t.hitFrames + t.foreign + t.outside + t.rises + spentEnds + spentTimeouts + t.stamLost[1] > 0)
         LOGI("[combat] 5 s: strikes right %d (%d landed, %d budget-spent) left %d (%d landed, %d budget-spent); spent strikes re-armed at a speed valley %d, by timeout %d; "
              "missed swings ended as they slowed %d, at the longest strike %d | "
@@ -1730,7 +1738,21 @@ void GameFrameBody(uint8_t* player) {
         if (c.kineticEnabled && c.kineticContinuous)
             args.to = s_time[h] + (c.swingMaxSeconds > 0.f ? c.swingMaxSeconds : 0.6f);
         args.isFirstExecution = k.first ? 1 : 0;
+        // Stamina "off" takes the bar out of the loop. The game charges our attack's stamina INSIDE this call - the
+        // exec sweeps the hitbox and charges on contact - between this frame's entry read and its end read, so the
+        // hit-mark test and the refund above, which compare frame to frame, never saw it (0.7.1 player log: 0 refunds
+        // and stamina at -50 in every 5 s with a landed hit; "drains in a second in fights"). Only the game's own
+        // code runs between these two reads, on this thread, for our own attack: whatever it takes is ours.
+        const int stamPreExec = stamOff && maxStam > 0 ? ReadStamina(player) : INT_MIN;
         g_origExec(ev, &args);
+        if (stamPreExec != INT_MIN) {
+            const int post = ReadStamina(player);
+            if (post < stamPreExec) {
+                WriteStaminaExact(player, stamPreExec); stam = stamPreExec;
+                ++g_tally.execCharges; g_tally.execCharged += stamPreExec - post;
+                g_tally.stamRefunded += stamPreExec - post;
+            }
+        }
         {
             std::lock_guard<std::mutex> g(g_mtx);
             if (g_cmd[h].id == k.id) g_cmd[h].FinishFrame();

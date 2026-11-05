@@ -1,0 +1,60 @@
+#pragma once
+// The launcher's own updates (ported from Spidy's launcher): the newest release on GitHub, and, when the player
+// asks, its zip downloaded, checked against its SHA-256 and put in place of the launcher folder's files. The
+// launcher then starts again from the new files (restartLauncher), and START VR copies the new ERVR into the game
+// folder as it does for any newer ERVR (the game folder's ERVR.ini is kept).
+#include "update_text.hpp"
+#include <windows.h>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+
+namespace launcher {
+using text::Release;
+
+enum class UpdateState { idle, checking, current, available, checkFailed, downloading, installing, installed, installFailed };
+
+struct UpdateStatus {
+    UpdateState state = UpdateState::idle;
+    std::optional<Release> release; // the newest release, once a check found one
+    std::string message;            // why a check or an update failed
+    uint64_t received{}, total{};   // the download so far
+    std::string checkedAt;          // when the last check reached GitHub ("14:05")
+};
+
+// The folder this launcher runs from when it can update itself: a player's copy (ERVR\ERVR.dll beside it). Empty,
+// with `whyNot` set, in a build of the source (build\dist: git and the build update it) and when the launcher sits
+// in the game folder itself (its files are the live install, ERVR.ini and ReShade.ini the player's own).
+std::wstring installFolder(std::string* whyNot = nullptr);
+
+class Updater {
+public:
+    ~Updater();
+    // Clears what an earlier update left in `folder` (empty: no player's copy), then checks GitHub when `check`.
+    void start(const std::wstring& folder, bool check);
+    void check();
+    // Downloads the newest release and puts its files in place of the folder's.
+    void install();
+    // Stops a download (an update past it finishes: it takes a moment).
+    void cancel();
+    UpdateStatus status();
+    bool busy();
+
+private:
+    void run(bool clear, bool check);
+    void update(Release release);
+    std::mutex mutex_;
+    UpdateStatus status_;
+    std::wstring folder_;
+    std::thread worker_;
+    std::atomic<bool> cancel_{};
+};
+
+// Starts the launcher in `folder` again (the update's), telling it the version it replaced and to wait for this
+// one to close.
+bool restartLauncher(const std::wstring& folder, std::string& error);
+
+} // namespace launcher

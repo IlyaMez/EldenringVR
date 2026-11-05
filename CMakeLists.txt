@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EldenRingVR VERSION 0.7.1 LANGUAGES C CXX RC)
+project(EldenRingVR VERSION 0.7.2 LANGUAGES C CXX RC)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "ELDEN RING is 64-bit; configure with a 64-bit toolchain (e.g. -A x64).")
@@ -173,7 +173,8 @@ set_target_properties(dinput8_proxy PROPERTIES OUTPUT_NAME "dinput8" PREFIX "")
 
 # ---- ERVR Launcher.exe: finds the game, installs ERVR into it, starts it with EAC off ----
 # A Dear ImGui window (MIT, fetched); the OpenXR loader is linked for its headset check (`--probe`).
-# No network code, like ERVR itself: links open in the browser, updates are a new zip.
+# Its only network code is the update check (src/launcher/update.cpp): one question to GitHub per start (it can be
+# turned off), and the release zip on the player's click, checked against its SHA-256. ERVR.dll never goes online.
 option(ERVR_BUILD_LAUNCHER "Build ERVR Launcher.exe" ON)
 if(ERVR_BUILD_LAUNCHER)
   FetchContent_Declare(imgui
@@ -182,7 +183,8 @@ if(ERVR_BUILD_LAUNCHER)
     GIT_SHALLOW    TRUE
     SOURCE_SUBDIR  headers_only_do_not_build)    # sources listed below, no targets of its own
   FetchContent_MakeAvailable(imgui)
-  set(ERVR_LAUNCHER_SOURCES src/launcher/main.cpp src/launcher/ui.cpp src/launcher/system.cpp src/launcher/probe.cpp)
+  set(ERVR_LAUNCHER_SOURCES src/launcher/main.cpp src/launcher/ui.cpp src/launcher/system.cpp src/launcher/probe.cpp
+      src/launcher/update.cpp)
   file(WRITE ${CMAKE_BINARY_DIR}/launcher_version.h
     "#define ERVR_RC_VERSION \"${PROJECT_VERSION}\"\n"
     "#define ERVR_RC_VERSION_NUMBERS ${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0\n")
@@ -201,7 +203,10 @@ if(ERVR_BUILD_LAUNCHER)
   file(GLOB ERVR_LAUNCHER_FONTS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/launcher/fonts/*.ttf")
   set_source_files_properties(src/launcher/launcher.rc PROPERTIES OBJECT_DEPENDS
                               "${ERVR_LAUNCHER_FONTS};${CMAKE_SOURCE_DIR}/src/launcher/ervr.ico")
-  target_link_libraries(ervr_launcher PRIVATE openxr_loader d3d11 dxgi dwmapi version shell32 ole32 uuid advapi32)
+  # winhttp + bcrypt: the launcher's own updates (update.cpp: one GitHub question per start, the zip on request,
+  # checked against its SHA-256).
+  target_link_libraries(ervr_launcher PRIVATE openxr_loader d3d11 dxgi dwmapi version shell32 ole32 uuid advapi32
+                        winhttp bcrypt)
   set_target_properties(ervr_launcher PROPERTIES OUTPUT_NAME "ERVR Launcher")
 endif()
 
@@ -243,6 +248,11 @@ if(ERVR_BUILD_REGRESSION_TESTS)
     ERVR_TEST_INI="${CMAKE_SOURCE_DIR}/config/ERVR.ini"
     ERVR_TEST_FOREIGN_DLL="${_foreign_dll}")
   target_link_libraries(test_launcher_folder PRIVATE dxgi version shell32 ole32 uuid advapi32)
+  # The updater against the real GitHub release, by hand (network; not a ctest test): see the file's header.
+  add_executable(updater_e2e tools/updater_e2e.cpp src/launcher/update.cpp src/launcher/system.cpp)
+  target_include_directories(updater_e2e PRIVATE src/launcher src/ervr)
+  target_compile_definitions(updater_e2e PRIVATE ERVR_VERSION="0.0.1")
+  target_link_libraries(updater_e2e PRIVATE dxgi version shell32 ole32 uuid advapi32 winhttp bcrypt)
   add_dependencies(test_launcher_folder ERVR dinput8_proxy)
   add_test(NAME launcher_folder COMMAND test_launcher_folder)
 endif()

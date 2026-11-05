@@ -50,6 +50,12 @@ files for you.
    play, mid-game too. In the headset, the game's System > ERVR Settings tab has the same *Body calibration*
    row.
 
+**Updates.** From 0.7.2 on, the launcher asks GitHub when it starts whether a newer ERVR is out. If one is, the
+Play tab says so: **Update now** downloads it, checks it against the release's SHA-256 and puts it in place of the
+launcher's files in a few seconds, then the launcher starts again; START VR copies the new ERVR into the game
+folder, keeping your `ERVR.ini`. *Later* asks again next time. About > Updates has *Check now* and turns the
+start-up check off. A launcher unpacked into the game folder itself, or built from the source, is updated by hand.
+
 The launcher's other tabs:
 
 - **Options** edits the game folder's `ERVR.ini` in place: the view, resolution, the HUD panel, turning,
@@ -296,9 +302,10 @@ gh attestation verify ERVR-vX.Y.Z.zip --repo IlyaMez/EldenringVR
 
 The bundled `dxgi.dll` is byte for byte ReShade 6.8.0's own add-on build; its hash is in `THIRD_PARTY.md`.
 
-ERVR has no telemetry, no analytics, no auto-updater and no network code of its own. For body haptics it loads
-bHaptics' own library, which talks to the bHaptics Player on your PC; `[bHaptics] Level=0` keeps it from
-loading at all.
+ERVR has no telemetry and no analytics, and `ERVR.dll` never goes online. The launcher asks GitHub once at start
+whether a newer ERVR is out (About > Updates turns that off) and downloads it only when you press Update now. For
+body haptics ERVR loads bHaptics' own library, which talks to the bHaptics Player on your PC; `[bHaptics]
+Level=0` keeps it from loading at all.
 
 ## Credits and licence
 

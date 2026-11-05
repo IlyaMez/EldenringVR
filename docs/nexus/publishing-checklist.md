@@ -21,12 +21,12 @@ are the source of truth; edit them here, then paste.
      haptics below), or the release copy leaves body haptics out.
 2. Tag and push. The release workflow builds, attests and publishes the GitHub release:
    ```powershell
-   git tag v0.7.1
-   git push origin v0.7.1
+   git tag v0.7.2
+   git push origin v0.7.2
    ```
-3. Download `ERVR-v0.7.1.zip` from the GitHub release, or build the identical file locally:
+3. Download `ERVR-v0.7.2.zip` from the GitHub release, or build the identical file locally:
    ```powershell
-   .\tools\package_release.ps1 -Build      # -> build\release\ERVR-v0.7.1.zip + .sha256
+   .\tools\package_release.ps1 -Build      # -> build\release\ERVR-v0.7.2.zip + .sha256
    ```
    Upload the **same zip** to Nexus that is on GitHub, so the SHA256 and the attestation in the
    release notes apply to both downloads.
@@ -66,8 +66,9 @@ are the source of truth; edit them here, then paste.
 * Asset use permission in mods/files that earn donation points: allowed.
 * Donation Points: your call. The README already says every feature is and stays free; DP does
   not change that. Consistent with the GitHub tip jar, opting in is fine.
-* Author notes: "Offline or Seamless Co-op only, never with EAC. No telemetry, no network code of its own
-  (body haptics use bHaptics' SDK library, which talks to the bHaptics Player). Help and bugs: #ervr-help
+* Author notes: "Offline or Seamless Co-op only, never with EAC. No telemetry; ERVR.dll never goes online, the
+  launcher only asks GitHub for a newer version (can be turned off) and downloads it on your click (body haptics
+  use bHaptics' SDK library, which talks to the bHaptics Player). Help and bugs: #ervr-help
   on the Discord (discord.gg/x27ZXDpdNt) or GitHub issues, with ERVR.log."
 * Body haptics: the release workflow needs the `ERVR_BHAPTICS_APP_ID` and `ERVR_BHAPTICS_API_KEY`
   repository secrets (the Developer Portal app's workspace ID and API key, the app deployed with at
@@ -75,9 +76,9 @@ are the source of truth; edit them here, then paste.
 
 ## Files tab
 
-* Main file: `ERVR-v0.7.1.zip`, version `0.7.1`, "Main Files" category.
+* Main file: `ERVR-v0.7.2.zip`, version `0.7.2`, "Main Files" category.
 * File description: paste the Install section from `description.bbcode` plus the two verification
-  lines (SHA256 from the `.sha256` file, `gh attestation verify ERVR-v0.7.1.zip --repo IlyaMez/EldenringVR`).
+  lines (SHA256 from the `.sha256` file, `gh attestation verify ERVR-v0.7.2.zip --repo IlyaMez/EldenringVR`).
 * Tick "This file is a new version of an existing file" only for updates.
 * Do not upload a separate ReShade or config file; the zip is complete.
 

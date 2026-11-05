@@ -60,7 +60,10 @@ ctest --test-dir build -C Release --output-on-failure
 Stated plainly so we can skip the debate later:
 
 * **Telemetry or analytics of any kind.** The mod does not phone home. It never will.
-* **Auto-updaters**, or anything that fetches and runs code at runtime.
+* **Anything that fetches and runs code at runtime**, in `ERVR.dll` above all. The one exception is the
+  launcher's own updater (`src/launcher/update.cpp`): it asks GitHub for the newest release, downloads its zip
+  only on the player's click, refuses it unless its SHA-256 matches the release's, and can be turned off. Nothing
+  else goes online.
 * **Advertising, sponsor messages, or bundled software** in the DLL, the installer, or the log.
 * **Paywalls or license checks** on any feature.
 * Obfuscation, anti-tamper, or anything that makes the binary harder to audit. People are injecting

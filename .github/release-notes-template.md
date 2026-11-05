@@ -7,7 +7,8 @@
    parks flat render mods and R.E.A.L. VR leftovers, and starts the game with EAC off, or through Seamless
    Co-op when it is installed.
 
-Updating? Unpack over the old folder and press START VR. Prefer it by hand? Unpack the zip straight into
+Updating? From 0.7.2 on the launcher offers it: press **Update now**, then START VR. From an older version,
+unpack over the old folder once and press START VR. Prefer it by hand? Unpack the zip straight into
 `ELDEN RING\Game`, next to `eldenring.exe`. Every control, setting and fix is in the
 [players' guide](https://github.com/{{REPO}}/blob/main/docs/PLAYERS.md); what changed is in the
 [changelog](https://github.com/{{REPO}}/blob/main/CHANGELOG.md).
@@ -42,7 +43,9 @@ with `.\build.ps1`.
 
 ## Notes
 
-ERVR contains no telemetry, no analytics, no auto-updater, and no network code of its own. For body haptics
+ERVR contains no telemetry and no analytics, and `ERVR.dll` never goes online. The launcher asks GitHub once at
+start whether a newer ERVR is out (About > Updates turns that off) and downloads this zip only when you press
+Update now, checking it against the SHA-256 above before anything is replaced. For body haptics
 it loads bHaptics' own SDK library (`ERVR\bhaptics_library.dll`), which talks to the bHaptics Player on your
 PC; `[bHaptics] Level=0` keeps it from loading.
 
