@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <xinput.h>
 #include <cctype>
+#include <cmath>
 
 namespace ervr {
 
@@ -145,6 +146,8 @@ void Config::Load(const std::wstring& path) {
     vrPass2ActionButtonUpdate = GetB(ini, L"VR", L"Pass2ActionButtonUpdate", vrPass2ActionButtonUpdate);
     vrPass2RepeatPressGuard = GetB(ini, L"VR", L"Pass2RepeatPressGuard", vrPass2RepeatPressGuard);
     vrPass2EventsOnce = GetB(ini, L"VR", L"Pass2EventsOnce", vrPass2EventsOnce);
+    vrPass2RegionReset = GetB(ini, L"VR", L"Pass2RegionReset", vrPass2RegionReset);
+    vrPass2KeepScriptPrompts = GetB(ini, L"VR", L"Pass2KeepScriptPrompts", vrPass2KeepScriptPrompts);
     // 0.7.0's key (false shipped = the update skipped in pass 2, which left doors, levers and chests dead; players
     // posted =true as the fix). Retired: the update runs in both passes whatever it says.
     retiredActionButtonsKey = !GetS(ini, L"VR", L"Pass2ActionButtons", "").empty();
@@ -335,6 +338,10 @@ void Config::Load(const std::wstring& path) {
     twoHandPinHand = GetB(ini, L"Combat", L"TwoHandPinHand", twoHandPinHand);
     twoHandPinOrient = GetB(ini, L"Combat", L"TwoHandPinOrient", twoHandPinOrient);
     twoHandPinSideOffset = GetF(ini, L"Combat", L"TwoHandPinSideOffset", twoHandPinSideOffset);
+    // 0.03 shipped from 2026-08-31 to 0.7.2 as a by-eye nudge for a pinned hand placed by its wrist. The palm itself
+    // goes on the shaft now, where 0.03 would only move it 3 cm off: an ini still carrying exactly that reads 0.
+    retiredPinSideOffset = std::fabs(twoHandPinSideOffset - 0.03f) < 1e-6f;
+    if (retiredPinSideOffset) twoHandPinSideOffset = 0.f;
     twoHandLightJudgeId = GetI(ini, L"Combat", L"TwoHandLightJudgeId", twoHandLightJudgeId);
     twoHandHeavyJudgeId = GetI(ini, L"Combat", L"TwoHandHeavyJudgeId", twoHandHeavyJudgeId);
     twoHandSkill = GetS(ini, L"Combat", L"TwoHandSkill", twoHandSkill);
@@ -502,6 +509,7 @@ void Config::Load(const std::wstring& path) {
     igtTrace        = GetB(ini, L"Experimental", L"IgtTrace", igtTrace);
     m2TaskProbe    = GetB(ini, L"Experimental", L"TaskProbe", m2TaskProbe);
     m2ForcePass2   = GetB(ini, L"Experimental", L"ForcePass2", m2ForcePass2);
+    testScriptPrompt = GetI(ini, L"Experimental", L"TestScriptPrompt", testScriptPrompt);
     m2KillPlayerAfter = GetI(ini, L"Experimental", L"KillPlayerAfter", m2KillPlayerAfter);
     m2Pass2NoGuards = GetB(ini, L"Experimental", L"Pass2NoGuards", m2Pass2NoGuards);
     m2Pass2NoDeadGuard = GetB(ini, L"Experimental", L"Pass2NoDeadGuard", m2Pass2NoDeadGuard);
@@ -534,6 +542,10 @@ void ConfigLogNotes() {
         LOGI("[config] %s in ERVR.ini is 0.6.0's value, which kept doors, levers and new graces from opening: "
              "using ERVR's own (the event manager back in the second eye's pass). Delete the line to stop this note.",
              g_cfg.pass2KeepNote.c_str());
+    if (g_cfg.retiredPinSideOffset)
+        LOGI("[config] [Combat] TwoHandPinSideOffset=0.03 in ERVR.ini is the old shipped nudge for a two-handing hand "
+             "placed by its wrist: the hand's palm goes on the shaft now, so it reads 0. Delete the line to stop this "
+             "note; another value is used as written.");
     if (g_cfg.retiredActionButtonsKey)
         LOGI("[config] [VR] Pass2ActionButtons in ERVR.ini is 0.7.0's and no longer read: the action-button update "
              "runs in both passes again (doors, levers, chests), Pass2ActionButtonUpdate=false would skip it. Delete "

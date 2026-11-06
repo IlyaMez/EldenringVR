@@ -1,4 +1,5 @@
 #include "two_hand_grip.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
@@ -63,6 +64,35 @@ int main() {
             Check(SameRotation(grip.InGame(Game(weapon), calibration), Game(support) * calibration),
                   "quaternion sign changes must not flip the captured grip");
         }
+    }
+    // The pinned hand's palm on the shaft, whatever angle the supporting wrist holds.
+    {
+        const Vec3 wrist{0.3f, 1.2f, 0.4f};
+        const Quat weaponRot = Quat::FromEulerYXZ(0.4f, -0.3f, 0.2f);
+        const Vec3 axis = weaponRot.Rotate({0, 1, 0});                     // up the blade
+        const Vec3 side = weaponRot.Rotate({0, 0, 1}).Cross(axis).Normalized();
+        const Vec3 rightGrip{0.06f, -0.01f, 0.015f}, leftGrip{0.06f, -0.01f, -0.015f};   // mirrored palms
+        const Vec3 shaft = wrist + weaponRot.Rotate(rightGrip);
+        const float along = 0.12f;
+        // How far a palm sits from the shaft line, and how far down it.
+        auto offShaft = [&](const Vec3& palm) { const Vec3 d = palm - shaft; return (d - axis * d.Dot(axis)).Length(); };
+        auto downShaft = [&](const Vec3& palm) { return -(palm - shaft).Dot(axis); };
+        for (Quat supportRot : {weaponRot, weaponRot * Quat::AxisAngle({0, 1, 0}, 3.14159265f),
+                                weaponRot * Quat::FromEulerYXZ(0.9f, 0.4f, -1.1f)}) {
+            const Vec3 pinned = TwoHandPinnedWrist(wrist, weaponRot, rightGrip, axis, along, side, 0.f, supportRot,
+                                                   leftGrip);
+            const Vec3 palm = pinned + supportRot.Rotate(leftGrip);
+            Check(offShaft(palm) < 1e-4f, "the supporting palm must sit on the shaft for any wrist angle");
+            Check(std::fabs(downShaft(palm) - along) < 1e-4f, "the supporting palm must sit `along` toward the pommel");
+            // The 0.6.0-0.7.2 placement: the weapon hand's wrist slid down the hilt.
+            const Vec3 oldPalm = wrist - axis * along + supportRot.Rotate(leftGrip);
+            if (!SameRotation(supportRot, weaponRot))
+                Check(offShaft(oldPalm) > 0.05f, "the old wrist placement must be the one that leaves the shaft");
+        }
+        const Vec3 pinned = TwoHandPinnedWrist(wrist, weaponRot, rightGrip, axis, along, side, 0.02f, weaponRot,
+                                               leftGrip);
+        Check(std::fabs(offShaft(pinned + weaponRot.Rotate(leftGrip)) - 0.02f) < 1e-4f,
+              "TwoHandPinSideOffset moves the palm that far off the shaft");
     }
     std::puts("Two-hand grip orientation regression checks passed.");
 }

@@ -1,4 +1,5 @@
 #include "pass2_interact.h"
+#include "action_button_update.h"
 #include "config.h"
 #include "frame_probe.h"
 #include "game_er.h"
@@ -98,6 +99,61 @@ void NoteCaller(uintptr_t ra, int p, int32_t id) {
     }
 }
 
+// The return addresses above the hook's own: each a direct call (E8) into the function that holds the address
+// below it. Names who asked a prompt through the game's wrappers (exe+0xA67491 static, exe+0xA64B5C locked: the
+// event script's region prompts come up the locked one from EcTestActionButtonRegion, exe+0x578256 on 2.7.2.0).
+uintptr_t g_imageLo = 0, g_imageHi = 0;
+
+int CallerChain(uintptr_t ra0, uintptr_t* out, int max) {
+    if (!g_imageHi) return 0;
+    auto* sp = (uintptr_t*)_AddressOfReturnAddress();
+    const auto stackBase = (uintptr_t)((NT_TIB*)NtCurrentTeb())->StackBase;
+    uintptr_t cur = ra0;
+    int n = 0;
+    for (uintptr_t* p = sp + 1; n < max && p < sp + 192 && (uintptr_t)(p + 1) <= stackBase; ++p) {
+        const uintptr_t v = *p;
+        if (v < g_imageLo + 5 || v >= g_imageHi) continue;
+        uint8_t call[5];
+        if (!SafeRead((void*)(v - 5), call, 5) || call[0] != 0xE8) continue;
+        int32_t d;
+        memcpy(&d, call + 1, 4);
+        const uintptr_t target = v + (intptr_t)d;
+        if (target > cur || cur - target > 0x600) continue;
+        out[n++] = v;
+        cur = v;
+    }
+    return n;
+}
+
+// Each (prompt caller, action button) pair's first call, with the callers above the wrapper: the log names every
+// kind of prompt the session met, the pass it was asked in and who asked (a fog wall: 10000 from the locked
+// wrapper, called from the event script's region check).
+std::atomic<uint64_t> g_pairs[64];
+std::atomic<long> g_pairLines{0};
+
+void NotePair(uintptr_t ra, int p, int32_t id) {
+    const uint64_t key = ((uint64_t)(uint32_t)(ra - g_imageLo) << 32) | (uint32_t)id;
+    for (auto& s : g_pairs) {
+        uint64_t cur = s.load(std::memory_order_acquire);
+        if (cur == key) return;
+        if (cur) continue;
+        if (!s.compare_exchange_strong(cur, key, std::memory_order_acq_rel)) {
+            if (cur == key) return;
+            continue;
+        }
+        if (g_pairLines.fetch_add(1, std::memory_order_relaxed) >= 48) return;
+        uintptr_t chain[3] = {};
+        const int n = CallerChain(ra, chain, 3);
+        char above[96] = "";
+        for (int i = 0, at = 0; i < n && at < (int)sizeof(above); ++i)
+            at += snprintf(above + at, sizeof(above) - at, " <- exe+0x%llX",
+                           (unsigned long long)(chain[i] - g_imageLo));
+        LOGI("[p2watch] action button %d asked in pass %d from exe+0x%llX%s (frame %ld)", id, p + 1,
+             (unsigned long long)(ra - g_imageLo), above, g_frameNo.load(std::memory_order_relaxed));
+        return;
+    }
+}
+
 // One press, one answer per prompt. The single-pass game never has a prompt answer "pressed" twice for one press;
 // with the stereo second pass it can (0.6.5: an item handled twice, its card left on screen with nothing to close
 // it). So a prompt (caller + action button id) that already answered "pressed" within the last kRepeatUpdates
@@ -129,6 +185,52 @@ bool RepeatAnswer(uintptr_t caller, int32_t id) {
     return repeat;
 }
 
+// Event-script prompts, kept alive across the second pass (2026-11-06, a boss fog wall that showed "Traverse the
+// mist" and ignored the button). The manager frees, at each update, every prompt that was not asked since the
+// previous update (+0xa65f70 drops it to its spent list, +0xa65de0 frees it there), and a press is wiped at the end
+// of an update that leaves no prompt chosen (+0xa65a90). With the update in both passes a prompt must therefore be
+// asked in both: the event scripts (22-24) ask theirs - EcTestActionButtonRegion, through the locked wrapper whose
+// call returns at exe+0xA64B5C on 2.7.2.0 - in pass 1 only, so each one was freed by the pass-2 update, came back
+// unchosen, and the press was wiped before it could answer. Measured the same way in players' 0.7.1 logs: every
+// prompt that took a press was asked in pass 2 too. So each event-script prompt asked in pass 1 is asked again,
+// with the same arguments, right before and right after the second pass - between the two updates either way round
+// - with the manager's press bytes (+0x81, +0x82) cleared for the call: kept registered and chosen, never answered.
+// The script's own ask in pass 1 stays the only one that can take the press. [VR] Pass2KeepScriptPrompts=false off.
+struct HeldPrompt {
+    void* self = nullptr;
+    int32_t id = 0;
+    float f = 0.f;
+    uint64_t a4 = 0, a5 = 0, a6 = 0, a7 = 0, a8 = 0;
+    uint8_t args[0x30]{};   // what a9 points at: the prompt's 0x30-byte struct, read by the game as three 16-byte loads
+    long frame = -1;        // g_frameNo of the script's ask: re-asked only in that same frame
+};
+uintptr_t g_lockedRa = 0;   // the locked wrapper's return from ExecuteActionButton (the event scripts' path)
+SRWLOCK g_heldLock = SRWLOCK_INIT;
+HeldPrompt g_held[8];
+std::atomic<long> g_heldAsked{0}, g_heldLines{0};
+
+void HoldPrompt(void* self, int32_t id, float f, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8,
+                uint64_t a9) {
+    HeldPrompt h;
+    h.self = self; h.id = id; h.f = f; h.a4 = a4; h.a5 = a5; h.a6 = a6; h.a7 = a7; h.a8 = a8;
+    if (!a9 || !SafeRead((const void*)a9, h.args, sizeof(h.args))) return;
+    h.frame = g_frameNo.load(std::memory_order_relaxed);
+    bool fresh = true;
+    AcquireSRWLockExclusive(&g_heldLock);
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < 8; ++i) {
+        const HeldPrompt& e = g_held[i];
+        if (e.frame >= 0 && e.id == id && !memcmp(e.args, h.args, sizeof(h.args))) { slot = i; break; }
+        if (e.frame < g_held[oldest].frame) oldest = i;
+    }
+    if (slot >= 0) fresh = g_held[slot].frame < h.frame - 2;
+    g_held[slot >= 0 ? slot : oldest] = h;
+    ReleaseSRWLockExclusive(&g_heldLock);
+    if (fresh && g_heldLines.fetch_add(1, std::memory_order_relaxed) < 24)
+        LOGI("[p2watch] action button %d is an event script's, asked in pass 1 only: asked again around the second "
+             "pass (never answered there) so the action-button update in pass 2 keeps it (frame %ld)", id, h.frame);
+}
+
 // ExecuteActionButton (fromsoftware-rs present_action_button): what every prompt calls each frame - it registers
 // the prompt with the manager and answers whether the interact press was for it. Arg 3 is a float (movss,
 // 2.7.2.0), 9 args, the answer in al. Every call reaches the game, in either pass; only a prompt's repeated
@@ -143,7 +245,12 @@ uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uin
     const int p = FramePumpCurrentPass() == 2 ? 1 : 0;
     const uintptr_t ra = (uintptr_t)_ReturnAddress();
     g_calls[p].fetch_add(1, std::memory_order_relaxed);
-    if (g_watch) NoteCaller(ra, p, id);
+    if (g_watch) {
+        NoteCaller(ra, p, id);
+        NotePair(ra, p, id);
+    }
+    if (p == 0 && ra == g_lockedRa && g_lockedRa && Cfg().vrPass2KeepScriptPrompts)
+        HoldPrompt(self, id, f, a4, a5, a6, a7, a8, a9);
     const uint8_t r = g_origExecute(self, id, f, a4, a5, a6, a7, a8, a9);
     if (!r) return 0;
     auto* base = (uint8_t*)GetModuleHandleW(nullptr);
@@ -175,9 +282,21 @@ uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uin
 // Pass2EventsOnce=true skips it together with the event manager (frame_probe.cpp drops group 25): both once per
 // frame, the single-pass game's order - the candidate fix for a lift that ignores its pulled lever (the lever's
 // one-frame signal cleared by the event manager's second run before the event script, once per frame, sees it).
+//
+// The entry's first half is not the manager's: it resets CSActionButtonRegionSystem's "nearest prompt of each
+// kind" table (action_button_update.h), and a prompt that asks the table is answered "yours" only if it was the
+// nearest at the PREVIOUS reset. The event script (22-24, pass 1 only) asks it for every EcTestActionButtonRegion
+// prompt - boss fog walls ("Traverse the mist") and the scripts' other area prompts. Reset in both passes, the
+// previous reset is always pass 2's, after which the script never runs: the fog wall registers, is compared with
+// pass 2's empty slot, and never shows its prompt (traced 2026-11-06 from a co-op session where a fog wall would
+// not respond). So in pass 2 the manager's update runs alone and the table resets once per frame, in pass 1, as
+// in the game without ERVR. [VR] Pass2RegionReset=true puts the pass-2 reset back, to compare.
 using FnActionButtonUpdate = void(__fastcall*)(void* table, void* arg);
 FnActionButtonUpdate g_origUpdate = nullptr;
-std::atomic<long> g_updatesSkipped{0}, g_updatesPass2{0};
+using FnManagerUpdate = void(__fastcall*)(void* manager, void* arg);
+FnManagerUpdate g_managerUpdate = nullptr;   // +0xa64d10, the entry's tail jump
+void** g_managerSlot = nullptr;              // the CSActionButtonManImp global the entry loads
+std::atomic<long> g_updatesSkipped{0}, g_updatesPass2{0}, g_regionResets[2]{}, g_regionResetsSkipped{0};
 
 void __fastcall Hook_ActionButtonUpdate(void* table, void* arg) {
     if (FramePumpCurrentPass() == 2) {
@@ -186,9 +305,49 @@ void __fastcall Hook_ActionButtonUpdate(void* table, void* arg) {
             return;
         }
         g_updatesPass2.fetch_add(1, std::memory_order_relaxed);
+        g_decision.fetch_add(1, std::memory_order_acq_rel);
+        void* manager = g_managerSlot ? *g_managerSlot : nullptr;
+        if (!Cfg().vrPass2RegionReset && g_managerUpdate && manager) {
+            g_regionResetsSkipped.fetch_add(1, std::memory_order_relaxed);
+            g_managerUpdate(manager, arg);
+            return;
+        }
+        g_regionResets[1].fetch_add(1, std::memory_order_relaxed);
+        g_origUpdate(table, arg);
+        return;
     }
     g_decision.fetch_add(1, std::memory_order_acq_rel);
+    g_regionResets[0].fetch_add(1, std::memory_order_relaxed);
     g_origUpdate(table, arg);
+}
+
+// Frame thread, between passes (no task runs): the event-script prompts asked in this frame's pass 1, asked again
+// with the manager's press bytes cleared for the call, so the prompt stays registered (and chosen) for the update on
+// the other side of this boundary without the call ever taking the press. Only while the update runs in pass 2.
+void KeepHeldPromptsAlive() {
+    const Config& c = Cfg();
+    if (!c.vrPass2KeepScriptPrompts || !c.vrPass2ActionButtonUpdate || c.vrPass2EventsOnce) return;
+    if (!g_origExecute || !g_managerSlot) return;
+    auto* manager = (uint8_t*)*g_managerSlot;
+    if (!manager) return;
+    const long frame = g_frameNo.load(std::memory_order_relaxed);
+    HeldPrompt now[8];
+    int n = 0;
+    AcquireSRWLockShared(&g_heldLock);
+    for (const HeldPrompt& e : g_held)
+        if (e.frame == frame && e.self == manager) now[n++] = e;
+    ReleaseSRWLockShared(&g_heldLock);
+    for (int i = 0; i < n; ++i) {
+        HeldPrompt& h = now[i];
+        uint8_t press[2];
+        if (!SafeRead(manager + 0x81, press, 2)) return;
+        manager[0x81] = 0;
+        manager[0x82] = 0;
+        g_origExecute(h.self, h.id, h.f, h.a4, h.a5, h.a6, h.a7, h.a8, (uint64_t)h.args);
+        manager[0x81] = press[0];
+        manager[0x82] = press[1];
+        g_heldAsked.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 bool TakeOne(Watched& w, uint8_t* out) {
@@ -292,6 +451,9 @@ void Summary() {
     const long skipped = g_updatesSkipped.exchange(0);
     const long ranPass2 = g_updatesPass2.exchange(0);
     const long repeats = g_repeats.exchange(0);
+    const long resets1 = g_regionResets[0].exchange(0), resets2 = g_regionResets[1].exchange(0);
+    const long resetsSkipped = g_regionResetsSkipped.exchange(0);
+    const long heldAsked = g_heldAsked.exchange(0);
     long ch[kObjs][3];
     memcpy(ch, g_changes, sizeof(ch));
     memset(g_changes, 0, sizeof(g_changes));
@@ -313,11 +475,13 @@ void Summary() {
     }
     if (!a1 && !a2 && !changes && !c1 && !c2 && !repeats && !ranPass2) return;
     LOGI("[p2watch] 5 s: interact presses accepted pass 1 %ld / pass 2 %ld (of %ld / %ld prompt calls), repeated "
-         "answers dropped %ld, action-button updates in pass 2 run %ld / skipped %ld | changes in pass 1 / pass 2 / "
-         "between frames: action-button state %ld/%ld/%ld, item popup queue %ld/%ld/%ld, ui %ld/%ld/%ld%s%s",
-         a1, a2, c1, c2, repeats, ranPass2, skipped, ch[0][0], ch[0][1], ch[0][2], ch[1][0], ch[1][1], ch[1][2],
-         ch[2][0], ch[2][1], ch[2][2], callers.empty() ? "" : " | prompts asked from (pass 1/pass 2):",
-         callers.c_str());
+         "answers dropped %ld, action-button updates in pass 2 run %ld / skipped %ld, prompt region table resets "
+         "pass 1 %ld / pass 2 %ld (%ld left out), event-script prompts asked again around pass 2 %ld | changes in "
+         "pass 1 / pass 2 / between frames: action-button state %ld/%ld/%ld, item popup queue %ld/%ld/%ld, ui "
+         "%ld/%ld/%ld%s%s",
+         a1, a2, c1, c2, repeats, ranPass2, skipped, resets1, resets2, resetsSkipped, heldAsked, ch[0][0], ch[0][1], ch[0][2],
+         ch[1][0], ch[1][1], ch[1][2], ch[2][0], ch[2][1], ch[2][2],
+         callers.empty() ? "" : " | prompts asked from (pass 1/pass 2):", callers.c_str());
 }
 
 // The managers exist from boot; look them up once the world is up (the scan reads the whole module), and
@@ -352,6 +516,12 @@ void Pass2InteractInit() {
     if (s_done) return;
     s_done = true;
     auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    {
+        const auto* dos = (const IMAGE_DOS_HEADER*)base;
+        const auto* nt = (const IMAGE_NT_HEADERS64*)(base + dos->e_lfanew);
+        g_imageLo = (uintptr_t)base;
+        g_imageHi = (uintptr_t)base + nt->OptionalHeader.SizeOfImage;
+    }
     // 2.7.2.0 +0xa64680. The first 0x41 bytes are unique in the exe and spell out the argument use (r9b byte,
     // xmm2 float, edx int, rcx this), so a changed signature misses instead of mis-hooking.
     uint8_t* exec = AobScan("48 8B C4 55 41 54 41 55 41 56 41 57 48 8D 68 C9 48 81 EC F0 00 00 00 48 C7 45 B7 FE FF "
@@ -360,12 +530,29 @@ void Pass2InteractInit() {
     // 2.7.2.0 +0xa67a20: the candidate-table reset loop (stride 0x48, 15 slots, FLT_MAX distances), unique.
     uint8_t* upd = AobScan("40 53 48 83 EC 20 48 83 C1 18 48 8B DA 4C 8D 81 38 04 00 00 49 3B C8 74 25 48 83 C1 08 33 "
                            "D2 90 48 8B 01 48 89 41 08 C7 41 F8 FF FF 7F 7F");
+    // The locked wrapper's call into ExecuteActionButton (2.7.2.0 +0xa64b57, the event scripts' path from
+    // EcTestActionButtonRegion): its return address marks the prompts asked again around pass 2 (HoldPrompt).
+    if (uint8_t* site = AobScan("44 0F B6 CB 0F 28 D6 8B D7 48 8B CE E8 ?? ?? ?? ?? 0F B6 D8 48 8B CD E8")) {
+        int32_t d = 0;
+        memcpy(&d, site + 13, 4);
+        if (exec && site + 17 + d == exec) g_lockedRa = (uintptr_t)(site + 17);
+    }
+    // The entry's tail: the manager's global and its own update, for running that update without the region
+    // table's reset in pass 2. Read before hooking (MinHook rewrites only the first bytes).
+    AbmUpdateTail tail;
+    uint8_t entry[0xC0];
+    if (upd && SafeRead(upd, entry, sizeof(entry)) && DecodeAbmUpdateTail(entry, sizeof(entry), (uintptr_t)upd, &tail) &&
+        tail.managerSlot > g_imageLo && tail.managerSlot + 8 <= g_imageHi && tail.managerUpdate > g_imageLo &&
+        tail.managerUpdate < g_imageHi) {
+        g_managerSlot = (void**)tail.managerSlot;
+        g_managerUpdate = (FnManagerUpdate)tail.managerUpdate;
+    }
     const bool execOk = exec && MH_CreateHook(exec, (void*)&Hook_ExecuteActionButton, (void**)&g_origExecute) == MH_OK &&
                         MH_EnableHook(exec) == MH_OK;
     const bool updOk = upd && MH_CreateHook(upd, (void*)&Hook_ActionButtonUpdate, (void**)&g_origUpdate) == MH_OK &&
                        MH_EnableHook(upd) == MH_OK;
     g_updateHooked = updOk;
-    if (execOk && updOk)
+    if (execOk && updOk) {
         LOGI("[stereo] action buttons: their update runs in %s (exe+0x%llX); a prompt that answers the same press "
              "again within %u updates is told not pressed%s (exe+0x%llX)",
              Cfg().vrPass2EventsOnce ? "pass 1 only, with the event manager ([VR] Pass2EventsOnce=true)"
@@ -375,7 +562,27 @@ void Pass2InteractInit() {
              (unsigned long long)(upd - base), kRepeatUpdates,
              Cfg().vrPass2RepeatPressGuard ? "" : " - OFF, [VR] Pass2RepeatPressGuard=false",
              (unsigned long long)(exec - base));
-    else
+        if (g_managerUpdate)
+            LOGI("[stereo] action buttons: the nearest-prompt table (fog walls, the event scripts' area prompts) "
+                 "resets once per frame, in pass 1, with the scripts that ask it%s; pass 2 runs the manager's update "
+                 "alone (exe+0x%llX, manager at exe+0x%llX)",
+                 Cfg().vrPass2RegionReset ? " - NOT NOW: [VR] Pass2RegionReset=true resets it in pass 2 too, and fog "
+                                            "walls offer no prompt" : "",
+                 (unsigned long long)(tail.managerUpdate - g_imageLo),
+                 (unsigned long long)(tail.managerSlot - g_imageLo));
+        else
+            LOGW("[stereo] action buttons: the update's tail did not decode (manager update and global not found): "
+                 "the nearest-prompt table resets in both passes, and boss fog walls and the event scripts' other "
+                 "area prompts will not appear");
+        if (g_lockedRa)
+            LOGI("[stereo] action buttons: the event scripts' prompts (asked in pass 1 only, through exe+0x%llX) are "
+                 "asked again around the second pass so its update keeps them and the button reaches them%s",
+                 (unsigned long long)(g_lockedRa - g_imageLo),
+                 Cfg().vrPass2KeepScriptPrompts ? "" : " - OFF, [VR] Pass2KeepScriptPrompts=false");
+        else
+            LOGW("[stereo] action buttons: the event scripts' prompt call was not found: boss fog walls and their other "
+                 "area prompts show but may ignore the button");
+    } else
         LOGW("[stereo] action-button hooks incomplete (prompt call %s, update %s): the second eye's pass can answer the "
              "interact button again (an item card left on screen)", execOk ? "ok" : "not hooked",
              updOk ? "ok" : "not hooked");
@@ -385,15 +592,43 @@ void Pass2InteractInit() {
     }
 }
 
+// [Experimental] TestScriptPrompt: a prompt asked once per frame outside both passes, before the pass-1 update -
+// where the event scripts' asks sit relative to the updates - held like theirs when Pass2KeepScriptPrompts is on.
+// What it takes is logged, so an unattended run can show a script-style prompt taking a press.
+void TestScriptPromptAsk() {
+    const int id = Cfg().testScriptPrompt;
+    if (id <= 0 || !g_origExecute || !g_managerSlot || !GameERPlayerActive()) return;
+    void* manager = *g_managerSlot;
+    if (!manager) return;
+    struct alignas(16) Args { uint8_t b[0x30]; } args{};
+    const uint64_t none = ~0ull;
+    memcpy(args.b + 4, &none, 8);   // EcTestActionButtonRegion's: byte 0 clear, -1 at +4, the rest zero
+    if (Cfg().vrPass2KeepScriptPrompts) HoldPrompt(manager, id, 0.f, 0, 0, 0, 0, 0, (uint64_t)&args);
+    static std::atomic<long> s_asks{0}, s_taken{0};
+    const long asks = s_asks.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (asks == 1) LOGI("[p2watch] test prompt %d asked at each frame's start (kept alive around pass 2: %s)", id,
+                        Cfg().vrPass2KeepScriptPrompts ? "yes" : "no, Pass2KeepScriptPrompts=false");
+    if (g_origExecute(manager, id, 0.f, 0, 0, 0, 0, 0, (uint64_t)&args))
+        LOGI("[p2watch] test prompt %d took the press (frame %ld, ask %ld, %ld taken so far)", id,
+             g_frameNo.load(std::memory_order_relaxed), asks, s_taken.fetch_add(1, std::memory_order_relaxed) + 1);
+}
+
 void Pass2InteractFrameBegin(long frame) {
     g_frameNo.store(frame, std::memory_order_relaxed);   // the repeat check's frame bound needs it watched or not
+    TestScriptPromptAsk();
     if (!g_watch) return;
     Boundary(0);
     Summary();
 }
 
-void Pass2InteractBeforePass2() { if (g_watch) Boundary(1); }
-void Pass2InteractAfterPass2()  { if (g_watch) Boundary(2); }
+void Pass2InteractBeforePass2() {
+    if (g_watch) Boundary(1);
+    KeepHeldPromptsAlive();   // after the diff: what the re-ask changes is not pass 1's
+}
+void Pass2InteractAfterPass2() {
+    if (g_watch) Boundary(2);
+    KeepHeldPromptsAlive();
+}
 
 uint8_t* Pass2InteractAbmTarget(uint32_t* outLen) {
     uint8_t* o = g_abm.obj.load(std::memory_order_acquire);

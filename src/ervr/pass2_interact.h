@@ -20,6 +20,14 @@
 // "pressed" again within two updates of its last "pressed" - one stereo pair - is answered "not pressed"
 // ([VR] Pass2RepeatPressGuard). Every ExecuteActionButton call still reaches the game, in either pass.
 //
+// The update's entry also resets the region table that picks the nearest prompt of each kind (action_button_update.h):
+// a prompt that asks it counts only if it was the nearest at the previous reset. The event scripts (22-24) run in
+// pass 1 only and ask it for boss fog walls and their other area prompts (EcTestActionButtonRegion), so the table
+// resets once per frame, in pass 1; pass 2 runs the manager's update alone ([VR] Pass2RegionReset, default false):
+//   0.6.0-0.6.5, 0.7.1-0.7.2  table reset in both passes  -> fog walls show no prompt (always compared with pass 2's
+//                                                             empty slot; 2026-11-06, co-op client at a boss fog)
+//   0.7.0                     whole entry in pass 1 only   -> fog walls fine, doors dead (above)
+//
 // Where prompts are asked is NOT per pass (measured 2026-11-04): a grace's, an NPC's and a ground item's were
 // asked only while pass 2 ran, a door's, a lever's only in pass 1. The first version of the 0.7.0 fix answered
 // every pass-2 call "not pressed" and nothing in the world could be interacted with.

@@ -631,6 +631,7 @@ struct Skeleton {
     HkQsTransform* refPose = nullptr;
     std::vector<HkQsTransform> refPoseCopy;
     int L_ua = -1, L_fa = -1, L_hand = -1, R_ua = -1, R_fa = -1, R_hand = -1;
+    int weapon[2] = {-1, -1};   // L_Weapon / R_Weapon: where a held weapon sits in each hand (children of the hands)
     Vec3 handFwd[2], handThumb[2]; bool handAxesOk[2]{};   // hand-bone local frame, from ref pose finger roots
     int torso = -1, L_clav = -1, R_clav = -1, head = -1, pelvis = -1;
     bool warned = false;
@@ -788,6 +789,25 @@ bool BuildSkeleton(uint8_t* chr) {
         if (F.Length() < 1e-3f || T.Length() < 1e-3f) continue;
         s.handFwd[h] = F.Normalized(); s.handThumb[h] = T; s.handAxesOk[h] = true;
         LOGI("[skel] %shand axes (local): fwd(%.2f,%.2f,%.2f) thumb(%.2f,%.2f,%.2f)", pre, s.handFwd[h].x, s.handFwd[h].y, s.handFwd[h].z, T.x, T.y, T.z);
+    }
+    // The palms: each hand's weapon bone, where a held weapon sits. Two-handing puts the free palm on the shaft that
+    // runs through the weapon hand's (TwoHandPinnedWrist). Logged along the hand's own axes: toward the fingers,
+    // toward the thumb, and across the hand (fingers x thumb).
+    for (int h = 0; h < 2; ++h) {
+        const char* pre = h == HandLeft ? "L_" : "R_";
+        const int hand = h == HandLeft ? s.L_hand : s.R_hand;
+        const int bone = s.Find(std::string(pre) + "Weapon");
+        if (hand < 0 || bone < 0 || s.parents[bone] != hand) continue;
+        s.weapon[h] = bone;
+        const HkQsTransform& t = s.refPoseCopy[bone];
+        const Vec3 off{t.t[0], t.t[1], t.t[2]};
+        if (s.handAxesOk[h]) {
+            const Vec3 fw = s.handFwd[h], th = (s.handThumb[h] - fw * s.handThumb[h].Dot(fw)).Normalized();
+            LOGI("[skel] %sWeapon (the palm) %.3f m from the hand bone: %.3f toward the fingers, %.3f toward the thumb, "
+                 "%.3f across", pre, off.Length(), off.Dot(fw), off.Dot(th), off.Dot(fw.Cross(th)));
+        } else {
+            LOGI("[skel] %sWeapon (the palm) at (%.3f,%.3f,%.3f) m from the hand bone", pre, off.x, off.y, off.z);
+        }
     }
     if (c.dumpSkeleton) {
         std::string all;
@@ -1909,6 +1929,22 @@ void SolveArm(const Skeleton& s, HkQsTransform* pose, std::vector<HkQsTransform>
     w.q[iUA] = qUA; w.q[iFA] = qFA; w.q[iHand] = targetQ; w.pos[iFA] = E; w.pos[iHand] = T;
 }
 
+// A hand's palm in its own frame: its weapon bone's offset, as this frame's animation has it (the reference pose if
+// that reads implausible), or - without the bone - HandBackOffset toward the fingers, where the controller's grip
+// sits relative to the wrist ERVR places.
+Vec3 PalmOffset(int h, const std::vector<HkQsTransform>& local) {
+    const int b = h == HandLeft || h == HandRight ? g_skel.weapon[h] : -1;
+    if (b >= 0 && b < (int)local.size()) {
+        const HkQsTransform& t = local[b];
+        const Vec3 now{t.t[0], t.t[1], t.t[2]};
+        if (now.Length() < 0.25f) return now;
+        const HkQsTransform& r = g_skel.refPoseCopy[b];
+        const Vec3 ref{r.t[0], r.t[1], r.t[2]};
+        if (ref.Length() < 0.25f) return ref;
+    }
+    return h >= 0 && h < 2 && g_skel.handAxesOk[h] ? g_skel.handFwd[h] * Cfg().handBackOffset : Vec3{};
+}
+
 // Yaw the character root faces: local -Z of the (physics) root, the convention verified against the lock-on
 // point. Deliberately *not* built from the Master bone: for c0000 that bone's own orientation is not identity, so
 // its -Z is not the body's forward, and aligning it to the view spun the whole body ~90 degrees (log: "rendered
@@ -2364,28 +2400,37 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     // i.e. down the controller's handle (-up) or back along its aim (-forward) - so it follows the
     // (inertial, lagging) weapon instead of drifting off the shaft. Its orientation keeps the
     // wrist's angle relative to the weapon when the grab registered, mapped through its own
-    // hand's bone axes. It sits TwoHandPinSideOffset m off the hilt axis so the wrist clears it.
-    {
-        int pin = -1, wep = -1; float along = 0.f; bool handle = true;
-        TwoHandGripOrientation grip;
-        if (CombatTwoHandPin(&pin, &wep, &along, &handle, &grip) && pin >= 0 && wep >= 0 && tok[pin] && tok[wep]) {
-            Vec3 axis = handle ? tcu[wep] : tcf[wep];                            // up the blade; pommel = -axis
-            Vec3 side = (handle ? tcf[wep] : tcu[wep]).Cross(axis).Normalized();   // lateral, perpendicular to the hilt (sign verified in-game 2026-08-31)
-            tp[pin] = tp[wep] + axis * -along + side * c.twoHandPinSideOffset;
-            if (c.twoHandPinOrient) {
-                const Quat cq = grip.InGame(baseQ * f.handQ[wep], calib);
-                tq[pin] = g_skel.handAxesOk[pin] ? Quat::MapPairs(g_skel.handFwd[pin], g_skel.handThumb[pin],
-                                                               cq.Rotate({0, 0, 1}), cq.Rotate({0, 1, 0})) : cq;
-            }
-        }
+    // hand's bone axes. Its PALM goes on the shaft through the weapon hand's palm, as the weapon arm
+    // was actually solved (TwoHandPinnedWrist), TwoHandPinSideOffset m to the side. Placed by the
+    // wrist instead, it left the shaft whenever the two wrists were held at different angles.
+    int pin = -1, wep = -1; float along = 0.f; bool handle = true;
+    TwoHandGripOrientation grip;
+    const bool pinned = CombatTwoHandPin(&pin, &wep, &along, &handle, &grip) && pin >= 0 && wep >= 0 && tok[pin] && tok[wep];
+    if (pinned && c.twoHandPinOrient) {
+        const Quat cq = grip.InGame(baseQ * f.handQ[wep], calib);
+        tq[pin] = g_skel.handAxesOk[pin] ? Quat::MapPairs(g_skel.handFwd[pin], g_skel.handThumb[pin],
+                                                       cq.Rotate({0, 0, 1}), cq.Rotate({0, 1, 0})) : cq;
     }
-    for (int h = 0; h < 2; ++h) {
-        if (!tok[h]) continue;
+    auto solve = [&](int h) {
         float side = h == HandLeft ? -1.f : 1.f;
         Vec3 pole = Quat::YawQ(f.bodyYaw).Rotate(Vec3{side * c.elbowPoleOut, -c.elbowPoleDown, -c.elbowPoleBack});
         if (h == HandLeft) SolveArm(g_skel, pose, local, w, g_skel.L_ua, g_skel.L_fa, g_skel.L_hand, tp[h], tq[h], pole);
         else               SolveArm(g_skel, pose, local, w, g_skel.R_ua, g_skel.R_fa, g_skel.R_hand, tp[h], tq[h], pole);
         any = true;
+    };
+    if (pinned) {
+        solve(wep);   // first: the shaft runs through the weapon hand's palm where the solve left it
+        const int wepHand = wep == HandLeft ? g_skel.L_hand : g_skel.R_hand;
+        const Vec3 axis = handle ? tcu[wep] : tcf[wep];                            // up the blade; pommel = -axis
+        const Vec3 side = (handle ? tcf[wep] : tcu[wep]).Cross(axis).Normalized();   // lateral, perpendicular to the hilt (sign verified in-game 2026-08-31)
+        const Vec3 wristAt = wepHand >= 0 ? w.pos[wepHand] : tp[wep];
+        const Quat wristQ = wepHand >= 0 ? w.q[wepHand] : tq[wep];
+        tp[pin] = TwoHandPinnedWrist(wristAt, wristQ, PalmOffset(wep, local), axis, along, side, c.twoHandPinSideOffset,
+                                     tq[pin], PalmOffset(pin, local));
+        solve(pin);
+    } else {
+        for (int h = 0; h < 2; ++h)
+            if (tok[h]) solve(h);
     }
     // The blade each hand holds, in the world (GameERBladeWorld): combat measures how close a strike came to an
     // enemy - on horseback the difference between "never reached" and "reached and did nothing".

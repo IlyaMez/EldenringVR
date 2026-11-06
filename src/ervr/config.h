@@ -406,7 +406,11 @@ struct Config {
     float twoHandGrabMax = 0.45f;         // ... negative = up toward the blade
     bool  twoHandPinHand = true;          // while two-handing the free hand's arm rides the weapon shaft (follows the inertial weapon)
     bool  twoHandPinOrient = true;        // ...and keeps its grab-time wrist angle relative to the weapon (else follows its own controller's free orientation)
-    float twoHandPinSideOffset = 0.03f;   // m the pinned hand sits off the hilt axis (perpendicular, so the wrist clears the shaft); negate to flip sides
+    // m the pinned hand's PALM sits off the hilt axis (perpendicular); negate to flip sides. 0 = on the shaft, gripping it
+    // like the weapon hand (2026-11-06: the palm itself is placed now - TwoHandPinnedWrist). 0.03 was a by-eye nudge for
+    // the old wrist placement; an ini still carrying exactly 0.03 reads 0 (retiredPinSideOffset, logged).
+    float twoHandPinSideOffset = 0.f;
+    bool  retiredPinSideOffset = false;
     int   twoHandLightJudgeId = 200, twoHandHeavyJudgeId = -1;   // two-handed attack rows (R1 2H = 200 learned 2026-08-25; -1 = learn in auto mode, else the one-handed rows)
     // Skill (Ash of War) while two-handed: TwoHandSkillButton fires it. "effect" replays the TAE events the
     // skill's animation carries (AddSpEffect_WeaponArts 331, AddSpEffect 67/66, BulletBehavior 2, FFX) without
@@ -748,6 +752,20 @@ struct Config {
     // the lever moved, the lift did not) - if the lever's one-frame signal is cleared by the event manager's
     // second run before the event script sees it. Untested in a game: off by default. Hot-reloads.
     bool  vrPass2EventsOnce = false;
+    // The region table that picks the nearest prompt of each kind also resets in the second eye's pass. The reset is
+    // the first half of the action-button update entry: last cycle's nearest = this cycle's, then cleared. A prompt
+    // is answered "yours" only if it was the nearest LAST cycle, and the event script (22-24, once per frame) is
+    // what asks it for the fog walls and every other EcTestActionButtonRegion ("ActionButtonInArea") prompt. Reset
+    // in both passes, "last cycle" is always pass 2's, where the event script never runs: those prompts never
+    // appear (2026-11-06, a boss fog wall in a co-op session; 0.6.0-0.6.5 and 0.7.1-0.7.2). false (default) = the
+    // manager's own update still runs in both passes (doors), the table resets once per frame. true = 0.7.2's
+    // behaviour, only to compare. Hot-reloads.
+    bool  vrPass2RegionReset = false;
+    // The event scripts' prompts (fog walls...) are asked in pass 1 only, and the action-button manager frees every
+    // prompt not asked since its previous update - with its update in both passes that freed them every frame and
+    // wiped the press (2026-11-06: the fog wall showed its prompt and ignored the button). true = each one asked in
+    // pass 1 is asked again, unanswered, right before and after pass 2 (pass2_interact.cpp). Hot-reloads.
+    bool  vrPass2KeepScriptPrompts = true;
     // Log what each pass changes in the interaction state (pass2_interact.h): interact presses accepted per
     // pass, the item-get popup queue, the menu's UI-element states. Capped; read once at startup.
     bool  vrPass2Watch = true;
@@ -804,6 +822,10 @@ struct Config {
     // transfer through MoveMapStep, so forcing the pass reproduces it headlessly.
     // Never enable for play: it costs a full extra engine frame and renders nothing useful.
     bool  m2ForcePass2 = false;
+    // Unattended test (pass2_interact.cpp): an action button of this id (10000 = "Traverse the mist") asked at each
+    // frame's start, outside both passes, the way an event script's prompt sits outside pass 2 - with
+    // Pass2KeepScriptPrompts it is kept alive like one. The prompt shows; a press it takes is logged. 0 = off.
+    int   testScriptPrompt = 0;
     // TEST HARNESS ONLY. Seconds after the player becomes active to set HP to 0, firing the
     // death warp - the one crash path reachable without a headset or map-screen navigation.
     // 0 = off. Costs the held runes (recoverable at the death spot); nothing else moves.

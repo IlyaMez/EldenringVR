@@ -3,6 +3,35 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## 0.7.3 (2026-11-06)
+
+Boss fog walls let you through again; a two-handed weapon's second hand grips the shaft.
+
+### Fixes
+* Boss fog walls offer "Traverse the mist" again. The game asks a table which prompt of each kind is nearest and
+  answers a prompt only if it was the nearest at the table's previous reset. The event scripts that run fog walls
+  (and their other area prompts) run once per frame, in the first eye's pass, while the reset ran in both: the
+  previous reset was always the second eye's, where the scripts never asked, so the fog wall was never the nearest
+  and its prompt never appeared (0.6.0-0.6.5 and 0.7.1-0.7.2). The table now resets once per frame with the
+  scripts; the second eye's pass still runs the rest of the update, which doors, levers and chests need.
+  `[VR] Pass2RegionReset=true` puts the old reset back, to compare. ERVR.log names each kind of prompt the first
+  time it is asked (`[p2watch] action button N asked in pass 1 from ...`) and counts the table's resets per pass.
+* ...and the button takes you through. The game forgets, at each action-button update, any prompt not asked again
+  since the previous one, and wipes a press that has no prompt left to go to; the update runs in both eyes' passes,
+  the event scripts ask in the first only, so the fog wall's prompt was dropped and the press wiped every frame (it
+  showed, and the button did nothing). ERVR now asks each event-script prompt again right before and after the
+  second pass, with the press held back for that call so only the script's own ask can take it.
+  `[VR] Pass2KeepScriptPrompts=false` turns it off. Checked unattended with `[Experimental] TestScriptPrompt=10000`
+  (a "Traverse the mist" prompt asked like a script's): with it off the press never arrives, with it on the first
+  press is taken.
+* Two-handing: the hand you put on the weapon grips the shaft instead of hovering beside it. ERVR slid the
+  weapon hand's WRIST down the hilt and hung the free hand from that, but a hand's palm (where the game puts a held
+  weapon) is 9 cm from its wrist toward the fingers, so the free palm only met the shaft while both hands pointed the
+  same way - since the free hand keeps its own grab-time angle it could sit up to 18 cm off. Its palm now goes on the
+  shaft through the weapon hand's palm as the arm was actually solved. `[Combat] TwoHandPinSideOffset` moves the palm
+  sideways off the shaft and is 0 by default; 0.03, the old shipped nudge, reads 0 (ERVR.log notes it). The log
+  names where each palm sits (`[skel] R_Weapon (the palm) ...`).
+
 ## 0.7.2 (2026-11-05)
 
 The launcher updates ERVR itself; strikes no longer drain stamina.

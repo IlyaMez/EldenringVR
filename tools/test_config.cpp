@@ -66,6 +66,14 @@ int main() {
         Check(c.vrPass2SafeKeep == defaults.vrPass2SafeKeep && c.pass2KeepNote == "Pass2SafeKeep",
               "either line is replaced on its own");
     }
+    {   // Two-handing: the old shipped side nudge (for a hand placed by its wrist) reads 0; a player's own value stays.
+        Check(defaults.twoHandPinSideOffset == 0.f && !defaults.retiredPinSideOffset,
+              "the pinned palm sits on the shaft by default");
+        const ervr::Config old = LoadFrom("[Combat]\r\nTwoHandPinSideOffset=0.03\r\n");
+        Check(old.twoHandPinSideOffset == 0.f && old.retiredPinSideOffset, "an ini still saying 0.03 reads 0, noted");
+        const ervr::Config own = LoadFrom("[Combat]\r\nTwoHandPinSideOffset=-0.02\r\n");
+        Check(own.twoHandPinSideOffset == -0.02f && !own.retiredPinSideOffset, "any other side offset is used as written");
+    }
 #ifdef ERVR_TEST_INI
     {
         const std::string path = ERVR_TEST_INI;
@@ -75,6 +83,9 @@ int main() {
               c.pass2KeepNote.empty(), "the shipped ini leaves the keep sets to ERVR's own");
         Check(c.btnLeftPad == "MENU" && c.btnRightPad == "DPAD" && c.padForce == 0.5f && c.indexGripForce == 0.5f,
               "the shipped ini carries the Valve Index trackpad and grip keys at their defaults");
+        Check(c.twoHandPinSideOffset == 0.f && !c.retiredPinSideOffset && !c.vrPass2RegionReset &&
+              c.vrPass2KeepScriptPrompts,
+              "the shipped ini leaves the two-hand side offset, the region reset and the script prompts to ERVR's own");
     }
 #endif
     std::puts("ERVR.ini loading checks passed.");
