@@ -541,7 +541,7 @@ Config& Cfg() { return g_cfg; }
 void ConfigLogNotes() {
     if (!g_cfg.pass2KeepNote.empty())
         LOGI("[config] %s in ERVR.ini is 0.6.0's value, which kept doors, levers and new graces from opening: "
-             "using ERVR's own (the event manager back in the second eye's pass). Delete the line to stop this note.",
+             "using ERVR's own. Delete the line to stop this note.",
              g_cfg.pass2KeepNote.c_str());
     if (g_cfg.retiredPinSideOffset)
         LOGI("[config] [Combat] TwoHandPinSideOffset=0.03 in ERVR.ini is the old shipped nudge for a two-handing hand "

@@ -746,12 +746,14 @@ struct Config {
     // item card away now that the update runs twice per pair. Hot-reloads.
     bool  vrPass2RepeatPressGuard = true;
     bool  retiredActionButtonsKey = false;   // ERVR.ini still has 0.7.0's Pass2ActionButtons (ConfigLogNotes)
-    // Opt-in test (2026-11-05): the event manager (25) AND the action-button update once per frame, in pass 1 -
-    // the single-pass game's order for the whole interaction pipeline (event scripts 22-24 already run once).
-    // For a lift that ignores its lever (EscalatorBoy, Ruin-Strewn Precipice: with the update in both passes
-    // the lever moved, the lift did not) - if the lever's one-frame signal is cleared by the event manager's
-    // second run before the event script sees it. Untested in a game: off by default. Hot-reloads.
-    bool  vrPass2EventsOnce = false;
+    // The event manager (25) AND the action-button update once per frame, in pass 1 - the single-pass game's order
+    // for the whole interaction pipeline (event scripts 22-24 already run once). With both in both passes (0.7.1-
+    // 0.7.3) a lift's lever was pulled and the lift never came (EscalatorBoy, Ruin-Strewn Precipice; MasterXploda,
+    // Rampart Tower): the lever's one-frame signal is cleared by the event manager's second run before the event
+    // script sees it. Verified in-headset 2026-11-06: with this true the lever called the lift, and graces were
+    // asked evenly in both passes. Default since 0.7.4; false = 0.7.1-0.7.3's both-pass order (then
+    // Pass2ActionButtonUpdate, Pass2RegionReset and Pass2KeepScriptPrompts apply), only to compare. Hot-reloads.
+    bool  vrPass2EventsOnce = true;
     // The region table that picks the nearest prompt of each kind also resets in the second eye's pass. The reset is
     // the first half of the action-button update entry: last cycle's nearest = this cycle's, then cleared. A prompt
     // is answered "yours" only if it was the nearest LAST cycle, and the event script (22-24, once per frame) is

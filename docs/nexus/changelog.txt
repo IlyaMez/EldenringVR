@@ -1,6 +1,7 @@
 0.7.4 (2026-11-06)
 
 - Graces, plants to gather, items on the ground and dropped runes answer the button again (0.7.3 showed no prompt at a grace or plant, and item and rune prompts flickered). Boss fog walls keep working
+- Lifts come when you pull their lever (the lever was pulled and the lift stayed put)
 
 0.7.3 (2026-11-06)
 

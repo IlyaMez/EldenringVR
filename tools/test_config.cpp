@@ -84,8 +84,9 @@ int main() {
         Check(c.btnLeftPad == "MENU" && c.btnRightPad == "DPAD" && c.padForce == 0.5f && c.indexGripForce == 0.5f,
               "the shipped ini carries the Valve Index trackpad and grip keys at their defaults");
         Check(c.twoHandPinSideOffset == 0.f && !c.retiredPinSideOffset && !c.vrPass2RegionReset &&
-              c.vrPass2KeepScriptPrompts && c.vrPass2RegionBank,
-              "the shipped ini leaves the two-hand side offset, the region reset and the script prompts to ERVR's own");
+              c.vrPass2KeepScriptPrompts && c.vrPass2RegionBank && c.vrPass2EventsOnce,
+              "the shipped ini leaves the two-hand side offset, the region table, the script prompts and the "
+              "once-per-frame event manager to ERVR's own");
     }
 #endif
     std::puts("ERVR.ini loading checks passed.");

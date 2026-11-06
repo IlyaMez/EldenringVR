@@ -249,7 +249,8 @@ uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uin
         NoteCaller(ra, p, id);
         NotePair(ra, p, id);
     }
-    if (p == 0 && ra == g_lockedRa && g_lockedRa && Cfg().vrPass2KeepScriptPrompts)
+    if (p == 0 && ra == g_lockedRa && g_lockedRa && Cfg().vrPass2KeepScriptPrompts && Cfg().vrPass2ActionButtonUpdate &&
+        !Cfg().vrPass2EventsOnce)   // only an update in pass 2 can forget them
         HoldPrompt(self, id, f, a4, a5, a6, a7, a8, a9);
     const uint8_t r = g_origExecute(self, id, f, a4, a5, a6, a7, a8, a9);
     if (!r) return 0;
@@ -273,15 +274,15 @@ uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uin
 
 // The action-button system's per-frame update (2.7.2.0+0xa67a20, called once per frame by the world step at
 // +0x58f6a0): it resets the 15-slot prompt candidate table, then tail-calls the manager's update (+0xa64d10)
-// that decides which prompt the interact press goes to. Runs in both passes, like the event manager (25) whose
-// door, lever and chest actions it serves: 0.7.0 ran it in pass 1 only, every door, lever and chest took the
-// press (logged "accepted ... in pass 1") and then did nothing, and players' [VR] Pass2ActionButtons=true - this
-// update back in pass 2 - opened them again. 0.6.0 had the mirror image (update in both passes, the event
-// manager in pass 1 only) and the same dead doors: the two must step together.
-// [VR] Pass2ActionButtonUpdate=false skips it in pass 2 (0.7.0's behaviour, for comparison). [VR]
-// Pass2EventsOnce=true skips it together with the event manager (frame_probe.cpp drops group 25): both once per
-// frame, the single-pass game's order - the candidate fix for a lift that ignores its pulled lever (the lever's
-// one-frame signal cleared by the event manager's second run before the event script, once per frame, sees it).
+// that decides which prompt the interact press goes to. It and the event manager (25), whose door, lever and chest
+// actions it serves, must step together: 0.7.0 ran the update in pass 1 only, every door, lever and chest took the
+// press (logged "accepted ... in pass 1") and then did nothing; 0.6.0 had the mirror image (update in both passes,
+// the event manager in pass 1 only) and the same dead doors. 0.6.5-0.7.3 ran both in both passes: doors opened, but
+// a lift's lever was pulled and the lift never came - the lever's one-frame signal cleared by the event manager's
+// second run before the event script, once per frame, saw it. So by default both run once per frame, in pass 1, the
+// single-pass game's order: [VR] Pass2EventsOnce (default true since 0.7.4; verified at a lift 2026-11-06) skips
+// this update in pass 2 and frame_probe.cpp drops group 25 from it. With Pass2EventsOnce=false, [VR]
+// Pass2ActionButtonUpdate=false skips the update alone in pass 2 (0.7.0's behaviour, for comparison).
 //
 // The entry's first half is not the manager's: it resets CSActionButtonRegionSystem's "nearest prompt of each
 // kind" table (action_button_update.h), and a prompt that asks the table is answered "yours" only if it was the
@@ -289,8 +290,9 @@ uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uin
 // prompt - boss fog walls ("Traverse the mist") and the scripts' other area prompts. Reset in both passes, the
 // previous reset is always pass 2's, after which the script never runs: the fog wall registers, is compared with
 // pass 2's empty slot, and never shows its prompt (traced 2026-11-06 from a co-op session where a fog wall would
-// not respond). So in pass 2 the manager's update runs alone and the table resets once per frame, in pass 1, as
-// in the game without ERVR. [VR] Pass2RegionReset=true puts the pass-2 reset back, to compare.
+// not respond). So when the update runs in pass 2 (Pass2EventsOnce=false) the manager's update runs there alone and
+// the table resets once per frame, in pass 1, as in the game without ERVR. [VR] Pass2RegionReset=true puts the
+// pass-2 reset back, to compare.
 using FnActionButtonUpdate = void(__fastcall*)(void* table, void* arg);
 FnActionButtonUpdate g_origUpdate = nullptr;
 using FnManagerUpdate = void(__fastcall*)(void* manager, void* arg);
@@ -313,7 +315,8 @@ std::atomic<long> g_regionBanked{0}, g_regionCarried{0};
 bool RegionBankingOn() {
     const Config& c = Cfg();
     if (!c.vrPass2RegionBank) return false;
-    const bool pass2Resets = c.vrPass2ActionButtonUpdate && !c.vrPass2EventsOnce && (c.vrPass2RegionReset || !g_managerUpdate);
+    const bool pass2Resets =
+        c.vrPass2ActionButtonUpdate && !c.vrPass2EventsOnce && (c.vrPass2RegionReset || !g_managerUpdate);
     return !pass2Resets;
 }
 
@@ -606,39 +609,42 @@ void Pass2InteractInit() {
                        MH_EnableHook(upd) == MH_OK;
     g_updateHooked = updOk;
     if (execOk && updOk) {
-        LOGI("[stereo] action buttons: their update runs in %s (exe+0x%llX); a prompt that answers the same press "
+        const Config& c = Cfg();
+        const bool pass2Update = c.vrPass2ActionButtonUpdate && !c.vrPass2EventsOnce;
+        LOGI("[stereo] action buttons: their update runs %s (exe+0x%llX); a prompt that answers the same press "
              "again within %u updates is told not pressed%s (exe+0x%llX)",
-             Cfg().vrPass2EventsOnce ? "pass 1 only, with the event manager ([VR] Pass2EventsOnce=true)"
-             : Cfg().vrPass2ActionButtonUpdate ? "both passes, with the event manager's doors, levers and chests"
-                                               : "pass 1 only ([VR] Pass2ActionButtonUpdate=false: doors, levers "
-                                                 "and chests ignore the button)",
+             c.vrPass2EventsOnce ? "once per frame, in pass 1, with the event manager, as in the game without ERVR"
+             : c.vrPass2ActionButtonUpdate ? "in both passes, with the event manager's doors, levers and chests "
+                                             "([VR] Pass2EventsOnce=false: a lift may ignore its pulled lever)"
+                                           : "in pass 1 only ([VR] Pass2ActionButtonUpdate=false: doors, levers "
+                                             "and chests ignore the button)",
              (unsigned long long)(upd - base), kRepeatUpdates,
-             Cfg().vrPass2RepeatPressGuard ? "" : " - OFF, [VR] Pass2RepeatPressGuard=false",
+             c.vrPass2RepeatPressGuard ? "" : " - OFF, [VR] Pass2RepeatPressGuard=false",
              (unsigned long long)(exec - base));
-        if (g_managerUpdate) {
+        if (pass2Update && g_managerUpdate)
             LOGI("[stereo] action buttons: the nearest-prompt table (fog walls, the event scripts' area prompts) "
                  "resets once per frame, in pass 1, with the scripts that ask it%s; pass 2 runs the manager's update "
                  "alone (exe+0x%llX, manager at exe+0x%llX)",
-                 Cfg().vrPass2RegionReset ? " - NOT NOW: [VR] Pass2RegionReset=true resets it in pass 2 too, and fog "
-                                            "walls offer no prompt" : "",
+                 c.vrPass2RegionReset ? " - NOT NOW: [VR] Pass2RegionReset=true resets it in pass 2 too, and fog "
+                                        "walls offer no prompt" : "",
                  (unsigned long long)(tail.managerUpdate - g_imageLo),
                  (unsigned long long)(tail.managerSlot - g_imageLo));
-            if (!Cfg().vrPass2RegionReset)
-                LOGI("[stereo] action buttons: each kind's nearest prompt is banked at both pass boundaries and "
-                     "carried into the reset, so a prompt asked in both passes (graces, plants, items, runes) is "
-                     "answered in both%s",
-                     Cfg().vrPass2RegionBank ? "" : " - OFF, [VR] Pass2RegionBank=false: graces and items may show "
-                                                    "no prompt");
-        } else
+        else if (pass2Update)
             LOGW("[stereo] action buttons: the update's tail did not decode (manager update and global not found): "
                  "the nearest-prompt table resets in both passes, and boss fog walls and the event scripts' other "
                  "area prompts will not appear");
-        if (g_lockedRa)
+        if (RegionBankingOn())
+            LOGI("[stereo] action buttons: each kind's nearest prompt is banked at both pass boundaries and carried "
+                 "into the reset, so a prompt asked in both passes (graces, plants, items, runes) is answered in both");
+        else if (!c.vrPass2RegionBank)
+            LOGI("[stereo] action buttons: nearest prompts are not carried across the passes ([VR] "
+                 "Pass2RegionBank=false): graces and items may show no prompt");
+        if (pass2Update && g_lockedRa)
             LOGI("[stereo] action buttons: the event scripts' prompts (asked in pass 1 only, through exe+0x%llX) are "
                  "asked again around the second pass so its update keeps them and the button reaches them%s",
                  (unsigned long long)(g_lockedRa - g_imageLo),
-                 Cfg().vrPass2KeepScriptPrompts ? "" : " - OFF, [VR] Pass2KeepScriptPrompts=false");
-        else
+                 c.vrPass2KeepScriptPrompts ? "" : " - OFF, [VR] Pass2KeepScriptPrompts=false");
+        else if (pass2Update)
             LOGW("[stereo] action buttons: the event scripts' prompt call was not found: boss fog walls and their other "
                  "area prompts show but may ignore the button");
     } else

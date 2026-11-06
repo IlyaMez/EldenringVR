@@ -5,9 +5,16 @@ release workflow and published on GitHub Releases and Nexus Mods.
 
 ## 0.7.4 (2026-11-06)
 
-Graces, plants and items answer the button again.
+Graces, plants and items answer the button again; lifts come when you pull their lever.
 
 ### Fixes
+* Lifts: pulling a lift's lever played the pull and the lift never came, and the lever would not pull again
+  (reported on 0.7.1 and 0.7.2 at the Ruin-Strewn Precipice and Rampart Tower lifts). The game's event manager - which
+  pulls levers, opens doors and chests - ran in both eyes' passes, and its second run cleared the lever's one-frame
+  signal before the lift's script, which runs once per frame, saw it. The event manager and the action-button
+  update now run once per frame, in the first eye's pass, as in the game without ERVR. Checked in the headset: the
+  lever called the lift, and graces were asked the same in both passes. `[VR] Pass2EventsOnce=false` puts the
+  both-pass order back, to compare.
 * 0.7.3 broke graces (no prompt), plants to gather (no prompt), items on the ground and dropped runes (a prompt
   that flickered) and some doors (a prompt that ignored the button). The game keeps, for each kind of prompt, the
   nearest one, and lets a prompt in only if it is strictly nearer than the best so far; 0.7.3 reset that table once

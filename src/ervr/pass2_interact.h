@@ -15,10 +15,12 @@
 //                                                                  (players' logs 2026-11-04); their
 //                                                                  Pass2ActionButtons=true opened them again
 // The event manager holds the door/lever executor (obj_act_exec, fromsoftware-rs event_man.rs): it and this
-// update have to step together. So the update runs in both passes again ([VR] Pass2ActionButtonUpdate, default
-// true), and the 0.6.5 card is handled at the answer: a prompt (caller + action button id) that answers
-// "pressed" again within two updates of its last "pressed" - one stereo pair - is answered "not pressed"
-// ([VR] Pass2RepeatPressGuard). Every ExecuteActionButton call still reaches the game, in either pass.
+// update have to step together. 0.7.1-0.7.3 ran both in both passes ([VR] Pass2ActionButtonUpdate); since 0.7.4
+// both run once per frame, in pass 1, as in the game without ERVR ([VR] Pass2EventsOnce, default true): with the
+// event manager in both passes a lift's lever lost its one-frame signal to the second run and the lift never came.
+// A prompt asked in both passes can answer one press twice (the 0.6.5 card), handled at the answer: a prompt
+// (caller + action button id) that answers "pressed" again within two updates of its last "pressed" is answered
+// "not pressed" ([VR] Pass2RepeatPressGuard). Every ExecuteActionButton call still reaches the game, in either pass.
 //
 // The update's entry also resets the region table that picks the nearest prompt of each kind (action_button_update.h):
 // a prompt that asks it counts only if it was the nearest at the previous reset. The event scripts (22-24) run in
@@ -32,8 +34,10 @@
 //                                                             nearer range check in the other, so the other pass's
 //                                                             update forgot them: no grace prompt, item prompts
 //                                                             flickering (players' logs 2026-11-06, 0/277 per pass)
-//   0.7.4                     reset in pass 1, each kind's nearest banked at both pass boundaries and carried into
-//                             the reset ([VR] Pass2RegionBank, default true; action_button_update.h)
+//   0.7.4                     the whole update and the event manager once per frame, in pass 1 ([VR]
+//                             Pass2EventsOnce): a pulled lever calls its lift again (verified in-headset
+//                             2026-11-06); each kind's nearest prompt banked at both pass boundaries and carried
+//                             into the reset ([VR] Pass2RegionBank; action_button_update.h)
 //
 // Where prompts are asked is NOT per pass (measured 2026-11-04): a grace's, an NPC's and a ground item's were
 // asked only while pass 2 ran, a door's, a lever's only in pass 1. The first version of the 0.7.0 fix answered
