@@ -298,6 +298,55 @@ FnManagerUpdate g_managerUpdate = nullptr;   // +0xa64d10, the entry's tail jump
 void** g_managerSlot = nullptr;              // the CSActionButtonManImp global the entry loads
 std::atomic<long> g_updatesSkipped{0}, g_updatesPass2{0}, g_regionResets[2]{}, g_regionResetsSkipped{0};
 
+// The region table's nearest-so-far, banked at each pass boundary and put back right before pass 1's reset
+// (action_button_update.h: BankRegionSlots / CarryRegionBank). Without it a prompt asked in both passes - graces,
+// gatherable plants, ground items, dropped runes - registered in one pass and failed the strictly-nearer range check
+// in the other, so it was answered in one pass only and the other pass's update forgot it (0.7.3: no grace prompt,
+// item prompts flickering, a door ignoring the button). Only while pass 2 does not reset the table itself.
+SRWLOCK g_bankLock = SRWLOCK_INIT;
+RegionBest g_regionBank[kRegionSlots];
+long g_regionBankFrame = -1;                     // frame of the last bank; a carry takes only the last 2 frames'
+std::atomic<uint8_t*> g_regionTable{nullptr};    // the entry's table, from this frame's pass 1
+std::atomic<long> g_regionTableFrame{-1};
+std::atomic<long> g_regionBanked{0}, g_regionCarried{0};
+
+bool RegionBankingOn() {
+    const Config& c = Cfg();
+    if (!c.vrPass2RegionBank) return false;
+    const bool pass2Resets = c.vrPass2ActionButtonUpdate && !c.vrPass2EventsOnce && (c.vrPass2RegionReset || !g_managerUpdate);
+    return !pass2Resets;
+}
+
+// Frame thread, between passes (no task runs). Only with the table pass 1 of this same frame handed the update:
+// out of the world (title, loading) the entry does not run and nothing is written.
+void BankRegionTable() {
+    if (!RegionBankingOn()) return;
+    uint8_t* table = g_regionTable.load(std::memory_order_acquire);
+    const long frame = g_frameNo.load(std::memory_order_relaxed);
+    if (!table || g_regionTableFrame.load(std::memory_order_acquire) != frame) return;
+    uint8_t probe[kRegionTableBytes];
+    if (!SafeRead(table, probe, sizeof(probe))) return;
+    AcquireSRWLockExclusive(&g_bankLock);
+    const int n = BankRegionSlots(table, g_regionBank);
+    g_regionBankFrame = frame;
+    ReleaseSRWLockExclusive(&g_bankLock);
+    if (n) g_regionBanked.fetch_add(n, std::memory_order_relaxed);
+}
+
+// Pass 1's update entry, right before its reset.
+void CarryRegionTable(uint8_t* table) {
+    const long frame = g_frameNo.load(std::memory_order_relaxed);
+    g_regionTable.store(table, std::memory_order_release);
+    g_regionTableFrame.store(frame, std::memory_order_release);
+    AcquireSRWLockExclusive(&g_bankLock);
+    int n = 0;
+    if (RegionBankingOn() && g_regionBankFrame >= frame - 2) n = CarryRegionBank(table, g_regionBank);
+    else for (RegionBest& b : g_regionBank) b = RegionBest{};
+    g_regionBankFrame = -1;
+    ReleaseSRWLockExclusive(&g_bankLock);
+    if (n) g_regionCarried.fetch_add(n, std::memory_order_relaxed);
+}
+
 void __fastcall Hook_ActionButtonUpdate(void* table, void* arg) {
     if (FramePumpCurrentPass() == 2) {
         if (!Cfg().vrPass2ActionButtonUpdate || Cfg().vrPass2EventsOnce) {
@@ -318,6 +367,7 @@ void __fastcall Hook_ActionButtonUpdate(void* table, void* arg) {
     }
     g_decision.fetch_add(1, std::memory_order_acq_rel);
     g_regionResets[0].fetch_add(1, std::memory_order_relaxed);
+    if (table) CarryRegionTable((uint8_t*)table);
     g_origUpdate(table, arg);
 }
 
@@ -454,6 +504,7 @@ void Summary() {
     const long resets1 = g_regionResets[0].exchange(0), resets2 = g_regionResets[1].exchange(0);
     const long resetsSkipped = g_regionResetsSkipped.exchange(0);
     const long heldAsked = g_heldAsked.exchange(0);
+    const long banked = g_regionBanked.exchange(0), carried = g_regionCarried.exchange(0);
     long ch[kObjs][3];
     memcpy(ch, g_changes, sizeof(ch));
     memset(g_changes, 0, sizeof(g_changes));
@@ -476,10 +527,12 @@ void Summary() {
     if (!a1 && !a2 && !changes && !c1 && !c2 && !repeats && !ranPass2) return;
     LOGI("[p2watch] 5 s: interact presses accepted pass 1 %ld / pass 2 %ld (of %ld / %ld prompt calls), repeated "
          "answers dropped %ld, action-button updates in pass 2 run %ld / skipped %ld, prompt region table resets "
-         "pass 1 %ld / pass 2 %ld (%ld left out), event-script prompts asked again around pass 2 %ld | changes in "
+         "pass 1 %ld / pass 2 %ld (%ld left out), nearest prompts banked between passes %ld / carried into the reset "
+         "%ld, event-script prompts asked again around pass 2 %ld | changes in "
          "pass 1 / pass 2 / between frames: action-button state %ld/%ld/%ld, item popup queue %ld/%ld/%ld, ui "
          "%ld/%ld/%ld%s%s",
-         a1, a2, c1, c2, repeats, ranPass2, skipped, resets1, resets2, resetsSkipped, heldAsked, ch[0][0], ch[0][1], ch[0][2],
+         a1, a2, c1, c2, repeats, ranPass2, skipped, resets1, resets2, resetsSkipped, banked, carried, heldAsked,
+         ch[0][0], ch[0][1], ch[0][2],
          ch[1][0], ch[1][1], ch[1][2], ch[2][0], ch[2][1], ch[2][2],
          callers.empty() ? "" : " | prompts asked from (pass 1/pass 2):", callers.c_str());
 }
@@ -562,7 +615,7 @@ void Pass2InteractInit() {
              (unsigned long long)(upd - base), kRepeatUpdates,
              Cfg().vrPass2RepeatPressGuard ? "" : " - OFF, [VR] Pass2RepeatPressGuard=false",
              (unsigned long long)(exec - base));
-        if (g_managerUpdate)
+        if (g_managerUpdate) {
             LOGI("[stereo] action buttons: the nearest-prompt table (fog walls, the event scripts' area prompts) "
                  "resets once per frame, in pass 1, with the scripts that ask it%s; pass 2 runs the manager's update "
                  "alone (exe+0x%llX, manager at exe+0x%llX)",
@@ -570,7 +623,13 @@ void Pass2InteractInit() {
                                             "walls offer no prompt" : "",
                  (unsigned long long)(tail.managerUpdate - g_imageLo),
                  (unsigned long long)(tail.managerSlot - g_imageLo));
-        else
+            if (!Cfg().vrPass2RegionReset)
+                LOGI("[stereo] action buttons: each kind's nearest prompt is banked at both pass boundaries and "
+                     "carried into the reset, so a prompt asked in both passes (graces, plants, items, runes) is "
+                     "answered in both%s",
+                     Cfg().vrPass2RegionBank ? "" : " - OFF, [VR] Pass2RegionBank=false: graces and items may show "
+                                                    "no prompt");
+        } else
             LOGW("[stereo] action buttons: the update's tail did not decode (manager update and global not found): "
                  "the nearest-prompt table resets in both passes, and boss fog walls and the event scripts' other "
                  "area prompts will not appear");
@@ -623,10 +682,12 @@ void Pass2InteractFrameBegin(long frame) {
 
 void Pass2InteractBeforePass2() {
     if (g_watch) Boundary(1);
+    BankRegionTable();
     KeepHeldPromptsAlive();   // after the diff: what the re-ask changes is not pass 1's
 }
 void Pass2InteractAfterPass2() {
     if (g_watch) Boundary(2);
+    BankRegionTable();
     KeepHeldPromptsAlive();
 }
 

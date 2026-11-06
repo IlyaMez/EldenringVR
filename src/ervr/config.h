@@ -761,6 +761,12 @@ struct Config {
     // manager's own update still runs in both passes (doors), the table resets once per frame. true = 0.7.2's
     // behaviour, only to compare. Hot-reloads.
     bool  vrPass2RegionReset = false;
+    // With the reset once per frame, a prompt asked in both passes (graces, gatherable plants, ground items, dropped
+    // runes) registers in the first and fails the game's strictly-nearer range check in the second at the same
+    // distance: answered in one pass only, it is forgotten by the other pass's update every frame (0.7.3: no grace
+    // prompt, item prompts flickering). true = each kind's nearest is banked at both pass boundaries (distance
+    // reopened) and carried into the next reset (action_button_update.h). false = 0.7.3, only to compare. Hot-reloads.
+    bool  vrPass2RegionBank = true;
     // The event scripts' prompts (fog walls...) are asked in pass 1 only, and the action-button manager frees every
     // prompt not asked since its previous update - with its update in both passes that freed them every frame and
     // wiped the press (2026-11-06: the fog wall showed its prompt and ignored the button). true = each one asked in

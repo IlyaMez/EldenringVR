@@ -40,4 +40,62 @@ inline bool DecodeAbmUpdateTail(const uint8_t* fn, size_t n, uintptr_t at, AbmUp
     *out = t;
     return true;
 }
+
+// The region table's slots (one per kind of prompt): float distance at +0, this cycle's nearest at +8, last cycle's
+// at +0x10. The test (+0xa67620 / +0xa67800) hands the slot's distance to its range check, which passes a prompt
+// only if it is STRICTLY nearer (+0xa680f7: comiss best, d; jbe fail); a passing prompt is registered, and every
+// prompt is answered "yours" only if it is last cycle's nearest.
+//
+// With the reset once per frame (pass 1), a prompt asked in both eyes' passes registers in the first and fails the
+// range check in the second at the same distance: it is answered in one pass only, and the manager's update in the
+// other pass forgets it every frame - graces and gatherable plants offered no prompt, ground items and dropped runes
+// flickered, a door showed its prompt and ignored the button (0.7.3, 2026-11-06). So at each pass boundary ERVR
+// banks every slot's nearest so far and reopens its distance (BankRegionSlots), and right before the real reset puts
+// the nearest of the whole frame back (CarryRegionBank): each pass's prompts register as in a single-pass game, and
+// the hysteresis still spans one frame, which the event scripts' prompts (pass 1 only) need.
+constexpr size_t kRegionFirstSlot = 0x18, kRegionSlotStride = 0x48, kRegionSlots = 15;
+constexpr size_t kRegionTableBytes = kRegionFirstSlot + kRegionSlots * kRegionSlotStride;
+constexpr float kRegionFar = 3.40282347e+38f;   // FLT_MAX, what the reset writes
+
+struct RegionBest {
+    float dist = kRegionFar;
+    uint64_t cur = 0;
+};
+
+// Between passes. Returns how many slots held a prompt registered since the previous call.
+inline int BankRegionSlots(uint8_t* table, RegionBest* bank) {
+    int n = 0;
+    for (size_t i = 0; i < kRegionSlots; ++i) {
+        uint8_t* s = table + kRegionFirstSlot + i * kRegionSlotStride;
+        float dist;
+        uint64_t cur;
+        memcpy(&dist, s, 4);
+        memcpy(&cur, s + 8, 8);
+        if (!cur || !(dist < kRegionFar)) continue;   // nothing registered since the distance was reopened
+        ++n;
+        if (dist < bank[i].dist) bank[i] = RegionBest{dist, cur};
+        memcpy(s, &kRegionFar, 4);                     // reopened; the nearest stays registered until a nearer one
+    }
+    return n;
+}
+
+// Right before the real reset (pass 1's update entry): the frame's nearest, banked or registered since, becomes the
+// slot's nearest, which the reset then makes last cycle's. Empties the bank. Returns how many slots it changed.
+inline int CarryRegionBank(uint8_t* table, RegionBest* bank) {
+    int n = 0;
+    for (size_t i = 0; i < kRegionSlots; ++i) {
+        uint8_t* s = table + kRegionFirstSlot + i * kRegionSlotStride;
+        float dist;
+        uint64_t cur;
+        memcpy(&dist, s, 4);
+        memcpy(&cur, s + 8, 8);
+        const RegionBest b = bank[i];
+        bank[i] = RegionBest{};
+        if (!b.cur || (cur && dist <= b.dist)) continue;   // what is registered is as near: the game's own pick
+        memcpy(s, &b.dist, 4);
+        memcpy(s + 8, &b.cur, 8);
+        ++n;
+    }
+    return n;
+}
 } // namespace ervr

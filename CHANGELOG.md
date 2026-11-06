@@ -3,6 +3,21 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## 0.7.4 (2026-11-06)
+
+Graces, plants and items answer the button again.
+
+### Fixes
+* 0.7.3 broke graces (no prompt), plants to gather (no prompt), items on the ground and dropped runes (a prompt
+  that flickered) and some doors (a prompt that ignored the button). The game keeps, for each kind of prompt, the
+  nearest one, and lets a prompt in only if it is strictly nearer than the best so far; 0.7.3 reset that table once
+  per frame (for the fog walls), so a prompt asked in both eyes' passes got in during the first and was refused at
+  the same distance in the second. Answered in one pass only, it was forgotten by the other pass every frame. ERVR
+  now sets each kind's nearest aside between the passes, so every pass's prompts get in as in the game without
+  ERVR, and puts the frame's nearest back before the next reset, which the fog walls still need.
+  `[VR] Pass2RegionBank=false` puts 0.7.3's behaviour back, to compare. The 5 s `[p2watch]` line counts the
+  prompts set aside and carried; a grace's prompt calls should read about the same in pass 1 and pass 2.
+
 ## 0.7.3 (2026-11-06)
 
 Boss fog walls let you through again; a two-handed weapon's second hand grips the shaft.

@@ -27,6 +27,13 @@
 //   0.6.0-0.6.5, 0.7.1-0.7.2  table reset in both passes  -> fog walls show no prompt (always compared with pass 2's
 //                                                             empty slot; 2026-11-06, co-op client at a boss fog)
 //   0.7.0                     whole entry in pass 1 only   -> fog walls fine, doors dead (above)
+//   0.7.3                     reset in pass 1 only         -> fog walls fine; graces, plants, items, runes asked in
+//                                                             both passes registered in one and failed the strictly-
+//                                                             nearer range check in the other, so the other pass's
+//                                                             update forgot them: no grace prompt, item prompts
+//                                                             flickering (players' logs 2026-11-06, 0/277 per pass)
+//   0.7.4                     reset in pass 1, each kind's nearest banked at both pass boundaries and carried into
+//                             the reset ([VR] Pass2RegionBank, default true; action_button_update.h)
 //
 // Where prompts are asked is NOT per pass (measured 2026-11-04): a grace's, an NPC's and a ground item's were
 // asked only while pass 2 ran, a door's, a lever's only in pass 1. The first version of the 0.7.0 fix answered

@@ -148,6 +148,7 @@ void Config::Load(const std::wstring& path) {
     vrPass2EventsOnce = GetB(ini, L"VR", L"Pass2EventsOnce", vrPass2EventsOnce);
     vrPass2RegionReset = GetB(ini, L"VR", L"Pass2RegionReset", vrPass2RegionReset);
     vrPass2KeepScriptPrompts = GetB(ini, L"VR", L"Pass2KeepScriptPrompts", vrPass2KeepScriptPrompts);
+    vrPass2RegionBank = GetB(ini, L"VR", L"Pass2RegionBank", vrPass2RegionBank);
     // 0.7.0's key (false shipped = the update skipped in pass 2, which left doors, levers and chests dead; players
     // posted =true as the fix). Retired: the update runs in both passes whatever it says.
     retiredActionButtonsKey = !GetS(ini, L"VR", L"Pass2ActionButtons", "").empty();

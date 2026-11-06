@@ -1,3 +1,7 @@
+0.7.4 (2026-11-06)
+
+- Graces, plants to gather, items on the ground and dropped runes answer the button again (0.7.3 showed no prompt at a grace or plant, and item and rune prompts flickered). Boss fog walls keep working
+
 0.7.3 (2026-11-06)
 
 - Boss fog walls work again: "Traverse the mist" shows, and the button takes you through (0.6.x, 0.7.1 and 0.7.2 never showed the prompt, and with it shown the press was thrown away). Other area prompts run by the game's event scripts are fixed the same way
