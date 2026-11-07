@@ -2,6 +2,7 @@
 #include "hud_target.h"
 #include "config.h"
 #include "dx12_blit.h"
+#include "game_er.h"
 #include "patches_er.h"
 #include "reshade_addon.h"
 #include "vrmath.h"
@@ -646,8 +647,20 @@ void HudOnPresent(void* reshadeSwapchain) {
     // stays silent - never just once, and never only in one direction: the UI moves off the
     // back buffer when a save loads and back onto it on quit-to-title.
     const int streak = g_missStreak.load(std::memory_order_relaxed);
-    if (Cfg().hudTarget == "auto" && streak >= kRelearnAfter && streak % kRelearnAfter == 0)
-        RelearnTarget(g_dev.load(std::memory_order_relaxed));
+    if (Cfg().hudTarget == "auto" && streak >= kRelearnAfter && streak % kRelearnAfter == 0) {
+        // Not while a loading screen or a cutscene/menu camera is up: the UI is absent then, not moved, and the
+        // frame's last full-size multi-draw targets are the scene's. Both boss cinematics that broke the view
+        // (2026-11-01, 2026-11-07: "normal maps everywhere until I died") relearned with the loading byte up.
+        // The streak keeps counting; the next 60-pass mark after the world is back relearns as before.
+        if (GameERLoadingScreen() || GameERForeignCamActive()) {
+            static int s_told = 0;
+            if (s_told++ < 4)
+                LOGI("[hud] %d passes with no UI during a loading screen or cutscene: target kept until it ends",
+                     streak);
+        } else {
+            RelearnTarget(g_dev.load(std::memory_order_relaxed));
+        }
+    }
     g_runCount = g_runHead = g_runTotal = g_drawTotal = 0;
 }
 

@@ -5,6 +5,8 @@
 #include "game_er.h"
 #include "game_memory.h"
 #include "log.h"
+#include "midhook.h"
+#include "rtti.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <intrin.h>
@@ -231,6 +233,40 @@ void HoldPrompt(void* self, int32_t id, float f, uint64_t a4, uint64_t a5, uint6
              "pass (never answered there) so the action-button update in pass 2 keeps it (frame %ld)", id, h.frame);
 }
 
+// Prompt decisions belong to pass 1 (2026-11-07). The manager's update runs once per frame, in pass 1 (Pass2EventsOnce),
+// and in the game without ERVR the first prompt asked after it takes the press - so does pass 1 here: a prompt asked in
+// pass 2 first is answered "not pressed" there (the manager's taken mark +0x80 put back), and its press waits at +0x81
+// for the same prompt's ask in the next pass 1, before the next update. Players' 0.7.4 logs: every press taken in pass
+// 2 by a new grace ("Touch grace", "Rest at grace") was lost; every press taken in pass 1 worked. A prompt that is never
+// asked in pass 1 (none seen in the last few frames) keeps its pass-2 answer, so nothing goes dead.
+// [VR] Pass2PromptsInPass1=false: 0.7.4's rule (whichever pass asks first takes it).
+struct PassOneAsk { uintptr_t caller; int32_t id; long frame; };
+SRWLOCK g_passOneLock = SRWLOCK_INIT;
+PassOneAsk g_passOne[16]{};
+int g_passOneNext = 0;
+std::atomic<long> g_deferred{0}, g_deferLines{0}, g_pass2OnlyLines{0};
+
+void NotePassOneAsk(uintptr_t caller, int32_t id) {
+    const long frame = g_frameNo.load(std::memory_order_relaxed);
+    AcquireSRWLockExclusive(&g_passOneLock);
+    PassOneAsk* slot = nullptr;
+    for (PassOneAsk& a : g_passOne)
+        if (a.caller == caller && a.id == id) { slot = &a; break; }
+    if (!slot) { slot = &g_passOne[g_passOneNext]; g_passOneNext = (g_passOneNext + 1) % 16; }
+    *slot = {caller, id, frame};
+    ReleaseSRWLockExclusive(&g_passOneLock);
+}
+
+bool AskedInPassOneLately(uintptr_t caller, int32_t id) {
+    const long frame = g_frameNo.load(std::memory_order_relaxed);
+    bool lately = false;
+    AcquireSRWLockShared(&g_passOneLock);
+    for (const PassOneAsk& a : g_passOne)
+        if (a.caller == caller && a.id == id && a.frame > 0 && frame - a.frame <= 3) { lately = true; break; }
+    ReleaseSRWLockShared(&g_passOneLock);
+    return lately;
+}
+
 // ExecuteActionButton (fromsoftware-rs present_action_button): what every prompt calls each frame - it registers
 // the prompt with the manager and answers whether the interact press was for it. Arg 3 is a float (movss,
 // 2.7.2.0), 9 args, the answer in al. Every call reaches the game, in either pass; only a prompt's repeated
@@ -252,9 +288,27 @@ uint8_t __fastcall Hook_ExecuteActionButton(void* self, int32_t id, float f, uin
     if (p == 0 && ra == g_lockedRa && g_lockedRa && Cfg().vrPass2KeepScriptPrompts && Cfg().vrPass2ActionButtonUpdate &&
         !Cfg().vrPass2EventsOnce)   // only an update in pass 2 can forget them
         HoldPrompt(self, id, f, a4, a5, a6, a7, a8, a9);
+    if (p == 0) NotePassOneAsk(ra, id);
+    uint8_t taken = 0;
+    const bool decideInPassOne = p == 1 && Cfg().vrPass2PromptsInPass1 && Cfg().vrPass2EventsOnce && self;
+    if (decideInPassOne) SafeRead((uint8_t*)self + 0x80, &taken, 1);
     const uint8_t r = g_origExecute(self, id, f, a4, a5, a6, a7, a8, a9);
     if (!r) return 0;
     auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    if (decideInPassOne) {
+        if (AskedInPassOneLately(ra, id)) {
+            SafeWrite((uint8_t*)self + 0x80, &taken, 1);   // not taken: the press stays for pass 1's ask
+            g_deferred.fetch_add(1, std::memory_order_relaxed);
+            if (g_deferLines.fetch_add(1, std::memory_order_relaxed) < 40)
+                LOGI("[p2watch] action button %d's press left for pass 1 (asked in pass 2 first, frame %ld, from "
+                     "exe+0x%llX)", id, g_frameNo.load(std::memory_order_relaxed),
+                     (unsigned long long)((uint8_t*)ra - base));
+            return 0;
+        }
+        if (g_pass2OnlyLines.fetch_add(1, std::memory_order_relaxed) < 12)
+            LOGI("[p2watch] action button %d is asked in pass 2 only (from exe+0x%llX): it takes the press there",
+                 id, (unsigned long long)((uint8_t*)ra - base));
+    }
     if (g_updateHooked && Cfg().vrPass2RepeatPressGuard && RepeatAnswer(ra, id)) {
         g_repeats.fetch_add(1, std::memory_order_relaxed);
         if (g_repeatLines.fetch_add(1, std::memory_order_relaxed) < 100)
@@ -374,6 +428,145 @@ void __fastcall Hook_ActionButtonUpdate(void* table, void* arg) {
     g_origUpdate(table, arg);
 }
 
+// MoveMapStep's per-frame world update (2.7.2.0 +0xaf94c0, from MoveMapStep's step, group 20): it steps the world's
+// managers one after another, among them FieldArea's update (below) and with it the talk scripts. Measured 2026-11-07
+// (flat ForcePass2, census above): it has to run in pass 2 - left out, the second eye lost its sky and ambient light
+// (27% of the brightness, the August "dark eye", whose producer is no task group but FieldArea's update in here) and
+// the frame rate fell. Counted per pass for the census; [VR] Pass2WorldUpdate=false (diagnostic only) leaves it out.
+// Arguments: the step and its FD4TaskData (dt at +8).
+using FnWorldUpdate = void(__fastcall*)(void*, void*, void*, void*);
+FnWorldUpdate g_origWorldUpdate = nullptr;
+std::atomic<long> g_worldUpdates[2]{}, g_worldUpdatesSkipped{0};
+
+void __fastcall Hook_WorldUpdate(void* self, void* taskData, void* a3, void* a4) {
+    if (FramePumpCurrentPass() == 2) {
+        if (!Cfg().vrPass2WorldUpdate) {
+            g_worldUpdatesSkipped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        g_worldUpdates[1].fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_worldUpdates[0].fetch_add(1, std::memory_order_relaxed);
+    }
+    g_origWorldUpdate(self, taskData, a3, a4);
+}
+
+// FieldArea's per-frame update (2.7.2.0 +0x624710; rcx = the field area, xmm1 = the frame's dt, r8b/r9b and a stacked
+// byte = flags; seven MoveMapStep call sites, none reads a result): the world container's step, under which the world's
+// gameplay steps - CSWorldTalkManImpl's update (+0xeb14d0, called from +0x6252eb inside it: every grace's, NPC's and
+// merchant's talk script) among it. [VR] Pass2FieldUpdate=false leaves it out of pass 2 while the rest of the world
+// update (the renderer's, the fade's, the sound's) still runs there.
+using FnFieldStep = void(__fastcall*)(void*, float, uint8_t, uint8_t, uint8_t);
+FnFieldStep g_origFieldStep = nullptr;
+std::atomic<long> g_fieldSteps[2]{}, g_fieldStepsSkipped{0};
+
+void __fastcall Hook_FieldStep(void* field, float dt, uint8_t a3, uint8_t a4, uint8_t a5) {
+    if (FramePumpCurrentPass() == 2) {
+        if (!Cfg().vrPass2FieldUpdate) {
+            g_fieldStepsSkipped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        g_fieldSteps[1].fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_fieldSteps[0].fetch_add(1, std::memory_order_relaxed);
+    }
+    g_origFieldStep(field, dt, a3, a4, a5);
+}
+
+// The talk scripts' manager update (2.7.2.0 +0xeb14d0, CSWorldTalkManImpl; its one caller is FieldArea's update at
+// +0x6252eb, which reads no result): every grace's, NPC's and merchant's talk script steps under it (each grid area's
+// CSWorldGridAreaTalk slot 6 -> each talk -> the EzState machine). FieldArea's update itself has to stay in pass 2 -
+// the environment lighting is made inside it (2026-11-07: without it the second eye lost sky and ambient light and
+// the frame rate fell from 72 to 46) - so the talk scripts are taken out of pass 2 at their own entry instead.
+// [VR] Pass2TalkScripts=true puts them back in both passes (0.7.4).
+using FnTalkManUpdate = void(__fastcall*)(void*, void*);
+FnTalkManUpdate g_origTalkManUpdate = nullptr;
+std::atomic<long> g_talkUpdates[2]{}, g_talkUpdatesSkipped{0};
+
+void __fastcall Hook_TalkManUpdate(void* talkMan, void* ctx) {
+    if (FramePumpCurrentPass() == 2) {
+        if (!Cfg().vrPass2TalkScripts) {
+            g_talkUpdatesSkipped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        g_talkUpdates[1].fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_talkUpdates[0].fetch_add(1, std::memory_order_relaxed);
+    }
+    g_origTalkManUpdate(talkMan, ctx);
+}
+
+// The managers the world update steps: every `mov rcx, [rip+X]` in its body loads one (FD4 singletons), named once the
+// world is up (LookupLoop) - "[p2watch] the world update steps: ...". Diagnostic: which of them a second pass needs.
+constexpr size_t kWorldUpdateBytes = 0x1213;
+uintptr_t g_worldManagers[24];
+int g_worldManagerCount = 0;
+
+void WorldUpdateInit(uint8_t* wu) {
+    static uint8_t body[kWorldUpdateBytes];
+    if (!SafeRead(wu, body, sizeof(body))) return;
+    // FieldArea's update: its prologue and first block, unique in the exe (2.7.2.0 +0x624710).
+    if (uint8_t* fa = AobScan("40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 E9 48 81 EC B8 00 00 00 48 C7 45 CF FE FF "
+                              "FF FF 0F 29 B4 24 A0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 EF 44 88 4D 99 45 0F B6 "
+                              "E8 44 88 45 98 48 8B F1 F3 0F 11 4D 8F")) {
+        if (MH_CreateHook(fa, (void*)&Hook_FieldStep, (void**)&g_origFieldStep) == MH_OK && MH_EnableHook(fa) == MH_OK)
+            LOGI("[stereo] FieldArea's update (the world's gameplay: talk scripts, map objects; exe+0x%llX) runs %s",
+                 (unsigned long long)((uintptr_t)fa - g_imageLo),
+                 Cfg().vrPass2FieldUpdate ? "in both passes" : "in pass 1 only ([VR] Pass2FieldUpdate=false)");
+        else
+            g_origFieldStep = nullptr;
+    }
+    if (!g_origFieldStep) LOGW("[stereo] FieldArea's update not found: it runs in both passes");
+    // The talk scripts' manager update: prologue and first block, unique in the exe (2.7.2.0 +0xeb14d0).
+    if (uint8_t* tm = AobScan("40 57 48 83 EC 50 48 C7 44 24 28 FE FF FF FF 48 89 5C 24 60 48 89 6C 24 68 48 89 74 24 78 0F "
+                              "29 7C 24 40 48 8B EA 48 8B D9 33 FF 8B C7 89 44 24 20 48 8B 0D")) {
+        if (MH_CreateHook(tm, (void*)&Hook_TalkManUpdate, (void**)&g_origTalkManUpdate) == MH_OK &&
+            MH_EnableHook(tm) == MH_OK)
+            LOGI("[stereo] talk scripts (graces, NPCs, merchants; exe+0x%llX) step %s",
+                 (unsigned long long)((uintptr_t)tm - g_imageLo),
+                 Cfg().vrPass2TalkScripts ? "in both passes ([VR] Pass2TalkScripts=true)"
+                                          : "once per frame, in pass 1, as in the game without ERVR");
+        else
+            g_origTalkManUpdate = nullptr;
+    }
+    if (!g_origTalkManUpdate)
+        LOGW("[stereo] the talk scripts' update was not found: graces and NPCs step in both passes (a new grace may "
+             "ignore the button)");
+    for (size_t i = 0; i + 7 <= sizeof(body); ++i) {
+        if (body[i] != 0x48 || body[i + 1] != 0x8B || body[i + 2] != 0x0D) continue;
+        int32_t d;
+        memcpy(&d, body + i + 3, 4);
+        const uintptr_t slot = (uintptr_t)wu + i + 7 + (intptr_t)d;
+        if (slot < g_imageLo || slot + 8 > g_imageHi) continue;
+        bool seen = false;
+        for (int k = 0; k < g_worldManagerCount; ++k) seen |= g_worldManagers[k] == slot;
+        if (!seen && g_worldManagerCount < (int)(sizeof(g_worldManagers) / sizeof(g_worldManagers[0])))
+            g_worldManagers[g_worldManagerCount++] = slot;
+    }
+}
+
+void LogWorldManagers() {
+    std::string line;
+    for (int k = 0; k < g_worldManagerCount; ++k) {
+        // Not every slot holds an object (2026-11-07: one held a value, and reading a "vtable" through it crashed the
+        // game): the vtable and the locator before it must both be the exe's, the locator's signature 1, before
+        // RttiNameOfVTable reads anything through them.
+        uintptr_t obj = 0, vt = 0, col = 0;
+        uint32_t sig = 0;
+        if (!SafeRead((void*)g_worldManagers[k], &obj, sizeof(obj)) || obj < 0x10000 ||
+            !SafeRead((void*)obj, &vt, sizeof(vt)) || vt < g_imageLo + 8 || vt >= g_imageHi ||
+            !SafeRead((void*)(vt - 8), &col, sizeof(col)) || col < g_imageLo || col + 24 > g_imageHi ||
+            !SafeRead((void*)col, &sig, sizeof(sig)) || sig != 1)
+            continue;
+        std::string name = RttiNameOfVTable((void**)vt);
+        char part[160];
+        snprintf(part, sizeof(part), "%s exe+0x%llX %s", line.empty() ? "" : ",",
+                 (unsigned long long)(g_worldManagers[k] - g_imageLo), name.empty() ? "?" : name.c_str());
+        line += part;
+    }
+    if (!line.empty()) LOGI("[p2watch] the world update steps:%s", line.c_str());
+}
+
 // Frame thread, between passes (no task runs): the event-script prompts asked in this frame's pass 1, asked again
 // with the manager's press bytes cleared for the call, so the prompt stays registered (and chosen) for the update on
 // the other side of this boundary without the call ever taking the press. Only while the update runs in pass 2.
@@ -400,6 +593,95 @@ void KeepHeldPromptsAlive() {
         manager[0x81] = press[0];
         manager[0x82] = press[1];
         g_heldAsked.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+// Game systems that step in the second eye's pass, counted per pass for the 5 s line. The second pass is meant to
+// draw the same moment again; a system that steps there too can take a press, a one-frame signal or a state change
+// a second time - how doors, item cards, lifts, fog walls and graces broke one after another. Each point is a
+// class's virtual function, its vtable slot pointed at a register-preserving stub (midhook.h) that counts the call
+// and jumps on: nothing about the call changes.
+struct CensusPoint {
+    const char* cls;
+    int slot;
+    const char* what;
+    std::atomic<long> n[2];
+};
+CensusPoint g_census[] = {
+    // Talk scripts: graces, NPCs, merchants. Slot 1 answers each condition a talk script's current state asks
+    // (2.7.2.0 +0xea3b90). A grace's "Touch grace" and "Rest at grace" prompts (action buttons 6000/6100/6101) are
+    // asked from inside it (exe+0xEA59B2), and players' 0.7.4 logs show those presses taken in pass 2 and lost.
+    {"CS::CSEzStateTalkEnv", 1, "talk-script queries", {}},
+    // A grid area's talk scripts, stepped one by one (+0xeb2970, CSWorldTalkManImpl's update calls it per area, from
+    // MoveMapStep's world update). The object-action, AI and navmesh areas share the layout but their slot 6 never
+    // ran in play (measured 2026-11-07), so they are not counted.
+    {"CS::CSWorldGridAreaTalk", 6, "area talk updates", {}},
+};
+constexpr int kCensus = (int)(sizeof(g_census) / sizeof(g_census[0]));
+
+// The return addresses above a census point's call, from its stack: each a code address in the exe right after a
+// call instruction (E8 rel32, FF 15 [rip], or FF /2 through a register: the virtual calls a step's update makes).
+// Names who drives the system in each pass - which game step or task to keep out of the second one.
+int StackCallers(uintptr_t rsp, uintptr_t* out, int max) {
+    const auto stackBase = (uintptr_t)((NT_TIB*)NtCurrentTeb())->StackBase;
+    int n = 0;
+    for (uintptr_t p = rsp; n < max && p + 8 <= stackBase && p < rsp + 0x1800; p += 8) {
+        uintptr_t v = 0;
+        if (!SafeRead((void*)p, &v, sizeof(v)) || v < g_imageLo + 8 || v >= g_imageHi) continue;
+        uint8_t b[8];
+        if (!SafeRead((void*)(v - 8), b, sizeof(b))) continue;
+        const bool call = b[3] == 0xE8 ||                                     // call rel32
+                          (b[2] == 0xFF && b[3] == 0x15) ||                   // call [rip+disp32]
+                          (b[6] == 0xFF && (b[7] & 0xF8) == 0xD0) ||          // call reg
+                          (b[6] == 0xFF && (b[7] & 0xF8) == 0x10 && (b[7] & 7) != 4 && (b[7] & 7) != 5) ||  // [reg]
+                          (b[5] == 0xFF && (b[6] & 0x38) == 0x10 && (b[6] >> 6) == 1) ||   // call [reg+disp8]
+                          (b[2] == 0xFF && (b[3] & 0x38) == 0x10 && (b[3] >> 6) == 2);     // call [reg+disp32]
+        if (call) out[n++] = v;
+    }
+    return n;
+}
+
+std::atomic<bool> g_censusStackLogged[kCensus][2];
+
+void CensusCount(MidHookRegs* regs, void* user) {
+    auto* c = static_cast<CensusPoint*>(user);
+    const int p = FramePumpCurrentPass() == 2 ? 1 : 0;
+    c->n[p].fetch_add(1, std::memory_order_relaxed);
+    // Once per point, pass and session, in the world: who called it (pass 1's once pass 2 has run, so it is the
+    // stepping in play, not a load's first evaluation).
+    std::atomic<bool>& logged = g_censusStackLogged[c - g_census][p];
+    if (logged.load(std::memory_order_relaxed) || !GameERPlayerActive() ||
+        (p == 0 && !c->n[1].load(std::memory_order_relaxed)))
+        return;
+    if (logged.exchange(true)) return;
+    uintptr_t chain[24] = {};
+    const int n = StackCallers(regs->rsp, chain, 24);
+    char line[768] = "";
+    for (int i = 0, at = 0; i < n && at < (int)sizeof(line) - 24; ++i)
+        at += snprintf(line + at, sizeof(line) - at, "%sexe+0x%llX", i ? " <- " : "",
+                       (unsigned long long)(chain[i] - g_imageLo));
+    LOGI("[p2watch] %s in pass %d come from %s (thread %lu, %s)", c->what, p + 1, line, GetCurrentThreadId(),
+         GetCurrentThreadId() == FramePumpFrameThread() ? "the frame thread" : "another thread");
+}
+
+void InstallCensus() {
+    for (CensusPoint& c : g_census) {
+        void** vt = FindVTable(c.cls);
+        void* fn = vt ? vt[c.slot] : nullptr;
+        if (!fn || (uintptr_t)fn < g_imageLo || (uintptr_t)fn >= g_imageHi) {
+            LOGW("[p2watch] %s are not counted: %s[%d] not found", c.what, c.cls, c.slot);
+            continue;
+        }
+        void* stub = MidHookMakeStub(fn, &CensusCount, &c);
+        DWORD old = 0;
+        if (!stub || !VirtualProtect(&vt[c.slot], sizeof(void*), PAGE_READWRITE, &old)) {
+            LOGW("[p2watch] %s are not counted: the stub for %s[%d] was not placed", c.what, c.cls, c.slot);
+            continue;
+        }
+        vt[c.slot] = stub;
+        VirtualProtect(&vt[c.slot], sizeof(void*), old, &old);
+        LOGI("[p2watch] counting %s per pass: %s[%d] = exe+0x%llX", c.what, c.cls, c.slot,
+             (unsigned long long)((uintptr_t)fn - g_imageLo));
     }
 }
 
@@ -527,26 +809,75 @@ void Summary() {
         else     snprintf(part, sizeof(part), " exe+0x%llX %ld/%ld", rva, n1, n2);
         callers += part;
     }
-    if (!a1 && !a2 && !changes && !c1 && !c2 && !repeats && !ranPass2) return;
+    // Gameplay counted per pass (census points above): "talk-script queries 812/806" means talk scripts step in both.
+    std::string census;
+    long censusAny = 0;
+    if (const long deferred = g_deferred.exchange(0)) {
+        char part[64];
+        snprintf(part, sizeof(part), " prompt presses left for pass 1 %ld,", deferred);
+        census += part;
+        censusAny += deferred;
+    }
+    {
+        const long w1 = g_worldUpdates[0].exchange(0), w2 = g_worldUpdates[1].exchange(0);
+        const long ws = g_worldUpdatesSkipped.exchange(0);
+        if (w1 || w2 || ws) {
+            char part[96];
+            snprintf(part, sizeof(part), " world updates %ld/%ld (%ld left out of pass 2)", w1, w2, ws);
+            census += part;
+            censusAny += w1 + w2 + ws;
+        }
+        const long t1 = g_talkUpdates[0].exchange(0), t2 = g_talkUpdates[1].exchange(0);
+        const long tsk = g_talkUpdatesSkipped.exchange(0);
+        if (t1 || t2 || tsk) {
+            char part[96];
+            snprintf(part, sizeof(part), ", talk-script updates %ld/%ld (%ld left out of pass 2)", t1, t2, tsk);
+            census += part;
+            censusAny += t1 + t2 + tsk;
+        }
+        const long f1 = g_fieldSteps[0].exchange(0), f2 = g_fieldSteps[1].exchange(0);
+        const long fs = g_fieldStepsSkipped.exchange(0);
+        if (f1 || f2 || fs) {
+            char part[96];
+            snprintf(part, sizeof(part), ", field-area updates %ld/%ld (%ld left out of pass 2)", f1, f2, fs);
+            census += part;
+            censusAny += f1 + f2 + fs;
+        }
+    }
+    for (CensusPoint& c : g_census) {
+        const long n1 = c.n[0].exchange(0, std::memory_order_relaxed), n2 = c.n[1].exchange(0, std::memory_order_relaxed);
+        if (!n1 && !n2) continue;
+        censusAny += n1 + n2;
+        char part[96];
+        snprintf(part, sizeof(part), "%s %s %ld/%ld", census.empty() ? "" : ",", c.what, n1, n2);
+        census += part;
+    }
+    if (!a1 && !a2 && !changes && !c1 && !c2 && !repeats && !ranPass2 && !censusAny) return;
     LOGI("[p2watch] 5 s: interact presses accepted pass 1 %ld / pass 2 %ld (of %ld / %ld prompt calls), repeated "
          "answers dropped %ld, action-button updates in pass 2 run %ld / skipped %ld, prompt region table resets "
          "pass 1 %ld / pass 2 %ld (%ld left out), nearest prompts banked between passes %ld / carried into the reset "
          "%ld, event-script prompts asked again around pass 2 %ld | changes in "
          "pass 1 / pass 2 / between frames: action-button state %ld/%ld/%ld, item popup queue %ld/%ld/%ld, ui "
-         "%ld/%ld/%ld%s%s",
+         "%ld/%ld/%ld%s%s%s%s",
          a1, a2, c1, c2, repeats, ranPass2, skipped, resets1, resets2, resetsSkipped, banked, carried, heldAsked,
          ch[0][0], ch[0][1], ch[0][2],
          ch[1][0], ch[1][1], ch[1][2], ch[2][0], ch[2][1], ch[2][2],
-         callers.empty() ? "" : " | prompts asked from (pass 1/pass 2):", callers.c_str());
+         callers.empty() ? "" : " | prompts asked from (pass 1/pass 2):", callers.c_str(),
+         census.empty() ? "" : " | game systems stepping (pass 1/pass 2):", census.c_str());
 }
 
 // The managers exist from boot; look them up once the world is up (the scan reads the whole module), and
 // again only if one stops answering to its vtable.
 void LookupLoop() {
     ULONGLONG nextTry[kObjs] = {};
+    bool managersLogged = false;
     for (;;) {
         Sleep(2000);
         if (!GameERPlayerActive()) continue;
+        if (!managersLogged) {
+            managersLogged = true;
+            LogWorldManagers();
+        }
         for (int i = 0; i < kObjs; ++i) {
             Watched& w = *g_all[i];
             uint8_t* o = w.obj.load(std::memory_order_acquire);
@@ -603,6 +934,20 @@ void Pass2InteractInit() {
         g_managerSlot = (void**)tail.managerSlot;
         g_managerUpdate = (FnManagerUpdate)tail.managerUpdate;
     }
+    // 2.7.2.0 +0xaf94c0, MoveMapStep's world update: its prologue and first block, unique in the exe.
+    if (uint8_t* wu = AobScan("48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC D0 00 00 00 48 C7 45 A7 FE "
+                              "FF FF FF 48 89 58 18 0F 29 70 B8 0F 29 78 A8 44 0F 29 40 98 44 0F 29 48 88 44 0F 29 90 78 "
+                              "FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 CF 4C 8B FA 48 8B D9 33 FF 89 7D 87 0F 57 FF")) {
+        WorldUpdateInit(wu);   // reads the body before the hook rewrites its first bytes
+        if (MH_CreateHook(wu, (void*)&Hook_WorldUpdate, (void**)&g_origWorldUpdate) == MH_OK && MH_EnableHook(wu) == MH_OK)
+            LOGI("[stereo] MoveMapStep's world update (talk scripts and the other world managers, exe+0x%llX) runs %s",
+                 (unsigned long long)(wu - base),
+                 Cfg().vrPass2WorldUpdate ? "in both passes" : "in pass 1 only ([VR] Pass2WorldUpdate=false)");
+        else
+            LOGW("[stereo] MoveMapStep's world update found but not hooked: it runs in both passes");
+    } else {
+        LOGW("[stereo] MoveMapStep's world update not found: it runs in both passes");
+    }
     const bool execOk = exec && MH_CreateHook(exec, (void*)&Hook_ExecuteActionButton, (void**)&g_origExecute) == MH_OK &&
                         MH_EnableHook(exec) == MH_OK;
     const bool updOk = upd && MH_CreateHook(upd, (void*)&Hook_ActionButtonUpdate, (void**)&g_origUpdate) == MH_OK &&
@@ -652,6 +997,7 @@ void Pass2InteractInit() {
              "interact button again (an item card left on screen)", execOk ? "ok" : "not hooked",
              updOk ? "ok" : "not hooked");
     if (Cfg().vrPass2Watch) {
+        InstallCensus();
         std::thread(LookupLoop).detach();
         g_watch = true;
     }

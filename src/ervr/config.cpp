@@ -115,14 +115,18 @@ void Config::Load(const std::wstring& path) {
     // manager (25) gated: doors, levers, lifts and new graces stopped answering the interact button.
     // That value, and the 16-25 workaround posted for it (which brought the stuck popup back), give way
     // to the current default; any other value written there is the player's own and stays.
+    // 0.7.5 retires every earlier built-in set too (0.6.5-0.7.4 ran game logic in the second eye's pass: the
+    // interaction bugs and the co-op crashes of 2026-11-06/07), so a copy of one written out by hand moves along.
     {
         static const char* const kRetiredFull[] = {
             "0-7,10-14,16-21,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168",
             "0-7,10-14,16-25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168",
+            "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168",
         };
         static const char* const kRetiredSafe[] = {
             "0-7,10-14,16-21,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168",
             "0-7,10-14,16-25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168",
+            "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168",
         };
         const Config defaults;
         pass2KeepNote.clear();
@@ -149,6 +153,10 @@ void Config::Load(const std::wstring& path) {
     vrPass2RegionReset = GetB(ini, L"VR", L"Pass2RegionReset", vrPass2RegionReset);
     vrPass2KeepScriptPrompts = GetB(ini, L"VR", L"Pass2KeepScriptPrompts", vrPass2KeepScriptPrompts);
     vrPass2RegionBank = GetB(ini, L"VR", L"Pass2RegionBank", vrPass2RegionBank);
+    vrPass2WorldUpdate = GetB(ini, L"VR", L"Pass2WorldUpdate", vrPass2WorldUpdate);
+    vrPass2FieldUpdate = GetB(ini, L"VR", L"Pass2FieldUpdate", vrPass2FieldUpdate);
+    vrPass2TalkScripts = GetB(ini, L"VR", L"Pass2TalkScripts", vrPass2TalkScripts);
+    vrPass2PromptsInPass1 = GetB(ini, L"VR", L"Pass2PromptsInPass1", vrPass2PromptsInPass1);
     // 0.7.0's key (false shipped = the update skipped in pass 2, which left doors, levers and chests dead; players
     // posted =true as the fix). Retired: the update runs in both passes whatever it says.
     retiredActionButtonsKey = !GetS(ini, L"VR", L"Pass2ActionButtons", "").empty();
@@ -540,8 +548,8 @@ Config& Cfg() { return g_cfg; }
 
 void ConfigLogNotes() {
     if (!g_cfg.pass2KeepNote.empty())
-        LOGI("[config] %s in ERVR.ini is 0.6.0's value, which kept doors, levers and new graces from opening: "
-             "using ERVR's own. Delete the line to stop this note.",
+        LOGI("[config] %s in ERVR.ini is an earlier ERVR's built-in value (game logic in the second eye's pass: doors, "
+             "graces, co-op crashes): using ERVR's own. Delete the line to stop this note.",
              g_cfg.pass2KeepNote.c_str());
     if (g_cfg.retiredPinSideOffset)
         LOGI("[config] [Combat] TwoHandPinSideOffset=0.03 in ERVR.ini is the old shipped nudge for a two-handing hand "

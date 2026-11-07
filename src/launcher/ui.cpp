@@ -281,8 +281,10 @@ App::App(HWND window, Fonts fonts, std::string updatedFrom)
     : window_(window), fonts_(fonts), settings_(loadSettings()), installFolder_(installFolder(&installWhyNot_)),
       updatedFrom_(std::move(updatedFrom)) {
     scanner_.start(settings_);
-    // One question to GitHub per start, on its own thread; updating waits for the player's click.
-    updater_.start(installFolder_, !installFolder_.empty() && settings_.updateCheck);
+    // One question to GitHub per start, on its own thread; updating waits for the player's click. Asked even where
+    // this launcher cannot update itself (unpacked into the game folder): the Play tab then says a release is out
+    // and links its download, instead of staying silent (Stÿks, 0.7.2 in the game folder, 2026-11-06).
+    updater_.start(installFolder_, settings_.updateCheck);
 }
 
 App::~App() = default;
@@ -1401,7 +1403,9 @@ float App::updateBanner(float width) {
                                      state == UpdateState::installed);
     const bool offer = !installFolder_.empty() && release && !updateLater_ &&
                        (state == UpdateState::available || state == UpdateState::installFailed);
-    if (!working && !offer && updatedFrom_.empty())
+    // A release this launcher cannot put in place itself (installWhyNot_ says why): the download, by hand.
+    const bool manual = installFolder_.empty() && release && !updateLater_ && state == UpdateState::available;
+    if (!working && !offer && !manual && updatedFrom_.empty())
         return 0;
     std::string message;
     std::vector<Button> buttons;
@@ -1431,6 +1435,14 @@ float App::updateBanner(float width) {
                            [&] { updater_.install(); }});
         buttons.push_back({"Later", false, true, "Asks again the next time the launcher starts.",
                            [&] { updateLater_ = true; }});
+    } else if (manual) {
+        const std::string page = release->page.empty() ? kReleasesUrl : release->page;
+        message = format("ERVR %s is out: you have %s. %s", release->version.c_str(), kVersion,
+                         installWhyNot_.c_str());
+        buttons.push_back({"Download", true, true, "The release on GitHub: its zip is under Assets.",
+                           [page] { openUrl(page.c_str()); }});
+        buttons.push_back({"Later", false, true, "Asks again the next time the launcher starts.",
+                           [&] { updateLater_ = true; }});
     } else {
         message = format("ERVR is updated: %s to %s. START VR puts it in the game.", updatedFrom_.c_str(), kVersion);
         const std::string page = std::string(kReleasesUrl) + "/tag/v" + kVersion;
@@ -1440,7 +1452,10 @@ float App::updateBanner(float width) {
 
     auto* draw = ImGui::GetWindowDrawList();
     const ImVec2 at = ImGui::GetCursorScreenPos();
-    const std::string issue = working ? "v" + release->version : failed ? "Update failed" : offer ? "New version" : "Updated";
+    const std::string issue = working          ? "v" + release->version
+                              : failed         ? "Update failed"
+                              : offer || manual ? "New version"
+                                               : "Updated";
     const float stampSize = S(13.5f);
     const float stampWidth = spacedWidth(fonts_.label, stampSize, upper(issue).c_str(), 0.08f) + stampSize * 1.4f;
     const float buttonW = S(124), gap = S(10);
@@ -1455,7 +1470,7 @@ float App::updateBanner(float width) {
     corners(draw, at, end, S(9), col(failed ? kRed : kGoldDeep), S(1.5f));
     diamond(draw, ImVec2(at.x + S(24), at.y + height * 0.5f), S(5), col(failed ? kRedLift : kGold));
     // The release as a stamp: gold to take, red when it failed, green once it is in.
-    const Rgb tint = failed ? kRedLift : working || offer ? kGoldLift : kGreen;
+    const Rgb tint = failed ? kRedLift : working || offer || manual ? kGoldLift : kGreen;
     stamp(draw, ImVec2(at.x + S(42), at.y + height * 0.5f), issue.c_str(), col(kSurface), col(tint), col(tint),
           stampSize);
     draw->AddText(fonts_.semibold, S(15), ImVec2(textX, at.y + (height - textSize.y) * 0.5f), col(kPaper),
@@ -1501,7 +1516,11 @@ void App::updatesCard(float width) {
     case UpdateState::current:
         status = format("ERVR %s is the newest version (checked at %s).", kVersion, update_.checkedAt.c_str());
         break;
-    case UpdateState::available: status = format("ERVR %s is out: you have %s.", release->version.c_str(), kVersion); break;
+    case UpdateState::available:
+        status = format("ERVR %s is out: you have %s.", release->version.c_str(), kVersion);
+        if (installFolder_.empty())   // no Update now here: say why, and All releases has the zip
+            status += " " + installWhyNot_;
+        break;
     case UpdateState::checkFailed: status = "The check failed. " + update_.message; break;
     case UpdateState::downloading:
     case UpdateState::installing:

@@ -16,16 +16,18 @@ struct HudRun {
     uint32_t fmt = 0;   // DXGI_FORMAT; reshade::api::format uses the same values
 };
 
-// Formats a UI target can have. ELDEN RING draws its UI onto a full-size R8G8B8A8 target
-// (1.16.2 and 1.17.2 alike) and the boot/title screens onto the back buffer (R10G10B10A2 or
-// 8-bit). The scene's own full-size buffers are float: 2026-11-01, in two boss phase-2
-// cutscenes, the relearn took a full-size R11G11B10_FLOAT target with 2 draws a frame for
-// the UI, and from the first stereo pair on one of the SCENE's draws went onto the HUD
-// layer every frame while the real HUD stayed in the eye images - "rendering broke until I
-// respawned" (the respawn's loading screen was the next relearn).
+// Formats an OFFSCREEN UI target can have (back buffers are taken whatever their format).
+// ELDEN RING draws its UI onto a full-size R8G8B8A8 target (1.16.2 and 1.17.2 alike) and the
+// boot/title screens onto the back buffer (R10G10B10A2 or 8-bit). Full-size offscreen targets
+// in any other format are the scene's: 2026-11-01, in two boss phase-2 cutscenes, the relearn
+// took a full-size R11G11B10_FLOAT target with 2 draws a frame for the UI, and from the first
+// stereo pair on one of the SCENE's draws went onto the HUD layer every frame while the real
+// HUD stayed in the eye images - "rendering broke until I respawned". 2026-11-07, the same in
+// another boss's phase-2 cinematic with an offscreen R10G10B10A2 target (3 draws) - 10-bit is
+// the back buffer's format and a normals buffer's, never the UI's: "a complete mess, normal
+// maps everywhere, until I died" (the death's load was the next relearn).
 inline bool HudUiFormat(uint32_t fmt) {
     switch (fmt) {
-    case 23: case 24:            // R10G10B10A2 typeless / unorm
     case 27: case 28: case 29:   // R8G8B8A8 typeless / unorm / srgb
     case 87: case 90: case 91:   // B8G8R8A8 unorm / typeless / srgb
         return true;

@@ -70,10 +70,13 @@ struct PresentEventClock {
     }
 };
 
-// ReShade's own screenshot path, when an unattended run asked for one (ReShadeAddonRequestScreenshot).
+// ReShade's own screenshot path, when an unattended run asked for one (ReShadeAddonRequestScreenshot): the next two
+// presents, named by the pass presenting them - with the second pass running, one image of each pass of the same
+// moment (flat ForcePass2 draws both from one camera, so they must look alike).
 void OnReShadePresent(reshade::api::effect_runtime* runtime) {
-    if (g_screenshots.exchange(0))
-        runtime->save_screenshot("ervr");
+    int left = g_screenshots.load(std::memory_order_relaxed);
+    while (left > 0 && !g_screenshots.compare_exchange_weak(left, left - 1)) {}
+    if (left > 0) runtime->save_screenshot(FramePumpCurrentPass() == 2 ? "ervr pass2" : "ervr pass1");
 }
 
 void OnFinishPresent(reshade::api::command_queue*, reshade::api::swapchain* sc) {
@@ -280,7 +283,7 @@ void ReShadeAddonShutdown() {
     LOGI("[reshade] add-on unregistered");
 }
 
-void ReShadeAddonRequestScreenshot() { g_screenshots.fetch_add(1); }
+void ReShadeAddonRequestScreenshot() { g_screenshots.fetch_add(2); }
 
 void ReShadeAddonPresentTraceStart() {
     g_traceN.store(0);

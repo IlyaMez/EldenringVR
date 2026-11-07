@@ -3,6 +3,53 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## 0.7.5 (unreleased)
+
+The second eye's pass only draws: new graces, NPCs and every other prompt answer the button as in the game
+without ERVR, two co-op crashes are gone, and a skipped boss cinematic no longer wrecks the view.
+
+### Fixes
+* New graces: the prompt showed and the press did nothing, or the touch animation played and "Rest" never
+  worked, and a death sent you back to the old grace (Paolo, MasterXploda, Willthethrill on 0.7.4). Graces, NPCs
+  and merchants run on the game's talk scripts, and ERVR's second-eye pass stepped them a second time every frame,
+  at zero time step: a press the second pass took was lost. Their logs showed it exactly - every press taken in the
+  first pass worked, every grace press taken in the second was lost. Talk scripts now step once per frame, in the
+  first pass. `[VR] Pass2TalkScripts=true` puts the old behaviour back, to compare.
+* Why interactions kept breaking, and the fix for all of them: ERVR draws the right eye by running the game's frame
+  a second time, and every interaction bug since 0.6.0 - doors (0.6.0, 0.7.0), the stuck item card (0.6.5), lifts
+  and fog walls (0.7.1-0.7.3), graces (0.7.3, 0.7.4) - was one more game system stepping in that second run. 0.7.5
+  stops it at the root: the second pass keeps only what drawing the same moment needs (the "draw-only set"). Game
+  flow, characters, damage, AI, events, menus and talk scripts step once per frame, as in the game without ERVR;
+  the world update stays (it makes the environment lighting), and so does the camera family that carries the
+  second eye's camera. Measured flat with screenshot pairs of both passes from one camera: the second eye's image
+  matches the first's, its own camera reaches the renderer, the frame rate holds. An ERVR.ini that spelled out an
+  earlier ERVR's keep sets is moved to the new ones at load (ERVR.log says so); a set of your own stays yours.
+* A prompt's press is now decided in the first pass: a prompt asked in the second pass first leaves the press for
+  its ask in the next first pass, when the game without ERVR takes it. A prompt that is only ever asked in the
+  second pass still answers there. `[VR] Pass2PromptsInPass1=false` puts 0.7.4's rule back.
+* Co-op crash after a death (2026-11-07, both players died to a boss): the second pass ran the character pipeline
+  while the other player's character loaded back in after the death reload, and the first pass then read a
+  character the second had left half-updated (the null read at `exe+0x4737ae` that August's warp crashes also
+  hit). Characters no longer step in the second pass.
+* Co-op crash when the host rests at a grace (and the one that ends a session on exit): resting reloads every
+  player's world, and the second pass ran the in-game step that tears the world down, inside its own frame
+  (`exe+0x514c4a`). The in-game step no longer runs in the second pass.
+* Checked with a forced death and the second pass running straight through the death, the teardown and the
+  respawn (the test harness's no-guards mode, where these crashes used to show): 0.7.4's sets crashed inside the
+  second pass (`exe+0x32b05a`, the player's character half torn down); 0.7.5's ran on.
+* Boss cinematics: skipping a boss's phase-2 cinematic left the view a mess - normal maps and scene buffers on the
+  HUD layer - until you died. During the cinematic the HUD looked for its UI on another render target and took a
+  10-bit scene buffer; the 2026-11-01 fix only ruled out float ones. The UI is never re-learned while a loading
+  screen or a cinematic is up, and a 10-bit offscreen target is never taken for it.
+* Launcher: unpacked into the game folder, it never said a new ERVR was out (it cannot update itself there - its
+  files are the live install), so About showed "0.7.3 is out" with no way forward. It now checks anyway, says why
+  it cannot update, and the Play tab links the download.
+
+### For testers
+* ERVR.log's 5 s `[p2watch]` line ends with "game systems stepping (pass 1/pass 2)": the talk scripts should read
+  `N/0` (stepped once), the field-area updates `N/N` (the lighting, both passes). A grace press should log
+  "accepted the interact press in pass 1".
+
 ## 0.7.4 (2026-11-06)
 
 Graces, plants and items answer the button again; lifts come when you pull their lever.

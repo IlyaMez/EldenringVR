@@ -39,15 +39,42 @@ const char* kFull060 = "0-7,10-14,16-21,27,37-38,43,45-46,48-63,65-79,81,83-84,8
 const char* kSafe060 = "0-7,10-14,16-21,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168";
 const char* kFull1625 = "0-7,10-14,16-25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168";
 const char* kSafe1625 = "0-7,10-14,16-25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168";
+const char* kFull074 = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168";
+const char* kSafe074 = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168";
+
+// Whether a keep spec ("0-7,11,20") contains group g.
+bool Keeps(const std::string& spec, int g) {
+    size_t at = 0;
+    while (at < spec.size()) {
+        const size_t comma = spec.find(',', at);
+        const std::string part = spec.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        const size_t dash = part.find('-');
+        const int lo = std::stoi(part.substr(0, dash)), hi = dash == std::string::npos ? lo : std::stoi(part.substr(dash + 1));
+        if (g >= lo && g <= hi) return true;
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+    }
+    return false;
+}
 }
 
 int main() {
     const ervr::Config defaults;
-    Check(defaults.vrPass2FullFrameKeep.find("16-21,25,27") != std::string::npos &&
-          defaults.vrPass2SafeKeep.find("16-21,25,27") != std::string::npos,
-          "the event manager (25) runs in the second eye's pass; the event scripts (22-24) do not");
+    // The draw-only sets (2026-11-07): no game flow, characters, events, damage, AI or menus in the second eye's pass;
+    // the world update (20, the environment lighting) and the full set's camera family (118, 123-125) stay.
+    for (int g : {9, 10, 12, 16, 17, 21, 22, 23, 24, 25, 27, 54, 68, 71, 74, 78, 113, 117, 120, 121, 122, 126, 130, 141})
+        Check(!Keeps(defaults.vrPass2FullFrameKeep, g) && !Keeps(defaults.vrPass2SafeKeep, g),
+              "no game logic group in the second eye's pass");
+    for (int g : {0, 11, 20, 37, 98, 106, 107, 142, 144, 155, 160, 164, 168})
+        Check(Keeps(defaults.vrPass2FullFrameKeep, g) && Keeps(defaults.vrPass2SafeKeep, g), "the draw-side groups stay");
+    for (int g : {118, 123, 124, 125})
+        Check(Keeps(defaults.vrPass2FullFrameKeep, g) && !Keeps(defaults.vrPass2SafeKeep, g),
+              "the camera family carries the second eye's camera in the full set, not in the settle window's");
+    Check(!defaults.vrPass2Characters && !defaults.vrPass2TalkScripts && defaults.vrPass2FieldUpdate &&
+          defaults.vrPass2PromptsInPass1, "characters and talk scripts once per frame; FieldArea (the lighting) in both");
 
-    for (const auto& pair : {std::make_pair(kFull060, kSafe060), std::make_pair(kFull1625, kSafe1625)}) {
+    for (const auto& pair : {std::make_pair(kFull060, kSafe060), std::make_pair(kFull1625, kSafe1625),
+                             std::make_pair(kFull074, kSafe074)}) {
         const std::string body = std::string("[VR]\r\nPass2FullFrameKeep=") + pair.first + "\r\nPass2SafeKeep=" + pair.second + "\r\n";
         const ervr::Config c = LoadFrom(body.c_str());
         Check(c.vrPass2FullFrameKeep == defaults.vrPass2FullFrameKeep, "a retired full keep set gives way to the default");

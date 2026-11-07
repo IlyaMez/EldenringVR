@@ -648,7 +648,20 @@ struct Config {
     // single-pass and doors, levers and chests died again (the event manager ran twice, the update
     // once); now both run in both passes and vrPass2RepeatPressGuard drops the repeated answer
     // instead (pass2_interact.h).
-    std::string vrPass2FullFrameKeep = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-125,127-132,141-142,144-160,164,168";
+    //
+    // 2026-11-07, the DRAW-ONLY SET: the second eye's pass keeps only what drawing the same moment needs, and no game
+    // state machine, character, damage, AI or menu steps there. Every interaction bug since 0.6.0 (doors, the item card,
+    // lifts, fog walls, graces) and both co-op crashes of 2026-11-06/07 were a game system stepping in pass 2: the
+    // character pipeline corrupting a loading co-op partner's character (null read at exe+0x4737ae, task 0x90000052, 310
+    // ms after pass 2 resumed from a co-op death reload), and InGameStep (16) running MoveMapStep's finish - the world's
+    // teardown on a host's grace rest or an exit - inside pass 2 (exe+0x514c4a reading null+0x318). Measured flat with
+    // shot pairs (both passes drawn from one camera): the image matches pass 1's, the camera family below still carries
+    // the second eye's own camera, talk scripts step once. Kept: system 0-7, the world-origin shift pair 11/160,
+    // MoveMapStep 20 (its world update makes the environment lighting, inside FieldArea's update - without it the second
+    // eye goes dark), particles 37, face gen 38, resources 45, geometry/grass 48-53, location 88/95, the renderer 98,
+    // camera step 106, draw params 107, sound 109, view distances 115, the MoveMap post-physics camera family 118 +
+    // 123-125, the UI 142, the draw 144-160, flip 164, frame end 168.
+    std::string vrPass2FullFrameKeep = "0-7,11,20,37-38,45,48-53,88,95,98,106-107,109,115,118,123-125,142,144-160,164,168";
     // SAFE variant, active during the settle window after any pass-2 guard releases (and
     // whenever a guard holds, trivially). Differs from the full set by gating ONLY the
     // GameFlowInGame_MoveMap_PostPhysics family (118, 123-125): measured 2026-08-22, that
@@ -657,14 +670,14 @@ struct Config {
     // crasher (it walks the WorldBlockChr grid and task lists, which teardown/arrival
     // rebuilds under it - the whole exe+0xc7f88b/0x3f9b2b/0x513baa/0x32b04a family).
     // Steady-state play needs it for stereo depth; the settle window must not run it.
-    std::string vrPass2SafeKeep = "0-7,10-14,16-21,25,27,37-38,43,45-46,48-63,65-79,81,83-84,86-88,95-96,98,106-109,113-117,119-122,127-132,141-142,144-160,164,168";
+    std::string vrPass2SafeKeep = "0-7,11,20,37-38,45,48-53,88,95,98,106-107,109,115,142,144-160,164,168";
     // Set by Load when the ini still carried a retired keep set it replaced (logged by ConfigLogNotes).
     std::string pass2KeepNote;
     // false = the second eye's pass skips the whole character pipeline (54-63, 65-79, 81, 83-84,
     // 113-114, 117, 127-129) and renders pass 1's poses, ~1 ms cheaper per stereo pair (2026-11-03,
-    // depth intact). Default true until it has been played: the August crash notes describe partial
-    // chr pipelines, not this whole one. Read once, at the first second pass.
-    bool vrPass2Characters = true;
+    // depth intact). The draw-only keep sets (2026-11-07) hold none of those groups, so this only
+    // matters with a keep set of the player's own. Read once, at the first second pass.
+    bool vrPass2Characters = false;
     // Seconds of SAFE keep set after the last guard releases. Was 20 (timer-guess era),
     // then 8; now 1.5 (2026-08-24 pt2, user asked for 1-2 s transitions): post-load
     // streaming is not a special state for full-set pass 2 - the open world streams
@@ -774,6 +787,23 @@ struct Config {
     // wiped the press (2026-11-06: the fog wall showed its prompt and ignored the button). true = each one asked in
     // pass 1 is asked again, unanswered, right before and after pass 2 (pass2_interact.cpp). Hot-reloads.
     bool  vrPass2KeepScriptPrompts = true;
+    // MoveMapStep's per-frame world update (2.7.2.0 +0xaf94c0, group 20). DIAGNOSTIC ONLY - it must run in both passes:
+    // the environment lighting is made inside it (FieldArea's update, below), and left out of pass 2 the second eye
+    // loses sky and ambient light and the frame rate drops (measured 2026-11-07). Counted in the census line.
+    bool  vrPass2WorldUpdate = true;
+    // FieldArea's per-frame update (2.7.2.0 +0x624710, called from MoveMapStep). DIAGNOSTIC ONLY - it must run in both
+    // passes: the environment lighting is made inside it (2026-11-07 shot pairs: left out of pass 2, the second eye went
+    // dark blue-green at ~30% brightness and the frame rate fell 72 -> 46). The talk scripts inside it are held to pass
+    // 1 on their own (Pass2TalkScripts).
+    bool  vrPass2FieldUpdate = true;
+    // The talk scripts (graces, NPCs, merchants - CSWorldTalkManImpl's update, inside FieldArea's): false = they step
+    // once per frame, in pass 1 (2026-11-07: in both passes a new grace's "Touch grace" press was taken in the second
+    // eye's pass and lost). true = both passes (0.7.4). Hot-reloads.
+    bool  vrPass2TalkScripts = false;
+    // Prompt decisions belong to pass 1 (pass2_interact.cpp): a prompt asked in pass 2 first is answered "not pressed"
+    // there and its press waits for the same prompt's ask in the next pass 1, as in the game without ERVR (0.7.4's new
+    // graces lost presses taken in pass 2). A prompt never asked in pass 1 still takes it in pass 2. Hot-reloads.
+    bool  vrPass2PromptsInPass1 = true;
     // Log what each pass changes in the interaction state (pass2_interact.h): interact presses accepted per
     // pass, the item-get popup queue, the menu's UI-element states. Capped; read once at startup.
     bool  vrPass2Watch = true;

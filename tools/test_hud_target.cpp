@@ -23,7 +23,7 @@ HudRun BackBuffer(uint64_t res, int draws) {
 
 int main() {
     Check(HudUiFormat(kR8G8B8A8), "R8G8B8A8 can hold the UI");
-    Check(HudUiFormat(kR10G10B10A2), "R10G10B10A2 can hold the UI");
+    Check(!HudUiFormat(kR10G10B10A2), "an offscreen R10G10B10A2 target is a scene buffer (normals), not the UI");
     Check(!HudUiFormat(kR11G11B10), "R11G11B10 float is a scene buffer");
     Check(!HudUiFormat(kR16G16B16A16F), "R16G16B16A16 float is a scene buffer");
 
@@ -46,6 +46,19 @@ int main() {
         int rejected = -2;
         Check(HudPickUiTarget(runs, 4, 2, kW, kH, &rejected) == -1, "cutscene: no UI target");
         Check(rejected == 1, "cutscene: the 2-draw scene buffer was passed over");
+    }
+
+    // The 2026-11-07 boss phase-2 cinematic (co-op, 1.17.2): the UI target took no draw at all, and the last
+    // full-size multi-draw run was an offscreen R10G10B10A2 buffer (3 draws) - learned as the UI, it put a normals
+    // pass on the HUD layer until the death's load. Not a UI target now; the back buffer still is.
+    {
+        const HudRun runs[] = {Target(0xa1, 6, kR11G11B10), Target(0x700e00, 3, kR10G10B10A2),
+                               BackBuffer(0xbb, 1)};
+        int rejected = -2;
+        Check(HudPickUiTarget(runs, 3, 2, kW, kH, &rejected) == -1, "cinematic: the 10-bit scene buffer is not the UI");
+        Check(rejected == 1, "cinematic: the 10-bit scene buffer was passed over");
+        const HudRun title[] = {Target(0xa1, 4, kR11G11B10), BackBuffer(0xbb, 3)};
+        Check(HudPickUiTarget(title, 2, 2, kW, kH) == 1, "a 10-bit back buffer is still taken");
     }
 
     // 1.17.2 title and loading screens: the UI on the same R8G8B8A8 target.

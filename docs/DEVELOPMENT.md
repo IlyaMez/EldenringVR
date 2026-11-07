@@ -43,6 +43,9 @@ each choice and the knobs in `ERVR.ini` that steer them. Players want the [READM
   OpenXR swapchain image and submits it. `StereoMode=cinema` shows the flat frame on a head-locked quad;
   `StereoMode=full` runs a second engine pass per frame from the other eye's camera with the simulation frozen
   (`Pass2*` in `[VR]`), so both eyes see the same instant. Menus and cutscenes fall back to the cinema quad.
+  Since 0.7.5 that second pass only draws: its keep sets hold no game state machine, character, damage, AI,
+  event or menu group, and the talk scripts inside the world update are held to the first pass at their own
+  entry (`pass2_interact.cpp`). See [What the second eye's pass runs](#what-the-second-eyes-pass-runs).
 * **Input**: `XInputGetState/Ex/SetState/GetCapabilities` are detoured (MinHook) in `xinput9_1_0`, `xinput1_3`
   and `xinput1_4`. The virtual pad is merged with any real gamepad (buttons OR'd, largest stick wins). With no real
   pad, user 0 is reported as connected.
@@ -273,6 +276,40 @@ pass 1 (the game's own frame) 5.5-5.7 ms, pass 2 ~4.6 ms of work plus `xrWaitFra
 127-129) cut pass 2 by ~1 ms with depth intact (camera hooks 450/450 in both passes); AI, damage and
 silhouettes (115-116, 119-122, 130-132) cost nothing measurable; gating 48-53 crashed at once (Geom 48-49 is a
 known landmine). A locked 120 Hz in full stereo would need ~8.3 ms per pair.
+
+### What the second eye's pass runs
+
+The second pass re-runs the engine's task queue at a near-zero time step with a keep set of task groups.
+Anything in a kept group that reacts to a press, a one-frame signal or a state change does it twice per frame,
+and that was the single cause behind 0.6.0-0.7.4's interaction bugs (doors, the stuck item card, lifts, fog
+walls, graces: each fix took one more system out) and two co-op crashes (the character pipeline corrupting a
+partner's character as it loaded back in; `InGameStep` tearing the world down inside pass 2). 0.7.5's keep sets
+are draw-only, chosen by measurement rather than by bug report:
+
+* **Tool:** with `[VR] DebugPass2Pitch=0.01` a flat `ForcePass2` run draws both passes from one camera, and the
+  autopilot's `SHOT` step saves the next two presents (`ervr pass1`/`ervr pass2`, one per pass; presents run one
+  pass behind, so the `pass1` file is pass 2's render). A correct second pass matches the first within the
+  frame-to-frame noise (~6-8% of pixels off by more than 10%); a missing producer shows as a dark or wrong image.
+  `DebugPass2Pitch=10` tilts pass 2's camera: a tilted `pass1` file proves the second eye's own camera reaches
+  the renderer. Never read the back buffer inside the present event to measure this - every such readback
+  crashed D3D12 (August's FadeGuard, and again in 2026-11's first try).
+* **Census:** `pass2_interact.cpp` counts game systems per pass in the 5 s `[p2watch]` line ("game systems
+  stepping (pass 1/pass 2)"): talk-script queries and updates, MoveMapStep's world update, FieldArea's update.
+* **What the second pass needs:** MoveMapStep (20) - its world update (exe+0xAF94C0 on 2.7.2.0) runs
+  FieldArea's update (exe+0x624710), and the environment lighting is made inside that (without it the second
+  eye lost sky, sun and ambient: the "dark eye" August's group sweeps never found, because it is no task group);
+  the camera family 118/123-125 (without it the second eye's camera never reaches the renderer: "same image in
+  both eyes" - the finalize replay alone does not carry it); particles 37, face gen 38, resources 45, geometry
+  and grass 48-53, location 88/95, the renderer 98, the camera step 106, draw params 107, sound 109, view
+  distances 115, the UI 142, the draw 144-160, flip 164, frame end 168, system 0-7 and the origin-shift pair
+  11/160.
+* **What it no longer runs:** game flow 10, 12-19, 21, 27 (InGameStep among them), the character pipeline
+  54-84/113-117/127-129, damage 120-122, AI 130-132, events 22-25, menus 126/134-136, network. Talk scripts run
+  inside FieldArea's update, so `CSWorldTalkManImpl`'s update (exe+0xEB14D0) is skipped in pass 2 by its own
+  hook (`[VR] Pass2TalkScripts`).
+* **Prompts:** the press is decided in pass 1 (`[VR] Pass2PromptsInPass1`): a prompt asked in pass 2 first has
+  the manager's taken mark (+0x80) put back and its press (+0x81) waits for the same prompt's ask in the next
+  pass 1.
 
 ## The HUD on its own floating quad (`[HUD]`)
 
