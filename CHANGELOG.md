@@ -3,7 +3,7 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## 0.7.5 (unreleased)
+## 0.7.5 (2026-11-07)
 
 The second eye's pass only draws: new graces, NPCs and every other prompt answer the button as in the game
 without ERVR, two co-op crashes are gone, and a skipped boss cinematic no longer wrecks the view.

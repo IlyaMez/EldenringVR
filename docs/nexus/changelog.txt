@@ -1,3 +1,11 @@
+0.7.5 (2026-11-07)
+
+- Interactions fixed at the root: ERVR draws the right eye by running the game's frame a second time, and every interaction bug since 0.6.0 (doors, the stuck item card, lifts, fog walls, graces) was one more part of the game reacting twice in that second run. That run now only draws; talk scripts, characters, game flow, events and menus run once per frame, as in the game without ERVR
+- New graces work again: "Touch grace" and "Rest" (the press went nowhere, or the grace lit and you couldn't rest, and death sent you back to the old grace). NPCs and merchants run on the same scripts
+- Co-op: no more crash after both players die to a boss, or when the host rests at a grace (or at the end of a session)
+- Skipping a boss's phase-2 cinematic no longer leaves the view a mess (normal maps everywhere) until you die
+- Launcher: unpacked into the game folder, it now says when a new ERVR is out and links the download (it can only update itself from its own folder)
+
 0.7.4 (2026-11-06)
 
 - Graces, plants to gather, items on the ground and dropped runes answer the button again (0.7.3 showed no prompt at a grace or plant, and item and rune prompts flickered). Boss fog walls keep working
