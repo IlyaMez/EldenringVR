@@ -54,6 +54,7 @@ uint32_t CombatTakeHapticRequests() { return 0; }
 uint16_t CombatBlockedButtons() { return combatMenu ? 0 : VP_RT; }
 uint16_t CombatHeldButtons() { return 0; }
 uint16_t CombatForcedButtons(double) { return 0; }
+uint16_t CombatSkillHeldButtons() { return 0; }
 WheelPadOut wheelOut;
 WheelPadOut WeaponWheelUpdate(const VRTracking&, const VRInputState&, double, bool) { return wheelOut; }
 BeltPadOut beltOut;

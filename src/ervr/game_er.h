@@ -103,6 +103,12 @@ bool GameERRiding();
 bool GameERBladeWorld(int hand, Vec3* grip, Vec3* tip);
 // A character's rendered position (its ChrCtrl model matrix), for distances to it. Any thread; SafeRead only.
 bool GameERChrPosition(uint8_t* chr, Vec3* out);
+// A character's physics position and facing yaw (forward = (sin yaw, 0, cos yaw)) - what the game's own throw
+// (backstab / riposte) checks measure. Any thread; SafeRead only.
+bool GameERChrPhysics(uint8_t* chr, Vec3* pos, float* yaw);
+// Game thread, from a TAE hook: write the live cast aim (lock flag + target, aim view matrix) at once, so a bullet
+// spawned by the event that armed it already flies along it.
+void GameERApplyCastAimNow();
 
 // ---- camera ownership -------------------------------------------------------------
 // With CameraYawSource=ervr the view yaw is ours, not the game's: virtual_pad feeds turn input in here and

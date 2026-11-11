@@ -24,9 +24,21 @@ inline bool MovementCancelOpen(uint32_t tae, bool queueMode, int32_t currentTae,
     return false;
 }
 
+constexpr uint64_t kDodgeRequests = (1ull << 5) | (1ull << 16) | (1ull << 17);
+constexpr uint64_t kDodgeModifier = 1ull << 1;
+
+// A dodge is the game's free movement: the body turns toward the move stick as the roll starts, then rolls
+// straight ahead. The strafe flag (ChrCtrl unlocked = 0) holds the body where it faces, so with it held every
+// roll went where you look whatever the stick said. From the button's press (the game's dodge request, or ERVR's
+// own B while the game has not seen it yet) through the roll's start, the flag is left to the game - erfps2 lets
+// go of its lock state the same way while an action request is pending.
+inline bool DodgeOwnsMovement(const MovementFacingState& s, bool dodgeSprintDown) {
+    return dodgeSprintDown || (s.valid && ((s.requests & kDodgeRequests) || (s.modifiers & kDodgeModifier)));
+}
+
 inline bool CanPinMovementFacing(const MovementFacingState& s, bool dodgeSprintDown) {
-    constexpr uint64_t dodgeRequests = (1ull << 5) | (1ull << 16) | (1ull << 17);
-    constexpr uint64_t dodgeOrNoTurning = (1ull << 1) | (1ull << 15);
+    constexpr uint64_t dodgeRequests = kDodgeRequests;
+    constexpr uint64_t dodgeOrNoTurning = kDodgeModifier | (1ull << 15);
     // Leave native facing alone from the button press through startup, active
     // motion and recovery. Unknown game state must also leave physics alone.
     return s.valid && s.movementCancelable && !dodgeSprintDown &&

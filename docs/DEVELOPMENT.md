@@ -512,6 +512,51 @@ put you in. While two-handed:
   its two-handed attack and the hook learns the row (`[combat] learned light-2h attack: judgeId ...`), pinnable via
   `TwoHandLightJudgeId` / `TwoHandHeavyJudgeId`; an unknown row falls back to the one-handed one.
 
+**The skill trigger, one-handed** (`combat_moves.h` `SkillTrigger`). `OneHandSkill=true`: the same control holds the
+game's `SkillButton` for exactly as long as it is held (`CombatSkillHeldButtons`, applied after the attack-button
+block), so stances and charged skills work; the left grip could only tap it (a held grip is the weapon wheel). Not
+with a staff, seal or bow in that hand (the trigger casts). While it holds, a swing is no injected strike: with
+`StanceSwings` the attacking hand's swing presses the game's light/heavy attack - the stance's follow-up
+(`StanceSwing`). It is judged by the gated swing's thresholds (`SwingOnSpeed` tip + `MinHandSpeed` hand, then
+`ArmWindow` for light vs `HeavySwingSpeed`), never the live contact's `ContactOnSpeed`: at 0.8 m/s the first
+in-headset test pressed R1 on any drift of the held blade. The blade must rest (under `SwingOffSpeed`) and 0.5 s
+pass between presses, and the first waits 0.15 s into the hold. The HKS returns to the stance after a follow-up
+while L2 stays held (`DrawStanceRightAttackLight` -> `DrawStanceRightLoop` on `ActionDuration(ACTION_ARM_L2) > 0`),
+so one hold follows up repeatedly. No input gate of ours: the game queues a press only while the animation allows
+it (`queued_action_inputs` = new presses AND `possible_action_inputs`). In the player's queue mode the input-queue
+entries record presses made, not inputs allowed (flat-measured: 0 at idle). Where the swing aims (`SkillAim=swing`):
+`StanceSwing` sums the tip's horizontal offset from the head (tracking space) weighted by tip speed, from where it
+rose past `SwingOffSpeed` (a pre-roll fading over 0.3 s) through the press to where it slows under it again - after
+the trigger is let go too - so the mean is the middle of the arc. (Test 2 averaged the blade's direction instead:
+upright blades made the sideways tilt decide, and the late start pulled every forehand left.) At the press
+`ArmSwingAim` makes the cast aim live for 1 s along it (`CombatCastAimKind` 1); `CastAimRay` turns it into a world
+ray from the weapon hand (`SwingAimDirection`: the swing's yaw, the head's pitch clamped to 45 deg), and the
+existing cast-aim path forces the lock target down it, so the game turns the follow-up toward it and its bullet aims
+at it. A bullet event within 1.5 s re-arms it. The published aim is turned in to `SwingAimMaxDeg` of the view
+(`ClampTowardView`), and a swing whose tip has moved more than 15 deg further from the view since it started (and
+is beyond 30 deg) does not press: it is re-checked each arm window, its early part fading, and presses once it comes
+round (test 3: the presses that flew 41-174 deg off were slow swings to the right - wind-ups). A melee bullet with no
+swing before it aims along the hand's ray (`CastAimAxis`, like a staff); `SkillAim=head` leaves both to the game. An aim armed inside
+a TAE event (a bullet arming its own aim) is written at once (`GameERApplyCastAimNow`: flag, lock target, aim view
+matrix) before the event runs, since the bullet spawns inside that event; it used to reach the game at the next
+camera step, and the bullet left along the head's aim matrix from the eye. Locked on
+to a real enemy, cast aim stands aside. The skill button's hand follows the HKS `GetSwordArtInfo` (`SkillHand`:
+one-handed, the left only for a shield or bow).
+
+**Criticals** (`combat_moves.h` `ThrowRowMatches`, `CriticalsFrame`). Backstabs and ripostes are the engine's throw
+system: on R1 it matches `ThrowParam` rows for (attacker chr id, defender chr id) - `Dist`, the height window,
+`DiffAngMin/Max` (attacker facing vs defender facing) and `diffAngMyToDef` (attacker facing vs the direction to the
+defender), plus a `*_start` set - and plays the paired animation. ERVR loads the player's rows (`AtkChrId 0`, holder
+found by struct name, 0x80 bytes) and matches every enemy within 4 m each frame from the physics position and facing;
+`PadType 1` rows only. The game's data, logged at load: 1604 player rows on 264 enemy kinds; `throwType` 1 (130 rows,
+facings -90..90 plus a start window of +-45 deg / 1.5 m) are the backstabs; 0 (any facing), 20 (90..-90, a window that
+wraps through 180 = face to face) and 22-25 (side sectors) need the enemy parried or stance-broken. A type-1 row whose
+narrower start window holds is the candidate, and it turns the next swing of the attacking hand into the game's light
+attack (`Criticals=backstab`); the player's
+`CSThrowNode.throw_state` (modules +0x88 -> +0x10 -> +0x68, owners checked both ways) says whether the game took it.
+Face-to-face rows (ripostes) need the enemy's "can be thrown" state, which is not read yet: with `Debug=true` they
+log the enemy's throw-module words (+0x18..+0x2F) on change, to find it from a parry.
+
 **The Ash of War.** With both hands on the weapon, `TwoHandSkillButton` (default `RTrigger`: RB is blocked in
 physical combat anyway, so the right trigger is free) fires the weapon's skill. `TwoHandSkill=game` just sends the
 skill button. `TwoHandSkill=effect` (default) gives you **the effect without the animation**, and this is where
@@ -527,8 +572,9 @@ calls (slot 2 for generic events, slot 3 for behaviors), with a stable args copy
   (`SkillButton`, forced through the block) and both TAE hooks record every event the player runs for
   `SkillRecordSeconds`: id, a copy of the args, first/last execution time, `*animTime`. That recording is kept for
   the session (`[combat] skill recorded for weapon W arts A: ...` lists them; `Debug=true` prints each one as it is
-  seen). Every later press replays it. Hold the trigger `TwoHandSkillRelearnHold` s to play it the game's way again
-  and re-record (after swapping the ash, or if a replay misses something). Only ids in `SkillReplayEvents` are
+  seen). Every later tap replays it. Hold the trigger past `SkillHoldSeconds` (0.3 s) and the pad holds `SkillButton`
+  for the game as long as the trigger is held - the game's own skill, held - and it is recorded again (after swapping
+  the ash, or if a replay misses something). Only ids in `SkillReplayEvents` are
   replayed; add one from the `skill rec:` lines if a particular skill needs it.
 * **Attack skills** (Stamp, Lion's Claw, Square Off...). The skill's own `AttackBehavior` is *not* replayed at its
   recorded time: you are not swinging then. It **arms your next swing** for `SkillSwingWindow` seconds with the

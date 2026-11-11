@@ -273,7 +273,11 @@ uint8_t g_lastMmRaw = 0xFF, g_lastMmCursor = 0xFF, g_lastHudRaw = 0xFF;
 const char* g_lastVia = "";
 
 constexpr int kMenuManImpState     = 0x1C;   // CSMenuManImp: bit 0x10 = a menu is open (measured)
-constexpr int kMenuManImpStateBit  = 0x10;
+// Bit 0x20: a site of grace's menu (and a talk menu) is open. Three players' 0.7.5 logs: it rises within 40 ms of
+// every grace "Rest" press (action buttons 6000/6280) and falls when the menu closes 10-25 s later, while 0x10 and
+// the HUD reader stay "closed" - so ERVR kept turning the view with the right stick and treating the left stick
+// as walking there, and the menu only moved with the left stick click held (Paolo, 2026-11-07).
+constexpr int kMenuManImpStateBit  = 0x10 | 0x20;
 constexpr int kMenuManImpCursor    = 0xAC;   // CSMenuManImp.ui_states[0x1C]: cursor element (bit1 = visible)
 constexpr int kFeManHudState       = 0x78;   // CSFeManImp.hud_state
 
@@ -410,7 +414,8 @@ static void MenuScanTick(double now) {
     }
 }
 
-// menuman reader: CSMenuManImp+0x1C bit 0x10; the cursor element state rides along for the log.
+// menuman reader: CSMenuManImp+0x1C bits 0x10 (menus) and 0x20 (grace and talk menus); the cursor element state
+// rides along for the log.
 static int MenuManOpen(uint8_t* raw, uint8_t* cursor) {
     uint8_t* obj = LiveObject(g_menuManImp, g_menuManImpVt);
     uint8_t v = 0, cur = 0;

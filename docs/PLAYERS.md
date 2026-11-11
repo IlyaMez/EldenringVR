@@ -95,13 +95,13 @@ Defaults for Quest Touch controllers. Every button is a key in `ERVR.ini` (`[But
 
 | Control | What it does |
 |---|---|
-| Swing the right hand | Attack with the right weapon. The swing is the hitbox: faster hits harder, a full windup hardest |
+| Swing the right hand | Attack with the right weapon. The swing is the hitbox: faster hits harder, a full windup hardest. Behind an enemy that can be backstabbed, the swing is the game's backstab |
 | Swing the left hand | Attack with the left weapon |
 | Shield raised in front | Block with a shield in the left hand; moving the shield into a hit deflects it |
 | Left trigger | Guard |
 | Free hand on the hilt, squeeze its grip | Two-hand the weapon; open the grip to let go |
-| Right trigger, while two-handing | The weapon's skill (Ash of War), without its animation |
-| Left grip | Skill |
+| Right trigger | The skill (Ash of War), held for as long as you hold it: stances (swing for the follow-up) and charged skills work. Two-handed, a tap plays the skill's effect without its animation |
+| Left grip, quick squeeze | Skill (a tap) |
 | A grip held, hand still | The weapon wheel: that hand's weapons around it; let go over one to switch to it, in the middle to keep yours |
 | A grip closed at your belt | Take that pouch item; X uses it, opening the hand puts it back |
 | Cast with a staff, seal or bow | The trigger casts; the spell or arrow flies where the casting hand points |
@@ -109,16 +109,27 @@ Defaults for Quest Touch controllers. Every button is a key in `ERVR.ini` (`[But
 
 With physical melee on, the triggers and grips never press the game's attack buttons: those would play attack
 animations that pull your arms. A staff, seal or bow in the attacking hand lets the trigger through, so it
-casts.
+casts (and the right trigger is no skill button in that hand). Two swings are the game's own on purpose: a
+swing while you hold the skill (a stance's follow-up), and a swing behind an enemy that can be backstabbed.
 
 **Two-handing.** Put your free hand on the hilt of the weapon in your other hand and squeeze its grip. You
 stay two-handed for as long as the grip stays squeezed, wherever your hands move, and opening it lets go. The
 squeeze must be fresh: a grip already closed when the hand arrives is ignored, so guarding never grabs.
 
-**The Ash of War.** The first time you fire a weapon's skill, ERVR lets the game play it and records what the
-skill does; every later press plays that effect at once, with no animation and no lock. An attack skill arms
-your next swing instead, so the strike you make is the skill's. Hold the trigger for a moment to play it the
-game's way again (after swapping the ash, say).
+**The Ash of War.** Hold the right trigger and the game holds the skill with you, for exactly as long as you
+hold it: a stance waits for your swing (a real swing is its light follow-up, a hard one its heavy; let the
+blade settle before the next one), a charged skill lets go when you do. A stance's projectile, like Moonveil's
+wave, flies where your swing aimed: slash across an enemy and it flies at that enemy. Drawing the sword back to
+wind up is not a follow-up; the swing after it is. A skill that fires the moment you pull the trigger, like
+Reduvia's blood blades, flies where your weapon arm aims. Two-handed, a tap is quicker: the first time you tap a weapon's skill, ERVR lets
+the game play it and records what the skill does; every later tap plays that effect at once, with no animation
+and no lock. An attack skill arms your next swing instead, so the strike you make is the skill's. Hold the
+trigger past a third of a second for the game's own skill, held (after swapping the ash, say).
+
+**Backstabs.** Swing at an enemy's back, close and facing it, and the game plays its backstab, with its own
+damage. ERVR checks the game's own critical table for that enemy before it lets the swing be the game's light
+attack; an enemy that is mid-attack cannot be backstabbed and takes a normal light attack instead. Ripostes
+after a parry are not in yet.
 
 **The weapon wheel.** Hold a grip with that hand still and the hand's weapon slots open around it, with the
 game's own icons. Move over one and let go to switch; let go in the middle to switch nothing. A short squeeze

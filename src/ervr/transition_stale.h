@@ -44,13 +44,30 @@ public:
     }
     void Clear() { count_ = 0; head_ = 0; }
 
+    // What the last judgement saw, for the log: a signal that never goes stale says which test held it.
+    struct Stats {
+        float path = 0.f, net = 0.f, igtRate = 0.f, pushShare = 0.f;
+        uint64_t spanMs = 0;
+        int samples = 0;
+        bool newestOk = false, bigStep = false;
+    };
+
     // Walking over the last kSpanMs (newest sample at or before nowMs). Out: path length and clock rate.
-    bool Walking(uint64_t nowMs, float* pathOut = nullptr, float* igtRateOut = nullptr) const {
-        if (pathOut) *pathOut = 0.f;
-        if (igtRateOut) *igtRateOut = 0.f;
+    bool Walking(uint64_t nowMs, float* pathOut = nullptr, float* igtRateOut = nullptr, Stats* stats = nullptr) const {
+        Stats st;
+        const bool w = Judge(nowMs, st);
+        if (pathOut) *pathOut = st.path;
+        if (igtRateOut) *igtRateOut = st.igtRate;
+        if (stats) *stats = st;
+        return w;
+    }
+
+private:
+    bool Judge(uint64_t nowMs, Stats& st) const {
         if (count_ < 2) return false;
         const WalkSample* newest = &At(count_ - 1);
         if (!newest->valid || newest->ms > nowMs || nowMs - newest->ms > 500) return false;
+        st.newestOk = true;
         // Walk back to the oldest sample inside the span; every sample in it must be valid.
         int first = count_ - 1;
         while (first > 0) {
@@ -60,6 +77,7 @@ public:
         }
         const WalkSample& oldest = At(first);
         const uint64_t span = newest->ms - oldest.ms;
+        st.spanMs = span;
         if (span + 500 < kSpanMs) return false;   // not enough history yet
         float path = 0.f;
         int pushing = 0, n = 0;
@@ -70,19 +88,18 @@ public:
             if (i == first) continue;
             const WalkSample& p = At(i - 1);
             const float step = Dist(p, s);
-            if (step > kMaxStep) return false;
+            if (step > kMaxStep) st.bigStep = true;
             path += step;
         }
         const float net = Dist(oldest, *newest);
         const float rate = newest->igtMs >= oldest.igtMs
                                ? (float)(newest->igtMs - oldest.igtMs) / (float)(span ? span : 1) : 0.f;
-        if (pathOut) *pathOut = path;
-        if (igtRateOut) *igtRateOut = rate;
-        return path >= kMinPath && net >= kMinNet && rate >= kMinIgtRate &&
+        st.path = path; st.net = net; st.igtRate = rate; st.samples = n;
+        st.pushShare = n ? (float)pushing / (float)n : 0.f;
+        return !st.bigStep && path >= kMinPath && net >= kMinNet && rate >= kMinIgtRate &&
                (float)pushing >= kMinPushing * (float)n;
     }
 
-private:
     // i = 0 is the oldest sample held.
     const WalkSample& At(int i) const { return ring_[(head_ - count_ + i + kSamples) % kSamples]; }
     static float Dist(const WalkSample& a, const WalkSample& b) {

@@ -41,6 +41,9 @@ bool CombatMenuActive(); // published menu state, independent of the combat Menu
 // skill button, a learn press) - applied AFTER the attack-button block. Worker thread; drives the
 // chord timing, so call it exactly once per pad update.
 uint16_t CombatForcedButtons(double now);
+// The game's skill button while ERVR holds it for the player (the skill trigger held: a stance, a charged skill),
+// applied after the attack-button block like the forced ones. VP_LT / VP_RT are the analog pseudo bits.
+uint16_t CombatSkillHeldButtons();
 // Off-hand ride: while two-handing, the free hand's arm target sits on the weapon hand's hilt axis,
 // `alongToPommel` metres from that controller toward the pommel - down the controller's handle
 // (-Y) when `handleAxis`, else back along its aim axis (+Z). Optional `grip` receives
@@ -67,6 +70,10 @@ void CombatNotifyPad(uint16_t gameMask, double now);
 // *casting = a press made it so within CastAimSeconds (the body turns to the ray, the lock target may be
 // forced, only then); a hand that merely holds a catalyst/bow aims passively. Any thread, atomics only.
 int CombatCastAimHand(bool* casting);
+// What the live cast aims along (CastAimRay): 0 = the hand's ray (CastAimAxis: a staff, seal or bow, and a melee skill
+// with no swing before it), 1 = where a stance follow-up's swing aimed (SkillAim=swing; *swingTracking = the middle of
+// its arc, a horizontal unit vector in the runtime's tracking space, OpenXR axes).
+int CombatCastAimKind(Vec3* swingTracking);
 // Haptic requests raised by the game-thread side (stamina empty, swing armed); worker drains them.
 // Returns a bitmask: bit0 = left hand, bit1 = right hand, bit2/3 = "fail" flavour for left/right,
 // bit4 = blocked hit (left), bit5 = deflect (left).

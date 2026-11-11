@@ -356,7 +356,15 @@ void Config::Load(const std::wstring& path) {
     twoHandSkill = GetS(ini, L"Combat", L"TwoHandSkill", twoHandSkill);
     twoHandSkillButton = GetS(ini, L"Combat", L"TwoHandSkillButton", twoHandSkillButton);
     skillButton = GetS(ini, L"Combat", L"SkillButton", skillButton);
-    twoHandSkillRelearnHold = GetF(ini, L"Combat", L"TwoHandSkillRelearnHold", twoHandSkillRelearnHold);
+    oneHandSkill = GetB(ini, L"Combat", L"OneHandSkill", oneHandSkill);
+    skillHoldSeconds = GetF(ini, L"Combat", L"SkillHoldSeconds", skillHoldSeconds);
+    stanceSwings = GetB(ini, L"Combat", L"StanceSwings", stanceSwings);
+    skillAim = GetS(ini, L"Combat", L"SkillAim", skillAim);
+    swingAimMaxDeg = Clamp(GetF(ini, L"Combat", L"SwingAimMaxDeg", swingAimMaxDeg), 0.f, 180.f);
+    if (skillAim != "swing" && skillAim != "head" && skillAim != "hand") skillAim = "swing";
+    criticals = GetS(ini, L"Combat", L"Criticals", criticals);
+    // 0.7.5's "hold 1 s to relearn" is the held skill now (SkillHoldSeconds).
+    retiredRelearnHold = !GetS(ini, L"Combat", L"TwoHandSkillRelearnHold", "").empty();
     skillReplayEvents = GetS(ini, L"Combat", L"SkillReplayEvents", skillReplayEvents);
     skillRecordSeconds = GetF(ini, L"Combat", L"SkillRecordSeconds", skillRecordSeconds);
     skillSwingWindow = GetF(ini, L"Combat", L"SkillSwingWindow", skillSwingWindow);
@@ -434,6 +442,7 @@ void Config::Load(const std::wstring& path) {
     fpLockTargetDistance = GetF(ini, L"FirstPerson", L"LockTargetDistance", fpLockTargetDistance);
     fpArmRootSource = GetS(ini, L"FirstPerson", L"ArmRootSource", fpArmRootSource);
     fpPinBodyFacing = GetB(ini, L"FirstPerson", L"PinBodyFacing", fpPinBodyFacing);
+    dodgeFollowsStick = GetB(ini, L"FirstPerson", L"DodgeFollowsStick", dodgeFollowsStick);
     fpPoseAfterHavok = GetB(ini, L"FirstPerson", L"PoseAfterHavok", fpPoseAfterHavok);
     fpLatchVRPerFrame = GetB(ini, L"FirstPerson", L"LatchVRPerFrame", fpLatchVRPerFrame);
     fpCameraFinalWrite = GetB(ini, L"FirstPerson", L"CameraFinalWrite", fpCameraFinalWrite);
@@ -559,5 +568,9 @@ void ConfigLogNotes() {
         LOGI("[config] [VR] Pass2ActionButtons in ERVR.ini is 0.7.0's and no longer read: the action-button update "
              "runs in both passes again (doors, levers, chests), Pass2ActionButtonUpdate=false would skip it. Delete "
              "the line to stop this note.");
+    if (g_cfg.retiredRelearnHold)
+        LOGI("[config] [Combat] TwoHandSkillRelearnHold in ERVR.ini is no longer read: holding the skill trigger past "
+             "SkillHoldSeconds (0.3 s) is the game's own skill, held for as long as you hold the trigger, and it is "
+             "recorded again. Delete the line to stop this note.");
 }
 }

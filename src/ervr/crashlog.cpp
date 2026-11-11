@@ -27,6 +27,9 @@ bool Fatal(DWORD c) {
         case EXCEPTION_IN_PAGE_ERROR:
         case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
         case EXCEPTION_DATATYPE_MISALIGNMENT:
+        // int3 / __debugbreak: a runtime's assert. Players on Meta's runtime 1.208 ended with 0x80000003 inside
+        // xrCreateSession and no line said whose (2026-11-07..11); a handled one is logged too, capped like the rest.
+        case EXCEPTION_BREAKPOINT:
             return true;
         default:
             return false;
@@ -44,6 +47,7 @@ const char* Name(DWORD c) {
         case EXCEPTION_IN_PAGE_ERROR:         return "IN_PAGE_ERROR";
         case EXCEPTION_ARRAY_BOUNDS_EXCEEDED: return "ARRAY_BOUNDS_EXCEEDED";
         case EXCEPTION_DATATYPE_MISALIGNMENT: return "DATATYPE_MISALIGNMENT";
+        case EXCEPTION_BREAKPOINT:            return "BREAKPOINT (a runtime's assert; fatal unless something handles it)";
         default:                              return "?";
     }
 }
@@ -79,6 +83,30 @@ volatile bool     g_selfTesting = false;
 // __try is legal (no non-POD locals anywhere near it).
 bool SafeRead64(const uint64_t* p, uint64_t* out) {
     __try { *out = *p; return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// The faulting thread's call chain by real x64 unwinding, every module named (the raw stack scan below only
+// names the game's own frames, and a fault inside a VR runtime, ReShade or a driver needs the DLL's name).
+// Its own function: no C++ objects near the __try.
+int UnwindFrames(const CONTEXT* from, void** out, int cap) {
+    int n = 0;
+    __try {
+        CONTEXT c = *from;
+        for (; n < cap && c.Rip; ++n) {
+            out[n] = (void*)c.Rip;
+            DWORD64 imageBase = 0;
+            PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &imageBase, nullptr);
+            if (!fn) {   // leaf function: the return address is at rsp
+                c.Rip = *(DWORD64*)c.Rsp;
+                c.Rsp += 8;
+            } else {
+                void* handlerData = nullptr; DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, c.Rip, fn, &c, &handlerData, &establisher, nullptr);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return n;
 }
 
 // A user-space heap/stack pointer worth dereferencing?
@@ -293,6 +321,13 @@ LONG CALLBACK Veh(EXCEPTION_POINTERS* xp) {
                           (unsigned long long)(v - (uintptr_t)g_base));
     }
     LOGE("%s", line);
+    {
+        void* frames[20] = {};
+        const int n = UnwindFrames(xp->ContextRecord, frames, 20);
+        int q = snprintf(line, sizeof(line), "[crash] frames:");
+        for (int i = 0; i < n && q < (int)sizeof(line) - 80; ++i) q += Sym(line + q, (int)sizeof(line) - q, frames[i]);
+        LOGE("%s", line);
+    }
 
     s_inside = false;
     return EXCEPTION_CONTINUE_SEARCH;   // log only; never change what the game does

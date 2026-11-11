@@ -488,6 +488,10 @@ void VirtualPadUpdate(double now) {
         const uint16_t forced = CombatForcedButtons(now);
         if (forced & VP_LT) lt = 255; if (forced & VP_RT) rt = 255;
         held |= forced & ~(VP_LT | VP_RT);
+        // The skill trigger held: the game's skill button stays down with it (stances, charged skills).
+        const uint16_t skill = CombatSkillHeldButtons();
+        if (skill & VP_LT) lt = 255; if (skill & VP_RT) rt = 255;
+        held |= skill & ~(VP_LT | VP_RT);
     }
     pulses &= ~(VP_LT | VP_RT);
     held &= ~(VP_LT | VP_RT);

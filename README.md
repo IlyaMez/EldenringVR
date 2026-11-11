@@ -65,8 +65,11 @@ your hands, and melee where the swing you make is the attack. One zip, one launc
   weight: a head-heavy one is slower to turn than a balanced one.
 - **A shield that blocks.** Raise the shield in front of you to block; move it into a blow to deflect it.
 - **Two-hand by grabbing the hilt.** Put your free hand on the hilt and squeeze: the game two-hands the
-  weapon, strength bonus and all. The right trigger then fires its Ash of War, the effect without the
-  animation.
+  weapon, strength bonus and all. A tap of the right trigger then fires its Ash of War, the effect without
+  the animation.
+- **Ash of War on the right trigger.** Hold it and the game holds the skill with you: stances (swing for the
+  follow-up), charged skills, released when you let go.
+- **Backstabs.** Swing behind an enemy that can be backstabbed and the game plays its critical.
 - **Spells and arrows go where your hand points.** Cast with a staff or a seal, or loose an arrow, and it
   flies along the casting hand.
 - **A weapon wheel in each hand.** Hold a grip with the hand still: that hand's weapons open around it with
@@ -189,10 +192,10 @@ ERVR needs no other mod and does not use R.E.A.L. VR.
 | Dodge, sprint / jump | **B**, hold to sprint / **A** |
 | Crouch / lock on | **Left stick click** / **right stick click** |
 | Quick slots (the D-pad) | Hold the **left stick click** and tilt |
-| Attack | Swing the weapon. Faster hits harder; the left hand attacks with the left weapon |
+| Attack | Swing the weapon. Faster hits harder; the left hand attacks with the left weapon. Behind an enemy, a swing backstabs |
 | Block, deflect | Raise the shield in front of you; move it into a blow to deflect it. **Left trigger** guards |
 | Two-hand | Put your free hand on the hilt and squeeze its **grip**; open it to let go |
-| Ash of War | **Right trigger** while two-handing; otherwise the **left grip** |
+| Ash of War | **Right trigger**: held, the game holds it (stances, charged skills); a quick **left grip** squeeze taps it too |
 | Switch weapons | Hold a **grip** with the hand still, move over a weapon and let go |
 | Cast, shoot | **Trigger** with a staff, seal or bow in that hand: it flies where the hand points |
 | Use item / interact (open, pick up, talk) | **X** / **Y** |

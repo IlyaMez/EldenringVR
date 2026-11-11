@@ -48,5 +48,20 @@ int main() {
     Check(!CanPinMovementFacing(s, false), "TAE turn restrictions must survive movement recovery");
     s.modifiers = 0;
     Check(CanPinMovementFacing(s, false), "walking alignment resumes once the native action permits it");
+
+    // The strafe flag lets go for a dodge: the game turns the body toward the stick only in free movement.
+    MovementFacingState d;
+    Check(!DodgeOwnsMovement(d, false), "unknown game state keeps the strafe flag");
+    Check(DodgeOwnsMovement(d, true), "ERVR's own B press frees the turn before the game has seen it");
+    d.valid = true;
+    Check(!DodgeOwnsMovement(d, false), "ordinary walking keeps the strafe flag");
+    for (uint64_t request : {1ull << 5, 1ull << 16, 1ull << 17}) {
+        d.requests = request;
+        Check(DodgeOwnsMovement(d, false), "a dodge request frees the turn toward the stick");
+    }
+    d.requests = 0; d.modifiers = 2;
+    Check(DodgeOwnsMovement(d, false), "the roll's start keeps the turn free");
+    d.modifiers = 1ull << 15;
+    Check(!DodgeOwnsMovement(d, false), "after the roll's start the strafe flag comes back (turning is locked anyway)");
     std::puts("Directional dash/roll facing regression checks passed.");
 }

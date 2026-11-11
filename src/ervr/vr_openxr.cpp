@@ -31,6 +31,45 @@ namespace {
 
 std::recursive_mutex g_mtx;
 
+// The OpenXR API layers on this machine, once per run. An implicit layer (OpenXR Toolkit, a capture or overlay
+// layer, a vendor's tracking layer) loads into every OpenXR app and runs inside xrCreateSession; players on Meta's
+// runtime 1.208 stopped with 0x80000003 there (2026-11-07..11) and nothing in the log said what else was loaded.
+void LogApiLayersOnce() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    std::string line;
+    const struct { HKEY root; const wchar_t* hive; } hives[] = {{HKEY_LOCAL_MACHINE, L"HKLM"}, {HKEY_CURRENT_USER, L"HKCU"}};
+    for (const auto& h : hives) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(h.root, L"SOFTWARE\\Khronos\\OpenXR\\1\\ApiLayers\\Implicit", 0, KEY_READ, &key) != ERROR_SUCCESS)
+            continue;
+        for (DWORD i = 0;; ++i) {
+            wchar_t name[512]; DWORD nameLen = 512, type = 0, data = 0, dataLen = sizeof(data);
+            if (RegEnumValueW(key, i, name, &nameLen, nullptr, &type, (BYTE*)&data, &dataLen) != ERROR_SUCCESS) break;
+            char utf8[1024] = {};
+            WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8, sizeof(utf8) - 1, nullptr, nullptr);
+            line += line.empty() ? "" : "; ";
+            line += (h.hive == std::wstring(L"HKLM") ? "HKLM " : "HKCU ");
+            line += utf8;
+            line += (type == REG_DWORD && data == 0) ? " (on)" : " (off)";
+        }
+        RegCloseKey(key);
+    }
+    LOGI("[xr] implicit API layers registered: %s", line.empty() ? "none" : line.c_str());
+    uint32_t n = 0;
+    if (XR_SUCCEEDED(xrEnumerateApiLayerProperties(0, &n, nullptr)) && n) {
+        std::vector<XrApiLayerProperties> props(n, {XR_TYPE_API_LAYER_PROPERTIES});
+        if (XR_SUCCEEDED(xrEnumerateApiLayerProperties(n, &n, props.data()))) {
+            std::string names;
+            for (uint32_t i = 0; i < n; ++i) { names += i ? ", " : ""; names += props[i].layerName; }
+            LOGI("[xr] API layers the loader offers: %s", names.c_str());
+        }
+    } else {
+        LOGI("[xr] API layers the loader offers: none");
+    }
+}
+
 const char* XrStr(XrResult r) {
     switch (r) {
     case XR_SUCCESS: return "XR_SUCCESS";
@@ -721,6 +760,7 @@ private:
     }
 
     bool CreateInstance() {
+        LogApiLayersOnce();
         uint32_t n = 0;
         if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &n, nullptr))) return false;
         std::vector<XrExtensionProperties> props(n, {XR_TYPE_EXTENSION_PROPERTIES});

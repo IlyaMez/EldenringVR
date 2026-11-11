@@ -22,6 +22,7 @@
 #include "midhook.h"
 #include "rtti.h"
 #include "combat.h"
+#include "combat_moves.h"
 #include "frame_probe.h"
 #include "stereo.h"
 #include "belt.h"
@@ -301,12 +302,21 @@ bool WorldDyingNow() {
     if (now >= next && s_next.compare_exchange_strong(next, now + 30)) {
         const bool d = GameERWorldDying();
         const bool was = s_val.load(std::memory_order_relaxed);
+        // Which signal holds it, logged on every change, so a stand-down that never ends names its cause.
+        static std::atomic<int> s_why{0};
+        const int why = !d ? 0 : GameERPlayerDead() ? 1 : GameERLoadingScreen() ? 2
+                      : GameERCoopConnecting(Cfg().vrPass2CoopGraceSeconds) ? 3 : 4;
+        static const char* const kWhy[] = {"", "player dead (HP 0)", "loading-screen byte", "co-op connecting",
+                                           "warp requested (or its grace)"};
         if (d && !was) {
             g_followCamPtr.store(nullptr, std::memory_order_relaxed);
-            LOGI("[guard] world dying - game-state writes stand down (camera/pose/facing)");
+            LOGI("[guard] world dying - game-state writes stand down (camera/pose/facing): %s", kWhy[why]);
         } else if (!d && was) {
             LOGI("[guard] world stable - game-state writes resume");
+        } else if (d && why != s_why.load(std::memory_order_relaxed)) {
+            LOGI("[guard] world still dying, now held by: %s", kWhy[why]);
         }
+        s_why.store(why, std::memory_order_relaxed);
         s_val.store(d, std::memory_order_relaxed);
     }
     return s_val.load(std::memory_order_relaxed);
@@ -1121,13 +1131,32 @@ struct FrameInfo {
 // (CastAimAxis=aim) or up its handle (=handle, the staff's own direction), tilted by CastAimPitchOffsetDeg.
 bool CastAimRay(const FrameInfo& f, int h, Vec3& origin, Vec3& dir) {
     const Config& c = Cfg();
-    if (h < 0 || h > 1 || !f.handValid[h]) return false;
     const Quat baseQ = Quat::YawQ(f.baseYaw);
+    Vec3 sw;
+    const int kind = CombatCastAimKind(&sw);
+    // A stance follow-up's projectile (SkillAim=swing): along the middle of the swing's arc, at the height you look.
+    // The ray's far point is the forced lock target the follow-up turns to and its bullet aims at; it starts at the
+    // weapon hand (the eye without one) - a ray from the eye is a projectile seen leaving your face.
+    if (kind == 1) {
+        const Vec3 s = baseQ.Rotate(ToGame(sw));
+        float headPitch = 0.f;
+        if (f.headValid) { const Vec3 hf = (baseQ * f.headQ).Rotate({0, 0, 1}); headPitch = std::asin(std::fmax(-1.f, std::fmin(1.f, hf.y))); }
+        float dx, dy, dz;
+        SwingAimDirection(s.x, s.y, s.z, WrapPi(f.baseYaw + f.headYaw), headPitch, Deg2Rad(45.f), &dx, &dy, &dz);
+        dir = Vec3{dx, dy, dz};
+        if (h < 0 || h > 1 || !f.handValid[h]) { origin = f.headValid ? f.eye : f.anchor + Vec3{0.f, c.fpEyeHeight, 0.f}; return true; }
+    } else if (h < 0 || h > 1 || !f.handValid[h]) return false;
     float handRotX = c.handRotOffX;
     DebugKeysHandRotX(&handRotX);
     const Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
     const Quat cq = (baseQ * f.handQ[h] * calib).Normalized();
     const Vec3 cf = cq.Rotate({0, 0, 1}), cu = cq.Rotate({0, 1, 0});   // controller forward / up (game frame)
+    if (kind == 1) {
+        Vec3 p = f.anchor + baseQ.Rotate(f.handP[h] * c.handScale) - cf * c.handBackOffset;
+        if (c.handOrigin == "head") p = p + (f.eye - f.anchor);
+        origin = p;
+        return true;
+    }
     Vec3 d = c.castAimAxis == "handle" ? cu : cf;
     if (c.castAimPitchOffsetDeg != 0.f) {
         const Vec3 axis = d.Cross(Vec3{0, 1, 0});   // rotating about (dir x up) by a positive angle tilts the ray UP
@@ -1138,6 +1167,7 @@ bool CastAimRay(const FrameInfo& f, int h, Vec3& origin, Vec3& dir) {
     origin = p; dir = d.Normalized();
     return dir.Length() > 0.5f;
 }
+void WriteAimView(uint8_t* player, const FrameInfo& f, bool handAim, const Vec3& aimO, const Vec3& aimD);   // below
 // Camera-style basis (right, up) around a forward vector, same handedness as CamBasis.
 void AimBasis(const Vec3& fwd, float fallbackYaw, Vec3& right, Vec3& up) {
     right = Vec3{0, 1, 0}.Cross(fwd);
@@ -1504,6 +1534,42 @@ bool CanPinPlayerFacing(uint8_t* player) {
     return !CombatMenuOpen() && CanPinMovementFacing(ReadMovementFacing(player), mi.valid && mi.sprint);
 }
 
+// [roll] trace (LogLevel=debug), for "rolls only go forward" (0.7.5 reports): from the dodge button's release - or
+// the game's own dodge request, which is all a flat test run has - each facing-pin decision for 1.2 s, once per frame
+// and pass, with the physics yaw it found, the body yaw it pins to and the guard's inputs. A pin between the game's
+// turn toward the stick and the roll's motion shows as "PIN" with phys far from body on the roll's first frames.
+std::atomic<double> g_rollTraceUntil{0.0};
+std::atomic<bool> g_rollPrevB{false};
+void RollTrace(uint8_t* player, float bodyYaw, bool pinned) {
+    if (Cfg().logLevel != "debug") return;
+    const double now = NowSec();
+    const MoveIntent mi = VirtualPadGetMove();
+    const bool b = mi.valid && mi.sprint;
+    const MovementFacingState s = ReadMovementFacing(player);
+    constexpr uint64_t dodgeRequests = (1ull << 5) | (1ull << 16) | (1ull << 17);
+    const bool released = g_rollPrevB.exchange(b) && !b;
+    if (released || (s.valid && (s.requests & dodgeRequests) && now > g_rollTraceUntil.load())) {
+        g_rollTraceUntil.store(now + 1.2);
+        LOGD("[roll] %s, stick (%.2f, %.2f): tracing the facing pin for 1.2 s",
+             released ? "dodge button let go" : "game dodge request", mi.x, mi.y);
+    }
+    if (now > g_rollTraceUntil.load()) return;
+    static uint32_t s_key = ~0u; static int s_pinned = -1;
+    const uint32_t key = g_frame * 4u + (uint32_t)FramePumpCurrentPass();
+    if (key == s_key && (int)pinned == s_pinned) return;
+    s_key = key; s_pinned = (int)pinned;
+    float q[4] = {}, p[4] = {};
+    uint8_t* ph = Physics(player);
+    const bool haveQ = ph && SafeRead(ph + off::Phys_Orientation, q, 16) && SafeRead(ph + off::Phys_Position, p, 16);
+    const float physYaw = haveQ ? WrapPi(2.f * std::atan2(q[1], q[3]) - 3.14159265f) : 0.f;
+    uint8_t unlocked = 0xFF;
+    if (uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl)) RD(ctrl + off::Ctrl_IsUnlocked, unlocked);
+    LOGD("[roll] f%u p%d %s phys %.0f body %.0f pos (%.2f, %.2f) | ok %d cancel %d req 0x%llx move 0x%x mods 0x%llx B %d unlocked %d",
+         g_frame, FramePumpCurrentPass(), pinned ? "PIN " : "free", physYaw * 57.2958f, bodyYaw * 57.2958f, p[0], p[2],
+         (int)s.valid, (int)s.movementCancelable, (unsigned long long)s.requests, s.movement,
+         (unsigned long long)s.modifiers, (int)b, (int)unlocked);
+}
+
 // ---------------------------------------------------------------- camera
 // Keep the body facing the camera direction (strafe/lock-on mode) unless a real enemy is locked on,
 // otherwise walking backwards/sideways turns the torso away and the arms cannot reach the hands.
@@ -1526,7 +1592,12 @@ void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw, const Vec
     if (WorldDyingNow()) return;
     int64_t enemy = -1; RD(player + off::PI_LockedEnemy, enemy);
     bool realLock = enemy != -1 && enemy != 0;
-    if (uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl)) WR(ctrl + off::Ctrl_IsUnlocked, (uint8_t)0);
+    // Strafe flag, except while a dodge owns the movement (DodgeOwnsMovement): the roll's turn toward the stick is
+    // the game's free movement, and the flag held through it sent every roll where you look (0.7.5 reports).
+    const MoveIntent mi = VirtualPadGetMove();
+    const bool dodge = c.dodgeFollowsStick && DodgeOwnsMovement(ReadMovementFacing(player), mi.valid && mi.sprint);
+    if (!dodge || realLock)
+        if (uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl)) WR(ctrl + off::Ctrl_IsUnlocked, (uint8_t)0);
     const float d = std::fmax(1.f, c.fpLockTargetDistance);
     // The ray steers the target only while a cast is LIVE: in lock mode the game turns the character toward the
     // target while moving, and a target that follows a seal held at your side spun the body around (2026-09-04).
@@ -1550,7 +1621,9 @@ void ApplyFaceCamera(uint8_t* player, const Vec3& root, float bodyYaw, const Vec
             // instead of just walking the new way. Dash and unlocked rolls need the game's own physics
             // turn toward the movement stick. Do not overwrite it, including after B is released and after
             // invulnerability ends. The rendered skeleton still follows BodyYaw independently.
-            if (c.fpPinBodyFacing && CanPinPlayerFacing(player)) {
+            const bool pin = c.fpPinBodyFacing && CanPinPlayerFacing(player);
+            RollTrace(player, bodyYaw, pin);
+            if (pin) {
                 if (uint8_t* ph = Physics(player)) {
                     Quat q = Quat::YawQ(WrapPi(bodyYaw + 3.14159265f));   // physics forward is local -Z
                     float r4[4] = {q.x, q.y, q.z, q.w};
@@ -1788,16 +1861,7 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
     Vec3 aimO, aimD; bool casting = false, handAim = false;
     if (c.castAim && !f.lockedOn) { const int ah = CombatCastAimHand(&casting); handAim = ah >= 0 && CastAimRay(f, ah, aimO, aimD); }
     ApplyFaceCamera(player, f.root, f.bodyYaw, handAim ? &aimO : nullptr, handAim ? &aimD : nullptr, handAim && casting, f.riding);
-    if (c.fpWriteAim) {
-        if (handAim) {
-            Vec3 ar, au; AimBasis(aimD, f.bodyYaw, ar, au);
-            WriteCamMatrix(player + off::Chr_AimViewMtx, ar, au, aimD, aimO);
-        } else {
-            Quat q = Quat::YawQ(f.baseYaw) * f.headQ;
-            Vec3 ar = q.Rotate({1, 0, 0}), au = q.Rotate({0, 1, 0}), af = q.Rotate({0, 0, 1});
-            WriteCamMatrix(player + off::Chr_AimViewMtx, ar, au, af, f.eye);   // nobody adds to this one: use the real eye
-        }
-    }
+    WriteAimView(player, f, handAim, aimO, aimD);
     // Tell the render thread what this frame actually is. The FOV is READ BACK rather than
     // assumed: whatever the game (or the override above) left in Cam_Fov is what the image
     // gets rasterised with, and the crop has to match it or the world comes out the wrong
@@ -2708,6 +2772,36 @@ void __fastcall Hook_UpdateFollowCam(void* fc) {
     g_origUpdFollow(fc);
     if (Cfg().fpOwnChrCam) ReassertCamera();
 }
+// The aim view matrix the game aims unlocked bullets with: down the cast-aim ray from its origin while a cast aims,
+// else the head's (from the real eye).
+void WriteAimView(uint8_t* player, const FrameInfo& f, bool handAim, const Vec3& aimO, const Vec3& aimD) {
+    if (!Cfg().fpWriteAim) return;
+    if (handAim) {
+        Vec3 ar, au; AimBasis(aimD, f.bodyYaw, ar, au);
+        WriteCamMatrix(player + off::Chr_AimViewMtx, ar, au, aimD, aimO);
+    } else {
+        Quat q = Quat::YawQ(f.baseYaw) * f.headQ;
+        Vec3 ar = q.Rotate({1, 0, 0}), au = q.Rotate({0, 1, 0}), af = q.Rotate({0, 0, 1});
+        WriteCamMatrix(player + off::Chr_AimViewMtx, ar, au, af, f.eye);   // nobody adds to this one: use the real eye
+    }
+}
+// A cast aim armed from inside a TAE event, before that event runs: the flag, the lock target and the aim view
+// matrix are written now, not at the next camera step. A bullet that arms its own aim (no SetBulletAimAngle before
+// it: Reduvia's blood blades, a bow's first arrow) spawns inside the very event that armed it, so it used to leave
+// along the head's aim matrix - from the eye ("still fires from my face", 2026-11-11 test 3).
+void ApplyCastAimNow() {
+    const Config& c = Cfg();
+    if (!c.castAim) return;
+    bool casting = false;
+    const int ah = CombatCastAimHand(&casting);
+    if (ah < 0 || !casting) return;
+    uint8_t* player = MainPlayer(); if (!player) return;
+    FrameInfo f; if (!BuildFrame(player, f) || f.lockedOn) return;
+    Vec3 aimO, aimD;
+    if (!CastAimRay(f, ah, aimO, aimD)) return;
+    ApplyFaceCamera(player, f.root, f.bodyYaw, &aimO, &aimD, true, f.riding);
+    if (!f.riding) WriteAimView(player, f, true, aimO, aimD);
+}
 // After the game's lock-target update: re-force the cast-aim lock state (flag + ray target) it just rewrote.
 // Only while a cast is live - outside one the lock mode's flat target is re-asserted by the other hooks as before.
 void __fastcall Hook_UpdateLockTgt(void* man, float dt) {
@@ -3137,6 +3231,23 @@ bool GameERChrPosition(uint8_t* chr, Vec3* out) {
     return true;
 }
 
+void GameERApplyCastAimNow() { __try { ApplyCastAimNow(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+
+bool GameERChrPhysics(uint8_t* chr, Vec3* pos, float* yaw) {
+    uint8_t* ph = chr ? Physics(chr) : nullptr;
+    if (!ph || !pos || !yaw) return false;
+    float p[4], q[4];
+    if (!SafeRead(ph + off::Phys_Position, p, 16) || !SafeRead(ph + off::Phys_Orientation, q, 16)) return false;
+    for (int i = 0; i < 4; ++i) if (!std::isfinite(p[i]) || !std::isfinite(q[i])) return false;
+    const float n = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    if (n < 0.5f || n > 1.5f) return false;   // not a rotation: a torn or freed read
+    Quat qq; qq.x = q[0]; qq.y = q[1]; qq.z = q[2]; qq.w = q[3];
+    const Vec3 f = qq.Rotate(Vec3{0.f, 0.f, -1.f});   // physics forward is local -Z
+    *pos = Vec3{p[0], p[1], p[2]};
+    *yaw = std::atan2(f.x, f.z);
+    return true;
+}
+
 // Full stereo, pass 2: write the OTHER eye's camera into every slot the real pass wrote.
 // Called by the frame pump between the two engine passes, on the main-loop thread, while
 // every camera writer is quiescent (the camera step is gated for the pass that follows).
@@ -3498,10 +3609,25 @@ bool FilterStale(StaleSignal& sig, bool raw, const char* what, uint32_t rawVal) 
     std::lock_guard<std::mutex> lock(g_walkMtx);
     if (sampled) g_walk.Add(sample);
     float path = 0.f, rate = 0.f;
-    const bool walking = raw && !sig.stale && g_walk.Walking(now, &path, &rate);
+    WalkWindow::Stats st;
+    const bool walking = raw && !sig.stale && g_walk.Walking(now, &path, &rate, &st);
     const ULONGLONG since = sig.sinceMs;
     StaleSignal::Event e = StaleSignal::kNone;
     const bool on = sig.Filter(raw, now, walking, &e);
+    // Held past what a load takes and not judged stale: every 3 s, which walk test is holding it (2026-11-09: a
+    // player stayed flat and third person for 30 s after the Grafted Scion's scripted death while the same byte
+    // went stale in 6 s after a restart, and no line said why).
+    if (on && since && now - since >= StaleSignal::kStaleAfterMs) {
+        static ULONGLONG s_next = 0;
+        if (now >= s_next) {
+            s_next = now + 3000;
+            LOGI("[guard] %s (0x%02X) held %.0f s; walk check over %.1f s: path %.1f m (needs %.1f), net %.1f m (%.1f), "
+                 "in-game clock x%.2f (%.1f), stick pushed %.0f%% (%.0f%%)%s%s", what, rawVal, (now - since) / 1000.0,
+                 st.spanMs / 1000.0, st.path, WalkWindow::kMinPath, st.net, WalkWindow::kMinNet, st.igtRate,
+                 WalkWindow::kMinIgtRate, st.pushShare * 100.f, WalkWindow::kMinPushing * 100.f,
+                 st.newestOk ? "" : ", no fresh position", st.bigStep ? ", a step over 3 m (warp)" : "");
+        }
+    }
     if (e == StaleSignal::kWentStale)
         LOGW("[guard] %s (0x%02X) has stayed set for %.0f s while you walk the world (%.1f m in the last 3 s, "
              "in-game clock x%.2f): not a load or a warp. Ignored until it clears - ERVR's view and the second eye "

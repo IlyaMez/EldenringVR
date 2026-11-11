@@ -234,6 +234,7 @@ struct Config {
     std::string fpPoseMode = "vr";        // vr = full-rig template override (no animation ever poses the body; root motion still moves it) | game = animation + IK on top
     std::string fpArmRootSource = "model";  // model = position from the ChrCtrl model matrix (the transform the renderer skins with, read fresh in the model-pos hook) + physics rotation | modelmatrix | physics
     bool  fpPinBodyFacing = true;         // strafe mode: pin walking facing to BodyYaw; dash/roll and non-cancelable actions retain native physics facing
+    bool  dodgeFollowsStick = true;       // strafe mode: a dodge rolls toward the move stick - the strafe flag lets go from the press through the roll's start
     bool  fpCameraAfterModelPos = true;   // write the camera again once the rendered model matrix exists, so camera and body sit on the same transform (kills the body-slides-to-camera lag)
     bool  fpCameraFinalWrite = true;      // replay our camera matrix after the game's camera finalizer (which runs past every other write point and would otherwise render its own interpolated follow position)
     bool  fpLatchVRPerFrame = true;       // take ONE head/hand sample per render cycle and use it at every write point, so the body is posed and the camera placed from the identical head position
@@ -418,7 +419,16 @@ struct Config {
     std::string twoHandSkill = "effect";  // effect | game | off
     std::string twoHandSkillButton = "RTrigger";   // VR control: RTrigger RGrip LTrigger LGrip A B X Y RThumb LThumb none
     std::string skillButton = "LT";       // the game's skill button (what "game" presses and "effect" records from)
-    float twoHandSkillRelearnHold = 1.0f; // hold the trigger this long: the game plays the skill and it is re-recorded
+    // The skill trigger (combat_moves.h): TwoHandSkillButton one-handed too, held as long as the trigger is.
+    bool  oneHandSkill = true;            // one-handed: the trigger holds the game's skill button (stances, charged skills)
+    float skillHoldSeconds = 0.3f;        // two-handed, TwoHandSkill=effect: a press held this long is the game's own skill, held
+    bool  stanceSwings = true;            // while ERVR holds the skill, a swing is the game's R1/R2 (a stance's follow-up)
+    float swingAimMaxDeg = 45.f;          // SkillAim=swing: the swing turns the projectile at most this far from your view (0 = no limit)
+    std::string skillAim = "swing";       // a melee weapon's skill projectile (Moonveil's wave): swing = where the stance follow-up's swing aimed (height from your view) | head = where the body faces (your view) | hand = along the weapon hand's controller
+    bool  retiredRelearnHold = false;     // ERVR.ini still has TwoHandSkillRelearnHold (ConfigLogNotes)
+    // Criticals (combat_moves.h): backstab = a swing behind an enemy the game's ThrowParam says can be backstabbed is
+    // the game's own R1; log = predict and log only; off.
+    std::string criticals = "backstab";
     std::string skillReplayEvents = "331,67,66,2,96,110,112,120";   // TAE event ids replayed by "effect"
     float skillRecordSeconds = 3.0f;      // how long after the game-driven press events are recorded
     float skillSwingWindow = 2.5f;        // s after an effect-skill during which the next swing uses the skill's attack row

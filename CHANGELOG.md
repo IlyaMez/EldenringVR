@@ -3,6 +3,79 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## Unreleased
+
+Dodges roll the way the stick points again; a site of grace's menu moves with the stick; the right trigger holds
+your Ash of War, so stances and charged skills work; a swing behind an enemy backstabs.
+
+### New
+* The Ash of War on the right trigger, held (Stÿks: a skill you hold was impossible - the left grip could only tap
+  it, since a held grip opens the weapon wheel). The right trigger now holds the game's skill button for exactly as
+  long as you hold it, one-handed too: a stance waits for your swing, and that swing is the stance's own follow-up
+  (the game's light attack, its heavy one for a hard swing); a charged skill lets go when you do. Two-handed, a tap
+  still plays the skill's effect without the animation, and holding past a third of a second is the game's own
+  skill, held (it replaces the 1 s "play it the game's way" hold). The left grip's quick squeeze stays a skill tap.
+  With a staff, seal or bow in the right hand the trigger casts, as before. A follow-up needs a real swing (the
+  tip past `SwingOnSpeed`, the hand past `MinHandSpeed`), and the blade must come to rest before the next one: the
+  first in-headset test with Moonveil fired the follow-up on any small movement of the held sword, because a swing
+  counted from the always-live blade's 0.8 m/s. Keep holding and the game returns to the stance after each
+  follow-up, so one hold can follow up again. A stance's projectile (Moonveil's wave) flies where the follow-up's
+  swing aimed - the middle of the arc the tip swept, at the height you look, leaving from the weapon, at most
+  45 degrees from your view (`SwingAimMaxDeg`) - and the follow-up turns that way too: it used to fly along the
+  sword hand's controller, which points anywhere mid-swing. A swing that carries the blade away from your view (a
+  wind-up, a return to guard) is no follow-up; the strike that follows it is. A skill that fires on the press
+  (Reduvia's blood blades) flies where the weapon arm aims, like a staff's spell (`SkillAim=head` sends both where
+  you look). A projectile that arms its own aim - those blood
+  blades, a spell with no aim event before its bullet, a bow's first arrow - is aimed before it leaves: the aim
+  used to reach the game one frame late, so that first projectile left along your view, as if from your face.
+  ERVR.log says, after each stance follow-up, whether a projectile left (and FP when none did). One-handed with a seal or staff in the left hand, the skill is the
+  right weapon's (as the game picks it), so its projectile no longer aims with the seal. `[Combat] OneHandSkill`, `SkillHoldSeconds`,
+  `StanceSwings`, `SkillAim`; an ERVR.ini still carrying `TwoHandSkillRelearnHold` says it is not read.
+* Backstabs (Paolo: no backstab or riposte was possible). ELDEN RING's criticals are its throw system: the game
+  checks its ThrowParam table for you and that enemy (distance, height, how you both face) when you press light
+  attack, and a swing of ERVR's never pressed it. ERVR now reads the same table (1604 rows for the player on 264
+  kinds of enemy, the 130 backstab rows among them) and checks every enemy within 4 m each frame; a swing that
+  starts inside a backstab's start window presses the game's light attack, and the game plays its backstab with its
+  own damage. ERVR.log says whether the game took it ("[combat] critical: the game took it" / "did NOT take it" - an
+  enemy mid-attack gets a plain light attack instead). `[Combat] Criticals=backstab|log|off`. Ripostes (after a
+  parry or a stance break) need the enemy's "can be riposted" state, which ERVR does not read yet; with
+  `[Combat] Debug=true` the face-to-face matches log that enemy's throw state words, so the next round can find it.
+  Measured flat: the table loads and the player's throw state reads; the skill trigger and a backstab against an
+  enemy are untested in the headset.
+
+### Fixes
+* Dodge: every roll went where you looked, whatever the stick said (Willthethrill, MasterXploda, Valentin, Stÿks,
+  ynko, Himi on 0.7.5). Players' logs showed the stick reaching the game - B with the stick held back or to the
+  side - so the game was handed the right input and rolled forward anyway. A roll is the game's free movement: the
+  body turns toward the stick as the roll starts, then rolls straight ahead. ERVR holds its strafe flag (walking
+  sideways and backward instead of turning around) on every frame, and that hold kept the body facing where you
+  look through the turn. From the dodge button's press through the roll's start the flag is now left to the game,
+  the way erfps2 lets go of its lock state while an action is pending. Measured flat with scripted rolls (stick
+  back, left, right, forward): before, a back roll went forward (162-179 degrees from where the stick walked you)
+  and side rolls 57 degrees off; now every roll lands within 18 degrees of it, and the strafe hold comes back
+  once the roll is under way.
+  `[FirstPerson] DodgeFollowsStick=false` puts the old behaviour back. In the headset: untested.
+* A site of grace's menu (and an NPC's talk menu) is a menu to ERVR now: the left stick moves its cursor, the right
+  stick no longer turns your view behind it, and swings stay quiet (Paolo: it only moved with the left stick click
+  held). The game marks these menus with a bit ERVR's menu reader did not count; three players' logs show it rise
+  with every "Rest" press and fall when the menu closes.
+* Linux (Proton): the second eye never started and ERVR stayed on the flat cinema screen ("frame pump
+  unavailable"). When the game's task system is found through the exe's statics, the pointer lands 0x18 bytes
+  short of the object, so its vtable check failed and the frame pump was never hooked; ERVR now steps to the real
+  object when its vtable and task-group list both check out (deadlydavid's fix, PR #1: Ubuntu, Proton Experimental
+  and Proton 10, SteamVR, Quest 3).
+
+### For testers
+* The crash reporter now catches breakpoints (0x80000003) too, and names every frame's module, not just the
+  game's. Players on Meta Quest Link (Meta's runtime 1.208) stopped with 0x80000003 inside the VR session's
+  creation, and the log could not say whose code raised it. ERVR.log also lists the OpenXR API layers installed
+  on the PC ("[xr] implicit API layers registered"): they load into every VR game and run inside that same call.
+* A "loading-screen byte held N s" line every 3 s says which walk test holds a stuck signal (the Grafted Scion's
+  scripted death left one player flat and in third person for 30 s while the same byte cleared after a restart),
+  and "world dying" says what holds it (player dead, loading byte, co-op, warp).
+* `[roll]` lines (Detailed log) trace the body's facing for a second after each dodge; the autopilot script takes
+  `LD!B` (hold the stick, tap the button) for scripted rolls.
+
 ## 0.7.5 (2026-11-07)
 
 The second eye's pass only draws: new graces, NPCs and every other prompt answer the button as in the game

@@ -149,6 +149,22 @@ bool AutoPilotMerge(XINPUT_GAMEPAD& pad) {
                 const std::string name = step.substr(0, plus);
                 const double wait = plus == std::string::npos ? 1.0 : atof(step.c_str() + plus + 1);
                 if (now < at + wait) {
+                    // Stick + button: "LD!B" holds the stick for the whole step and taps the button 0.3 s in -
+                    // a directional dodge (the stick has to be held before the press, as a player does).
+                    const size_t bang = name.find('!');
+                    if (bang == 2) {
+                        if (s_step.exchange(index) != index)
+                            LOGI("[autopilot] script step %d: %s for %.1f s", index + 1, name.c_str(), wait);
+                        const SHORT full = 32767;
+                        const char d = name[1];
+                        const SHORT x = d == 'L' ? -full : d == 'R' ? full : 0;
+                        const SHORT y = d == 'U' ? full : d == 'D' ? -full : 0;
+                        if (name[0] == 'L') { pad.sThumbLX = x; pad.sThumbLY = y; }
+                        else { pad.sThumbRX = x; pad.sThumbRY = y; }
+                        const double in = now - at;
+                        if (in >= 0.30 && in < 0.42) pad.wButtons |= ButtonByName(name.substr(bang + 1));
+                        return true;
+                    }
                     // Sticks are held for the whole step (LU/LD/LL/LR walk, RL/RR turn the camera), so the
                     // script can walk up to a prompt; every other step is a 0.12 s tap.
                     const bool stick = name.size() == 2 && (name[0] == 'L' || name[0] == 'R') &&
