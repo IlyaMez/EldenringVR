@@ -292,6 +292,7 @@ DWORD WINAPI Worker(LPVOID) {
                      pt.msAvg[0], pt.msMax[0], pt.msAvg[1], pt.msMax[1], rs.ervrMsAvg[0], rs.ervrMsMax[0],
                      rs.ervrMsAvg[1], rs.ervrMsMax[1], rs.dxgiMsAvg[0], rs.dxgiMsMax[0], rs.dxgiMsAvg[1],
                      rs.dxgiMsMax[1], ss.waitFrameMsAvg, ss.waitFrameMsMax, ss.headsetHz);
+            FrameProbeProfileReport();   // [Experimental] ProfileGroups
             // Below the headset's refresh the runtime fills the missing frames by reprojection -
             // judder and added latency are the cost. Game SPEED is not: the sim consumes the
             // measured frame time (igt tracks wall time at any pair rate, x0.98 at 52 pairs/s on
@@ -308,16 +309,21 @@ DWORD WINAPI Worker(LPVOID) {
                 // (DXGI's queue full, our blits waiting on the GPU) point at the GPU.
                 const float work = pt.msAvg[0] + pt.msAvg[1] - rs.ervrMsAvg[0] - rs.ervrMsAvg[1] -
                                    rs.dxgiMsAvg[0] - rs.dxgiMsAvg[1];
+                // With AsyncSubmit the headset wait happens on the XR thread, not inside a present.
+                const float gameWait = ss.asyncSubmit ? 0.f : ss.waitFrameMsAvg;
                 const float blocked = rs.ervrMsAvg[0] + rs.ervrMsAvg[1] + rs.dxgiMsAvg[0] +
-                                      rs.dxgiMsAvg[1] - ss.waitFrameMsAvg;
+                                      rs.dxgiMsAvg[1] - gameWait;
                 const float period = 1000.f / (float)targetHz;
+                // 2026-11-12 (9800X3D, in-headset): ~12 ms of engine CPU per pair in Limgrave, GPU ~42% busy;
+                // the Low preset saved ~0.4 ms of it, Resolution nothing.
                 LOGI("[stereo] per pair: engine work %.1f ms (pass 1 %.1f, pass 2 %.1f), presents "
-                     "blocked %.1f ms, headset frame wait %.1f ms, of the %.1f ms a %.0f Hz frame allows "
+                     "blocked %.1f ms, headset frame wait %.1f ms%s, of the %.1f ms a %.0f Hz frame allows "
                      "-> %s", work, pt.msAvg[0] - rs.ervrMsAvg[0] - rs.dxgiMsAvg[0],
                      pt.msAvg[1] - rs.ervrMsAvg[1] - rs.dxgiMsAvg[1], blocked, ss.waitFrameMsAvg,
+                     ss.asyncSubmit ? " (on the XR thread; the game never waits for it)" : "",
                      period, targetHz,
-                     work > period * 0.9f ? "the CPU is the limit (graphics settings will not help; "
-                                            "[VR] Pass2Characters=false or a lower headset refresh will)"
+                     work > period * 0.9f ? "the CPU is the limit: the engine's own work for two passes "
+                                            "(graphics settings and Resolution barely move it)"
                      : blocked > 1.5f      ? "the GPU is the limit (lower Resolution or the game's "
                                             "shadow/lighting/effects quality)"
                                            : "neither side is saturated on average - hitches");

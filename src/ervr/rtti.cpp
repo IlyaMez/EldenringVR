@@ -174,6 +174,13 @@ std::vector<void*> ModuleStaticPointers() {
     return out;
 }
 
+// The game frees memory while the scan runs (2026-11-12: a block committed at VirtualQuery
+// time was gone at the read during boot, and Seamless Co-op's crash handler ended the game on
+// the fault). Its own function so the __try sits next to no C++ objects.
+static bool ReadsVTable(const void* cand, void** vt) {
+    __try { return *(void* const*)cand == (void*)vt; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 std::vector<void*> FindInstancesOfVTable(void** vt, int maxHits) {
     std::vector<void*> out;
     if (!vt) return out;
@@ -189,7 +196,7 @@ std::vector<void*> FindInstancesOfVTable(void** vt, int maxHits) {
             if (!VirtualQuery(cand, &mbi, sizeof(mbi))) continue;
             if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) continue;
             if ((uint8_t*)cand + 8 > (uint8_t*)mbi.BaseAddress + mbi.RegionSize) continue;
-            if (*(void* const*)cand != (void*)vt) continue;
+            if (!ReadsVTable(cand, vt)) continue;
             out.push_back(cand);
             if ((int)out.size() >= maxHits) return out;
         }

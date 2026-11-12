@@ -22,6 +22,12 @@ struct Config {
 
     // [VR]  ERVR's own OpenXR session + stereo rendering (ReShade add-on supplies D3D12).
     std::string vrStereoMode = "full";     // off | cinema (flat game on a head-locked quad) | debugalt | full
+    // Full stereo: the OpenXR frame loop (xrWaitFrame/BeginFrame/EndFrame) runs on its own thread and submits
+    // the newest finished stereo pair every headset frame; the game's presents only blit and publish. Without
+    // it the game thread waits in xrWaitFrame, so a pair 1 ms over the frame waits for the NEXT slot and the
+    // runtime halves the app's rate (measured 2026-11-12: 12 ms pairs ran at 45-55 pairs/s synchronous, 75-83 with
+    // this on, the headset locked at 90). Read at launch.
+    bool vrAsyncSubmit = true;
     float vrRenderScale = 1.0f;            // supersampling of the per-eye images, relative to delivered game pixels
     float vrWorldScale = 1.0f;             // 1.0 = metric; scales the per-eye separation
     int   vrPairRateHz = 0;                // 0 = headset refresh / 2
@@ -900,6 +906,11 @@ struct Config {
     // M2 experiment: temporarily clear the `active` byte of one named task group and watch
     // what stops happening. Empty = off. Auto-restores.
     bool  taskRegisterTest = false;   // register no-op probe tasks into FrameBegin/GameSceneDraw/DrawEnd
+    // Where each engine pass's time goes: a no-op marker task in every task group; a marker's run time against
+    // the previous marker's is its group's wall time. The heartbeat prints ms per pass per group, by pass.
+    bool  profileGroups = false;
+    // Sampling profiler (sample_profiler.h): the engine functions each pass spends its time in. One core.
+    bool  profileSample = false;
     bool  taskQueueProbe = false;     // hook CSTask::queue_tasks: caller stack, thread, synchronicity
     bool  taskDumpLists = false;      // dump every group's registered tasks with RTTI names (needs TaskQueueProbe)
     bool  taskDoublePumpTest = false; // A/B: run a draw-only second engine frame per frame (needs TaskQueueProbe)

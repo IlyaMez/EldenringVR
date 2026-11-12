@@ -24,6 +24,7 @@
 #include "stereo.h"
 #include "rtti.h"
 #include "reshade_addon.h"
+#include "sample_profiler.h"
 #include "config.h"
 #include "log.h"
 #include <MinHook.h>
@@ -557,7 +558,64 @@ struct ErvrFrameTask {
     uint32_t    lastGroupId = 0;
     int         lastSeed = 0;
     DWORD       lastThread = 0;
+    int         profGroup = -1;  // >= 0: a [Experimental] ProfileGroups marker for this group index
 };
+
+// ---- [Experimental] ProfileGroups: each engine pass's wall time per task group ----------
+// A no-op marker task is appended to every group. The engine runs a group's tasks and then
+// the next group's, so a marker lands at (about) its group's end and the gap since the
+// previous marker of the same pass is that group's wall time. A group whose tasks fan out
+// over the runners can finish after its marker - its tail then counts toward the next
+// group - so the timeline is exact in total and close per group. Gated (inactive) groups
+// run no tasks and no marker: their time is nil, which is the point of a pass-2 census.
+struct ProfEvent { long long t; int group; };
+constexpr int kProfTail = 256;               // after the last marker: Flip's tail and the hook's own exit
+std::atomic<int> g_profPass{0};              // 0 = outside a pass, 1 / 2 = inside that pass's queue_tasks
+ProfEvent        g_profEv[2][kProfTail];
+std::atomic<int> g_profEvN[2]{};
+long long        g_profUs[2][kProfTail + 1]{};   // frame thread only (summed at pass end), read by the report
+long             g_profPasses[2]{};
+std::mutex       g_profMtx;                       // pass-end fold vs the heartbeat report
+
+void ProfMark(int group) {
+    const int p = g_profPass.load(std::memory_order_acquire);
+    if (p < 1 || p > 2) return;
+    const int i = g_profEvN[p - 1].fetch_add(1, std::memory_order_relaxed);
+    if (i >= kProfTail) return;
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    g_profEv[p - 1][i] = {q.QuadPart, group};
+}
+
+std::atomic<long> g_passSeq[2]{};
+
+void ProfPassBegin(int pass) {
+    if (!Cfg().profileGroups && !Cfg().profileSample) return;
+    g_profEvN[pass - 1].store(0, std::memory_order_relaxed);
+    g_passSeq[pass - 1].fetch_add(1, std::memory_order_relaxed);
+    g_profPass.store(pass, std::memory_order_release);
+}
+
+// Frame thread, right after the pass's queue_tasks returned (every runner is done with it).
+void ProfPassEnd(int pass, long long t0, long long t1) {
+    if (!Cfg().profileGroups && !Cfg().profileSample) return;
+    g_profPass.store(0, std::memory_order_release);
+    if (!Cfg().profileGroups) return;
+    const int p = pass - 1;
+    const int n = std::min(g_profEvN[p].load(std::memory_order_relaxed), kProfTail);
+    ProfEvent ev[kProfTail];
+    memcpy(ev, g_profEv[p], sizeof(ProfEvent) * (size_t)n);
+    std::sort(ev, ev + n, [](const ProfEvent& a, const ProfEvent& b) { return a.t < b.t; });
+    static const long long f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x.QuadPart; }();
+    std::lock_guard<std::mutex> g(g_profMtx);
+    long long prev = t0;
+    for (int i = 0; i < n; ++i) {
+        const long long t = ev[i].t < prev ? prev : ev[i].t;
+        if (ev[i].group >= 0 && ev[i].group < kProfTail) g_profUs[p][ev[i].group] += (t - prev) * 1000000 / f;
+        prev = t;
+    }
+    if (t1 > prev) g_profUs[p][kProfTail] += (t1 - prev) * 1000000 / f;
+    ++g_profPasses[p];
+}
 
 // The registered probes the toggle experiment reads. Deliberately leaked: the engine keeps
 // the pointer forever and there is no unregister on our side yet.
@@ -568,6 +626,7 @@ void* TaskGetRuntimeClass(void*) { return nullptr; }
 void* TaskDtor(void*, unsigned) { return nullptr; }   // engine never destroys our tasks
 void  TaskExecute(ErvrFrameTask* self, FD4TaskDataView* d) {
     // Runs on the game's task-runner threads. Keep it exception-free and tiny.
+    if (self->profGroup >= 0) { ProfMark(self->profGroup); return; }
     const long n = InterlockedIncrement(&self->calls);
     if (d) {
         self->lastDt = d->dt;
@@ -627,6 +686,25 @@ ErvrFrameTask* RegisterFrameTask(const char* name, int groupIndex) {
     }
     LOGI("[m2] register_task(\"%s\", index %d) returned; waiting for first call", name, groupIndex);
     return t;
+}
+
+// [Experimental] ProfileGroups: one marker per group (leaked like every registered task - the engine keeps it).
+void ProfileGroupsInstall() {
+    if (!g_table.imp || !GameRva(RVA_RegisterTask) || g_table.count <= 0) {
+        LOGW("[prof] ProfileGroups: no task table / register_task on this exe - not profiling");
+        return;
+    }
+    auto* base = (uint8_t*)GetModuleHandleW(nullptr);
+    int ok = 0;
+    for (int i = 0; i < g_table.count && i < kProfTail; ++i) {
+        auto* t = new ErvrFrameTask();
+        t->vft = g_taskVft;
+        t->name = "prof";
+        t->profGroup = i;
+        if (CallRegisterTask(base + GameRva(RVA_RegisterTask), g_table.imp, (uint32_t)i, t) > 0) ++ok;
+    }
+    LOGI("[prof] marker tasks registered in %d of %d task groups: ms per pass per group every ~5 s", ok,
+         g_table.count);
 }
 
 // ---- experiment: probe CSTask::queue_tasks --------------------------------------------
@@ -1580,7 +1658,10 @@ void DoSecondPass(void* self, void* a, void* b) {
     if (arPlayer) CombatPass2Begin(arPlayer);
     Pass2InteractBeforePass2();
     g_curPass.store(2, std::memory_order_release);
+    LARGE_INTEGER tq; QueryPerformanceCounter(&tq);
+    ProfPassBegin(2);
     g_origQueueTasks(self, a, b);
+    { LARGE_INTEGER te; QueryPerformanceCounter(&te); ProfPassEnd(2, tq.QuadPart, te.QuadPart); }
     Pass2InteractAfterPass2();
     // Pass 2 is complete: finish and push the second eye's report with the camera its
     // render really used (stashed by GameERApplySecondEyeCamera before the pass). Done
@@ -1720,8 +1801,10 @@ uint64_t __fastcall Hook_QueueTasks(void* self, void* a, void* b) {
              i, self, a, b, GetCurrentThreadId(), line);
     }
     if (!g_qtThread) g_qtThread = GetCurrentThreadId();
+    ProfPassBegin(1);
     const uint64_t r = g_origQueueTasks(self, a, b);
-    { LARGE_INTEGER tp; QueryPerformanceCounter(&tp); NotePassTime(0, tp.QuadPart - t0.QuadPart); }
+    { LARGE_INTEGER tp; QueryPerformanceCounter(&tp); NotePassTime(0, tp.QuadPart - t0.QuadPart);
+      ProfPassEnd(1, t0.QuadPart, tp.QuadPart); }
     // Pass 1 is complete (every camera writer ran, Flip presented): finish and push its eye
     // report with the camera the renderer really used. Must precede DoSecondPass, which
     // stashes pass 2's own pending report.
@@ -2315,6 +2398,8 @@ void FrameProbeTick() {
                     else
                         LOGW("[stereo] alternate-eye: frame hook unavailable; no eye reports, stays flat");
                 }
+                if (Cfg().profileGroups && g_origQueueTasks) ProfileGroupsInstall();
+                if (Cfg().profileSample && g_origQueueTasks) SampleProfilerStart();
                 if (Cfg().m2TaskProbe) {
                     RegisterExperiment();
                     QueueTasksProbeInstall();
@@ -2389,6 +2474,44 @@ PumpPassTimes FramePumpTakePassTimes() {
     return t;
 }
 float FramePumpLastMs() { return g_pumpLastMs.load(std::memory_order_relaxed); }
+
+int  FramePumpProfilePass() { return g_profPass.load(std::memory_order_acquire); }
+long FramePumpPassSeq(int pass) { return pass >= 1 && pass <= 2 ? g_passSeq[pass - 1].load() : 0; }
+
+void FrameProbeProfileReport() {
+    if (!Cfg().profileGroups || !g_table.valid) return;
+    static long long us[2][kProfTail + 1];
+    long passes[2];
+    {
+        std::lock_guard<std::mutex> g(g_profMtx);
+        memcpy(us, g_profUs, sizeof(us));
+        memcpy(passes, g_profPasses, sizeof(passes));
+        memset(g_profUs, 0, sizeof(g_profUs));
+        memset(g_profPasses, 0, sizeof(g_profPasses));
+    }
+    for (int p = 0; p < 2; ++p) {
+        if (passes[p] <= 0) continue;
+        long long total = 0;
+        int order[kProfTail + 1]; int n = 0;
+        for (int i = 0; i <= kProfTail; ++i) {
+            total += us[p][i];
+            if (us[p][i] / passes[p] >= 40) order[n++] = i;   // >= 0.04 ms per pass
+        }
+        std::sort(order, order + n, [p](int a, int b) { return us[p][a] > us[p][b]; });
+        std::string line;
+        char buf[160];
+        for (int k = 0; k < n && k < 16; ++k) {
+            const int i = order[k];
+            const double ms = (double)us[p][i] / 1000.0 / (double)passes[p];
+            if (i == kProfTail) snprintf(buf, sizeof(buf), ", (after the last group) %.2f", ms);
+            else snprintf(buf, sizeof(buf), ", %d %ls %.2f", i,
+                          (const wchar_t*)(g_table.entry0 + (size_t)i * g_table.stride + kNameOff), ms);
+            line += buf;
+        }
+        LOGI("[prof] pass %d: %.2f ms per pass over %ld passes, by group (ms)%s", p + 1,
+             (double)total / 1000.0 / (double)passes[p], passes[p], line.c_str());
+    }
+}
 void FramePumpSetGpuQueue(ID3D12CommandQueue* q) { g_gpuQueue.store(q, std::memory_order_release); }
 float FramePumpGpuSyncLastMs() { return g_syncLastMs.load(std::memory_order_relaxed); }
 }

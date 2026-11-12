@@ -84,6 +84,7 @@ void Config::Load(const std::wstring& path) {
     pollHz     = GetI(ini, L"General", L"PollHz", pollHz);
 
     vrStereoMode     = GetS(ini, L"VR", L"StereoMode", vrStereoMode);
+    vrAsyncSubmit    = GetB(ini, L"VR", L"AsyncSubmit", vrAsyncSubmit);
     vrRenderScale    = GetF(ini, L"VR", L"RenderScale", vrRenderScale);
     vrWorldScale     = GetF(ini, L"VR", L"WorldScale", vrWorldScale);
     vrPairRateHz     = GetI(ini, L"VR", L"PairRateHz", vrPairRateHz);
@@ -535,6 +536,8 @@ void Config::Load(const std::wstring& path) {
     m2Pass2NoGuards = GetB(ini, L"Experimental", L"Pass2NoGuards", m2Pass2NoGuards);
     m2Pass2NoDeadGuard = GetB(ini, L"Experimental", L"Pass2NoDeadGuard", m2Pass2NoDeadGuard);
     taskRegisterTest  = GetB(ini, L"Experimental", L"TaskRegisterTest", taskRegisterTest);
+    profileGroups     = GetB(ini, L"Experimental", L"ProfileGroups", profileGroups);
+    profileSample     = GetB(ini, L"Experimental", L"ProfileSample", profileSample);
     taskQueueProbe    = GetB(ini, L"Experimental", L"TaskQueueProbe", taskQueueProbe);
     taskDumpLists     = GetB(ini, L"Experimental", L"TaskDumpLists", taskDumpLists);
     taskDoublePumpTest = GetB(ini, L"Experimental", L"TaskDoublePumpTest", taskDoublePumpTest);

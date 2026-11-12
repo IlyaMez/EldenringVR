@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cmath>
 #include <mutex>
+#include <thread>
 
 namespace ervr {
 namespace {
@@ -396,10 +397,30 @@ bool PopReportForEye(int eye, StereoEyeReport& rep) {
     return false;
 }
 
+// [VR] AsyncSubmit: the XR thread's frame loop and what it submits. Declared here because the
+// eye blit below takes the lock for the one step that can rebuild a swapchain the XR thread's
+// xrEndFrame may be referencing.
+struct AsyncSubmitState {
+    std::mutex  mtx;          // the published layer, every swapchain release/rebuild, vs xrEndFrame
+    VRSubmitLayer layer;      // the newest finished content (a stereo pair, or the flat quad)
+    bool        have = false;
+    std::atomic<uint64_t> seq{0};
+    std::atomic<bool>    running{false};
+    std::atomic<int64_t> displayTime{0}, period{0};
+    std::atomic<bool>    shouldRender{false};
+    std::atomic<long>    fresh{0}, repeats{0};   // XR frames that showed a new pair / the previous one again
+    uint64_t    pairIndex = 0;   // game thread only
+    bool        held[2] = {};    // game thread only: an eye image acquired and blitted, not released yet
+};
+AsyncSubmitState g_async;
+bool AsyncActive() { return g_async.running.load(std::memory_order_acquire); }
+
 // Crops the back buffer to the runtime's per-eye frustum and blits it into that eye's
 // swapchain image, echoing the pose/FOV the image was really rendered with into g_submit.
+// `hold`: keep the image acquired (AsyncSubmit) - released with its pair's other eye, under
+// the submit lock, so the XR thread never shows a left eye from one pair with the right from another.
 bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpBase,
-                       const StereoEyeReport& rep) {
+                       const StereoEyeReport& rep, bool hold = false) {
     const VREyeView& want = g_pairViews[rep.pair % kPairRing][rep.eye & 1];
     if ((want.fov.angleRight - want.fov.angleLeft) < 0.01f) return false;
     if (rep.fovY <= 0.01f) return false;
@@ -440,7 +461,14 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
     // recommendation (3072x3264 on a Quest 3) would upscale a ~1100x1440 crop and pay full
     // fill-rate for pixels carrying no extra information.
     const float ss = Clamp(Cfg().vrRenderScale, 0.3f, 2.0f);
-    vr->EnsureEyeSwapchains((uint32_t)(cr.su * f.width * ss), (uint32_t)(cr.sv * f.height * ss));
+    if (!hold) {
+        vr->EnsureEyeSwapchains((uint32_t)(cr.su * f.width * ss), (uint32_t)(cr.sv * f.height * ss));
+    } else if (!g_async.held[0] && !g_async.held[1]) {
+        // A rebuild destroys both eyes' swapchains: only at a pair's first eye, never with an image held,
+        // and under the lock so it cannot land inside the XR thread's xrEndFrame.
+        std::lock_guard<std::mutex> g(g_async.mtx);
+        vr->EnsureEyeSwapchains((uint32_t)(cr.su * f.width * ss), (uint32_t)(cr.sv * f.height * ss));
+    }
 
     bool ok = false;
     if (ID3D12Resource* dst = vr->AcquireEyeImage((VREye)e)) {
@@ -461,7 +489,8 @@ bool BlitEyeFromReport(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bpB
             g_eyeBlits[e].fetch_add(1, std::memory_order_relaxed);
             ok = true;
         }
-        vr->ReleaseEyeImage((VREye)e);
+        if (hold && ok) g_async.held[e] = true;
+        else vr->ReleaseEyeImage((VREye)e);
     } else {
         g_blitFails.fetch_add(1, std::memory_order_relaxed);
     }
@@ -777,6 +806,169 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
     g_lastSubmitMs.store((float)(NowMs() - t0), std::memory_order_relaxed);
 }
 
+// ---- [VR] AsyncSubmit: the XR frame loop on its own thread ------------------------------
+// The thread runs xrWaitFrame -> xrBeginFrame -> xrEndFrame at the headset's own pace and
+// submits whatever the game finished last; the game's presents never block in the runtime.
+// A pair that misses a headset frame shows one frame later instead of costing the game a
+// whole extra frame of waiting (the synchronous loop parks the game thread to the NEXT slot,
+// and VDXR then halves the app's rate - the 45/90 Hz "rubberband in waves").
+void AsyncXrLoop(IVRBackend* vr) {
+    LOGI("[stereo] AsyncSubmit: the XR frame loop runs on its own thread - the headset gets a frame every "
+         "refresh with the newest finished stereo pair, the game is never held by the runtime");
+    uint64_t lastSeq = 0;
+    double lastLog = NowMs();
+    while (g_async.running.load(std::memory_order_acquire)) {
+        VRFrameInfo fi;
+        if (!WaitBegin(vr, fi)) { Sleep(2); continue; }   // session not running / not visible yet
+        g_async.period.store(fi.displayPeriodNs, std::memory_order_relaxed);
+        g_async.shouldRender.store(fi.shouldRender, std::memory_order_relaxed);
+        g_async.displayTime.store(fi.displayTimeNs, std::memory_order_release);
+        bool ok = false, stereo = false;
+        {
+            std::lock_guard<std::mutex> g(g_async.mtx);
+            VRSubmitLayer layer;
+            if (fi.shouldRender && g_async.have) {
+                layer = g_async.layer;
+                g_async.layer.hudRecenter = false;   // one-shot: the first submit carries it
+            }
+            const uint64_t s = g_async.seq.load(std::memory_order_relaxed);
+            (s != lastSeq ? g_async.fresh : g_async.repeats).fetch_add(1, std::memory_order_relaxed);
+            lastSeq = s;
+            stereo = layer.projectionValid;
+            ok = vr->EndFrame(layer);
+        }
+        if (!ok) g_submitFails.fetch_add(1, std::memory_order_relaxed);
+        else {
+            g_frames.fetch_add(1, std::memory_order_relaxed);
+            if (stereo) g_stereoFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+        const double now = NowMs();
+        if (now - lastLog > 5000.0) {
+            const long fr = g_async.fresh.exchange(0), rp = g_async.repeats.exchange(0);
+            LOGD("[stereo] AsyncSubmit 5 s: %ld headset frames showed a new stereo pair, %ld the previous one again",
+                 fr, rp);
+            lastLog = now;
+        }
+    }
+}
+
+// The frame a pair begun now will be shown in: one refresh after the XR thread's newest.
+bool AsyncFrameInfo(VRFrameInfo& fi) {
+    const int64_t t = g_async.displayTime.load(std::memory_order_acquire);
+    if (!t) return false;
+    fi.displayPeriodNs = g_async.period.load(std::memory_order_relaxed);
+    fi.displayTimeNs = t + fi.displayPeriodNs;
+    fi.displayTimeSec = (double)fi.displayTimeNs * 1e-9;
+    fi.shouldRender = g_async.shouldRender.load(std::memory_order_relaxed);
+    fi.pairIndex = ++g_async.pairIndex;
+    fi.waitMs = 0.f;
+    return true;
+}
+
+// Caller holds g_async.mtx.
+void AsyncReleaseHeldLocked(IVRBackend* vr) {
+    for (int e = 0; e < 2; ++e)
+        if (g_async.held[e]) { vr->ReleaseEyeImage((VREye)e); g_async.held[e] = false; }
+}
+
+// The flat screen (menus, loading, warm-up), published for the XR thread.
+void AsyncPublishFlat(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp, bool shouldRender) {
+    std::lock_guard<std::mutex> g(g_async.mtx);
+    AsyncReleaseHeldLocked(vr);
+    VRSubmitLayer layer;
+    if (shouldRender && BlitQuad(vr, f, bp)) layer.quadValid = true;
+    layer.quadDistanceM = Cfg().vrCinemaDistance;
+    layer.quadWidthM = Cfg().vrCinemaWidth;
+    ComposeLayers(vr, f, layer);
+    g_async.layer = layer;
+    g_async.have = true;
+    g_async.seq.fetch_add(1, std::memory_order_relaxed);
+}
+
+// FullPresent's twin for AsyncSubmit: the same pairing of presents to eyes (PresentLag and
+// all), but the opening present blits and HOLDS the first eye, and the closing one blits the
+// second and publishes the pair - no xrWaitFrame, xrBeginFrame or xrEndFrame on this thread.
+void FullPresentAsync(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
+    if (Cfg().vrFadeGuard) FadeGuardSample(f);
+    if (FramePumpCurrentPass() == 2) FramePumpNotePass2Present();
+    const int keyLag = DebugKeysPresentLag();
+    const int lag = keyLag >= 0 ? keyLag : (Cfg().vrPresentLag != 0 ? 1 : 0);
+    const int pass = FramePumpCurrentPass();
+    const bool opens = (lag == 0) ? (pass == 1) : (pass == 2);
+    const double t0 = NowMs();
+
+    if (opens) {
+        if (g_frameOpen) {
+            // A pair started but its closing present never came: drop the half pair, show the flat screen.
+            AsyncPublishFlat(vr, f, bp, g_openFi.shouldRender);
+            g_frameOpen = false;
+        }
+        if (g_pumpStalled) {
+            g_pumpStalled = false;
+            g_repTraceLeft.store(48, std::memory_order_relaxed);
+            LOGI("[stereo] second pass is back; stereo pairs resume");
+        }
+        g_lastOpenTick = GetTickCount64();
+        VRFrameInfo fi;
+        if (!AsyncFrameInfo(fi)) return;   // the XR thread has not had its first frame yet
+        g_openFi = fi;
+        PublishEyeRequest(vr, f, fi);
+        StereoEyeReport rep;
+        bool leftBlitted = false;
+        if (fi.shouldRender && PopReportForEye(0, rep)) leftBlitted = BlitEyeFromReport(vr, f, bp, rep, true);
+        if (leftBlitted) g_frameOpen = true;
+        else AsyncPublishFlat(vr, f, bp, fi.shouldRender);
+    } else {
+        if (!g_frameOpen) {
+            if (lag == 1) {
+                const ULONGLONG now = GetTickCount64();
+                const bool pumpStalled = !g_lastOpenTick || now - g_lastOpenTick > kPumpStallMs;
+                if (ReportsLive() && !pumpStalled) return;
+                if (pumpStalled) {
+                    ResetReports();
+                    if (!g_pumpStalled) {
+                        g_pumpStalled = true;
+                        LOGI("[stereo] no second pass for %llu ms - the game is not producing "
+                             "stereo pairs (menu, cutscene); submitting flat frames until it "
+                             "does. The HUD layer keeps going.", now - g_lastOpenTick);
+                    }
+                    g_monoStalls.fetch_add(1, std::memory_order_relaxed);
+                }
+                VRFrameInfo fi;
+                if (!AsyncFrameInfo(fi)) return;
+                PublishEyeRequest(vr, f, fi);
+                AsyncPublishFlat(vr, f, bp, fi.shouldRender);
+                g_lastSubmitMs.store((float)(NowMs() - t0), std::memory_order_relaxed);
+            }
+            return;
+        }
+        StereoEyeReport rep;
+        if (g_openFi.shouldRender && PopReportForEye(1, rep)) BlitEyeFromReport(vr, f, bp, rep, true);
+        g_frameOpen = false;
+        const bool didStereo = g_async.held[0] && g_async.held[1];
+        {
+            std::lock_guard<std::mutex> g(g_async.mtx);
+            AsyncReleaseHeldLocked(vr);
+            VRSubmitLayer layer;
+            if (didStereo) {
+                layer.projectionValid = true;
+                layer.views[0] = g_submit[0];
+                layer.views[1] = g_submit[1];
+            } else {
+                if (BlitQuad(vr, f, bp)) layer.quadValid = true;
+                layer.quadDistanceM = Cfg().vrCinemaDistance;
+                layer.quadWidthM = Cfg().vrCinemaWidth;
+            }
+            ComposeLayers(vr, f, layer);
+            g_async.layer = layer;
+            g_async.have = true;
+            g_async.seq.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (didStereo) HudNoteStereoFrame();
+    }
+    g_lastSubmitMs.store((float)(NowMs() - t0), std::memory_order_relaxed);
+}
+
 // ---- frame loop, render-thread side -------------------------------------------------
 void StereoOnPresent(const Dx12Frame& f) {
     const StereoMode mode = (StereoMode)g_mode.load(std::memory_order_relaxed);
@@ -800,7 +992,12 @@ void StereoOnPresent(const Dx12Frame& f) {
              f.width, f.height, (unsigned)f.format, ew, eh);
     }
 
-    if (!vr->EnsureQuadSwapchain(f.width, f.height, f.format)) return;
+    {
+        // A rebuilt quad swapchain must not land inside the XR thread's xrEndFrame.
+        std::unique_lock<std::mutex> ag(g_async.mtx, std::defer_lock);
+        if (AsyncActive()) ag.lock();
+        if (!vr->EnsureQuadSwapchain(f.width, f.height, f.format)) return;
+    }
 
     // There is a live session with graphics bound, so there IS a layer to hang the UI on.
     // hud.cpp only redirects the UI out of the game's frame while this keeps ticking.
@@ -815,9 +1012,21 @@ void StereoOnPresent(const Dx12Frame& f) {
 
     // Full stereo: two engine passes -> two presents -> one XR frame, in FullPresent.
     if (mode == StereoMode::Full && FramePumpReady()) {
-        FullPresent(vr, f, bp);
+        // [VR] AsyncSubmit (read once): the XR thread starts with the first full-stereo present and
+        // owns the runtime's frame loop from then on - no present calls WaitBegin/EndFrame again.
+        static const bool s_async = Cfg().vrAsyncSubmit;
+        static bool s_started = false;
+        if (s_async && !s_started) {
+            s_started = true;
+            g_frameOpen = false;   // the synchronous path never ran a frame here; nothing is open
+            g_async.running.store(true, std::memory_order_release);
+            std::thread(AsyncXrLoop, vr).detach();
+        }
+        if (AsyncActive()) FullPresentAsync(vr, f, bp);
+        else FullPresent(vr, f, bp);
         return;
     }
+    if (AsyncActive()) return;   // the XR thread owns the frame loop; no second WaitBegin here
     if (mode == StereoMode::Full) {
         static bool s_warned = false;
         if (!s_warned) { s_warned = true; LOGW("[stereo] full: frame pump not armed yet; running debugalt until it is"); }
@@ -891,6 +1100,7 @@ StereoStats StereoGetStats() {
     if (wn > 0) { s.waitFrameMsAvg = (float)wus / 1000.f / (float)wn; s.waitFrameMsMax = (float)wmax / 1000.f; }
     const long long per = g_displayPeriodNs.load();
     if (per > 0) s.headsetHz = (float)(1e9 / (double)per);
+    s.asyncSubmit = AsyncActive();
     return s;
 }
 }

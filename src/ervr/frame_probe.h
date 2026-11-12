@@ -55,6 +55,12 @@ float FramePumpLastMs();
 // any blocking inside it included). [0] = pass 1 (the real frame), [1] = pass 2.
 struct PumpPassTimes { float msAvg[2] = {}, msMax[2] = {}; };
 PumpPassTimes FramePumpTakePassTimes();
+// [Experimental] ProfileGroups: logs each pass's ms per task group since the last call (heartbeat).
+void FrameProbeProfileReport();
+// [Experimental] ProfileGroups / ProfileSample: the engine pass executing right now (1 or 2; 0 = outside
+// either pass's queue_tasks) and how many times each pass has begun.
+int  FramePumpProfilePass();
+long FramePumpPassSeq(int pass);
 // The game's D3D12 present queue, from the ReShade present handler (null on device loss).
 // [VR] GpuSync drains it with a fence between the two engine passes so pass 2's constant
 // uploads cannot overwrite per-frame GPU data pass 1's draws are still reading.
