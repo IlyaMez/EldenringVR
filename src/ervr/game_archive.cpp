@@ -1,5 +1,4 @@
 #include "game_archive.h"
-#include "game_memory.h"
 #include "log.h"
 #include <windows.h>
 #include <bcrypt.h>
@@ -8,6 +7,9 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <filesystem>
+#include <zstd.h>
+#include <zlib.h>
 
 namespace ervr {
 namespace {
@@ -30,14 +32,26 @@ int64_t g_tpfbdtOffset = 0;
 std::unordered_map<int, IconEntry> g_icons;
 Archive g_archives[5];
 const wchar_t* const kArchiveNames[5] = {L"Data0", L"Data1", L"Data2", L"Data3", L"DLC"};
+std::wstring g_directory;
+HMODULE g_oodle = nullptr;
+bool g_oodleOwned = false;
 
 std::wstring GameDir() {
+    if (!g_directory.empty()) return g_directory;
     wchar_t buf[MAX_PATH]{};
     GetModuleFileNameW(nullptr, buf, MAX_PATH);
     std::wstring s(buf);
     const size_t slash = s.find_last_of(L"\\/");
     return slash == std::wstring::npos ? L"." : s.substr(0, slash);
 }
+void SelectDirectory(const std::wstring& dir) {
+    if (dir == g_directory) return;
+    for (auto& a : g_archives) { if (a.bdt != INVALID_HANDLE_VALUE) CloseHandle(a.bdt); a = Archive{}; }
+    g_icons.clear(); g_iconsTried = false; g_iconsWhy.clear(); g_iconBdt = INVALID_HANDLE_VALUE;
+    if (g_oodleOwned && g_oodle) FreeLibrary(g_oodle);
+    g_oodle = nullptr; g_oodleOwned = false; g_directory = dir;
+}
+bool ReadWhole(const std::wstring& path, std::vector<uint8_t>& out);
 uint32_t BE32(const uint8_t* p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 template <class T> bool At(const std::vector<uint8_t>& b, size_t off, T& out) {
     if (off > b.size() || b.size() - off < sizeof(T)) return false;
@@ -79,16 +93,17 @@ bool DerInt(const std::vector<uint8_t>& d, size_t& i, std::vector<uint8_t>& out)
 }
 std::vector<RsaKey> FindKeys() {
     std::vector<RsaKey> keys;
-    const uint8_t* base = (const uint8_t*)GetModuleHandleW(nullptr);
+    std::vector<uint8_t> executable;
+    if (!ReadWhole(GameDir() + L"\\eldenring.exe", executable)) return keys;
     IMAGE_DOS_HEADER dos{}; IMAGE_NT_HEADERS64 nt{};
-    if (!SafeRead(base, &dos, sizeof(dos)) || !SafeRead(base + dos.e_lfanew, &nt, sizeof(nt))) return keys;
-    const uint8_t* secTable = base + dos.e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
+    if (!At(executable, 0, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < 0 ||
+        !At(executable, (size_t)dos.e_lfanew, nt) || nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.NumberOfSections > 96) return keys;
+    const size_t secTable = (size_t)dos.e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
     for (int s = 0; s < nt.FileHeader.NumberOfSections; ++s) {
         IMAGE_SECTION_HEADER sec{};
-        if (!SafeRead(secTable + s * sizeof(sec), &sec, sizeof(sec)) || std::memcmp(sec.Name, ".rdata", 6) != 0) continue;
-        std::vector<uint8_t> img(sec.Misc.VirtualSize, 0);
-        for (size_t at = 0; at < img.size(); at += 1 << 20)
-            SafeRead(base + sec.VirtualAddress + at, img.data() + at, std::min<size_t>(1 << 20, img.size() - at));
+        if (!At(executable, secTable + s * sizeof(sec), sec) || std::memcmp(sec.Name, ".rdata", 6) != 0) continue;
+        if (sec.PointerToRawData > executable.size() || sec.SizeOfRawData > executable.size() - sec.PointerToRawData) return {};
+        std::vector<uint8_t> img(executable.begin() + sec.PointerToRawData, executable.begin() + sec.PointerToRawData + sec.SizeOfRawData);
         static const char kBegin[] = "-----BEGIN RSA PUBLIC KEY-----", kEnd[] = "-----END RSA PUBLIC KEY-----";
         auto it = img.begin();
         while ((it = std::search(it, img.end(), kBegin, kBegin + sizeof(kBegin) - 1)) != img.end()) {
@@ -199,13 +214,14 @@ bool OpenArchive(Archive& a, const wchar_t* name, const std::vector<RsaKey>& key
 }
 // A whole file from an archive, its AES ranges decrypted.
 bool ReadFileFrom(Archive& a, const FileEntry& e, std::vector<uint8_t>& out) {
-    if (e.padded <= 0 || e.padded > (64 << 20)) return false;
+    if (e.padded <= 0 || e.padded > (128 << 20) || e.offset < 0) return false;
     out.resize((size_t)e.padded);
     if (!ReadAt(a.bdt, e.offset, out.data(), out.size())) return false;
     if (e.aesAt) {
         uint8_t key[16]; int32_t ranges = 0;
-        if (e.aesAt + 20 > a.bhd.size()) return false;
+        if (e.aesAt > a.bhd.size() || a.bhd.size() - (size_t)e.aesAt < 20) return false;
         std::memcpy(key, a.bhd.data() + e.aesAt, 16); At(a.bhd, (size_t)e.aesAt + 16, ranges);
+        if (ranges < 0 || ranges > 64) return false;
         for (int32_t r = 0; r < ranges && r < 64; ++r) {
             int64_t s = 0, t = 0;
             if (!At(a.bhd, (size_t)e.aesAt + 20 + 16 * r, s) || !At(a.bhd, (size_t)e.aesAt + 28 + 16 * r, t)) return false;
@@ -263,6 +279,43 @@ bool OpenIcons() {
 
 using FnDecompress = intptr_t(__cdecl*)(const void*, intptr_t, void*, intptr_t, int, int, int, void*, intptr_t, void*, void*, void*, intptr_t, int);
 
+bool Decompress(const std::vector<uint8_t>& dcx, std::vector<uint8_t>& out, std::string& why) {
+    auto fail = [&](const char* text) { why = text; out.clear(); return false; };
+    if (dcx.size() < 4 || dcx.size() > (128u << 20)) return fail("invalid container size");
+    if (std::memcmp(dcx.data(), "DCX", 4) != 0) { out = dcx; return true; }
+    auto tag = [&](const char* text) -> size_t {
+        for (size_t i = 0; i + 12 <= std::min<size_t>(dcx.size(), 0x80); i += 4)
+            if (!std::memcmp(dcx.data() + i, text, 4)) return i;
+        return SIZE_MAX;
+    };
+    const size_t dcs = tag("DCS"), dcp = tag("DCP"), dca = tag("DCA");
+    if (dcs == SIZE_MAX || dcp == SIZE_MAX || dca == SIZE_MAX) return fail("invalid DCX header");
+    const uint32_t raw = BE32(dcx.data() + dcs + 4), compressed = BE32(dcx.data() + dcs + 8), head = BE32(dcx.data() + dca + 4);
+    if (!raw || raw > (128u << 20) || head < 8 || head > dcx.size() - dca || compressed > dcx.size() - dca - head) return fail("invalid DCX sizes");
+    const uint8_t* payload = dcx.data() + dca + head;
+    out.resize(raw);
+    if (!std::memcmp(dcx.data() + dcp + 4, "ZSTD", 4)) {
+        const size_t got = ZSTD_decompress(out.data(), out.size(), payload, compressed);
+        return (!ZSTD_isError(got) && got == raw) || fail("Zstandard decompression failed");
+    }
+    if (!std::memcmp(dcx.data() + dcp + 4, "DFLT", 4)) {
+        uLongf got = raw;
+        return (uncompress(out.data(), &got, payload, compressed) == Z_OK && got == raw) || fail("zlib decompression failed");
+    }
+    if (std::memcmp(dcx.data() + dcp + 4, "KRAK", 4)) return fail("unsupported DCX codec");
+    if (!g_oodle) {
+        if (g_directory.empty()) g_oodle = GetModuleHandleW(L"oo2core_6_win64.dll");
+        if (!g_oodle) {
+            g_oodle = LoadLibraryExW((GameDir() + L"\\oo2core_6_win64.dll").c_str(), nullptr,
+                                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+            g_oodleOwned = g_oodle != nullptr;
+        }
+    }
+    const auto decompress = g_oodle ? reinterpret_cast<FnDecompress>(GetProcAddress(g_oodle, "OodleLZ_Decompress")) : nullptr;
+    if (!decompress) return fail("the game's oo2core_6_win64.dll could not be loaded");
+    return decompress(payload, compressed, out.data(), raw, 1, 0, 0, nullptr, 0, nullptr, nullptr, nullptr, 0, 3) == raw || fail("Oodle decompression failed");
+}
+
 } // namespace
 
 uint64_t ArchivePathHash(const char* path) {
@@ -275,8 +328,9 @@ uint64_t ArchivePathHash(const char* path) {
     return h;
 }
 
-bool ArchiveReadItemIcon(int iconId, std::vector<uint8_t>& tpf, std::string* why) {
+bool ArchiveReadItemIcon(int iconId, std::vector<uint8_t>& tpf, std::string* why, const std::wstring& gameDirectory) {
     std::lock_guard<std::mutex> g(g_mtx);
+    SelectDirectory(gameDirectory);
     auto fail = [&](const std::string& w) { if (why) *why = w; return false; };
     if (!OpenIcons()) return fail(g_iconsWhy);
     auto it = g_icons.find(iconId);
@@ -284,27 +338,51 @@ bool ArchiveReadItemIcon(int iconId, std::vector<uint8_t>& tpf, std::string* why
     if (it->second.size <= 0x50 || it->second.size > (16 << 20)) return fail("bad entry size");
     std::vector<uint8_t> dcx((size_t)it->second.size);
     if (!ReadAt(g_iconBdt, g_tpfbdtOffset + it->second.offset, dcx.data(), dcx.size())) return fail("read failed");
-    // DCX (big-endian header): "DCS" uncompressed / compressed sizes, "DCP" the codec, "DCA" the payload's start.
-    auto tag = [&](const char* t) -> size_t {
-        for (size_t i = 0; i + 8 <= std::min<size_t>(dcx.size(), 0x80); i += 4) if (std::memcmp(dcx.data() + i, t, 4) == 0) return i;
-        return SIZE_MAX;
-    };
-    const size_t dcs = tag("DCS"), dcp = tag("DCP"), dca = tag("DCA");
-    if (std::memcmp(dcx.data(), "DCX", 4) != 0 || dcs == SIZE_MAX || dcp == SIZE_MAX || dca == SIZE_MAX) return fail("not a DCX file");
-    if (std::memcmp(dcx.data() + dcp + 4, "KRAK", 4) != 0) return fail("not Oodle-compressed");
-    const uint32_t rawLen = BE32(dcx.data() + dcs + 4), compLen = BE32(dcx.data() + dcs + 8), headLen = BE32(dcx.data() + dca + 4);
-    const size_t payload = dca + headLen;
-    if (rawLen == 0 || rawLen > (64u << 20) || payload > dcx.size() || compLen > dcx.size() - payload) return fail("bad DCX sizes");
-    static FnDecompress s_decompress = nullptr;
-    if (!s_decompress) {
-        HMODULE oodle = GetModuleHandleW(L"oo2core_6_win64.dll");
-        if (oodle) s_decompress = (FnDecompress)GetProcAddress(oodle, "OodleLZ_Decompress");
+    std::string error;
+    return Decompress(dcx, tpf, error) || fail(error);
+}
+
+bool ArchiveDecompress(const std::vector<uint8_t>& bytes, std::vector<uint8_t>& out, std::string& why, const std::wstring& gameDirectory) {
+    std::lock_guard<std::mutex> g(g_mtx); SelectDirectory(gameDirectory);
+    return Decompress(bytes, out, why);
+}
+
+bool ArchiveReadFile(const char* path, std::vector<uint8_t>& bytes, std::string& why, const std::wstring& gameDirectory) {
+    std::lock_guard<std::mutex> g(g_mtx); SelectDirectory(gameDirectory);
+    const std::string name(path ? path : "");
+    if (name.empty() || name.front() != '/' || name.find("..") != std::string::npos || name.find(':') != std::string::npos) { why = "invalid archive path"; return false; }
+    std::vector<uint8_t> raw;
+    if (ReadWhole((std::filesystem::path(GameDir()) / std::filesystem::path(name.substr(1))).wstring(), raw)) return Decompress(raw, bytes, why);
+    const auto keys = FindKeys();
+    if (keys.empty()) { why = "eldenring.exe has no readable archive keys"; return false; }
+    const uint64_t hash = ArchivePathHash(path);
+    for (int i = 4; i >= 0; --i) {
+        auto& a = g_archives[i];
+        if (!OpenArchive(a, kArchiveNames[i], keys)) continue;
+        const auto it = a.files.find(hash);
+        if (it != a.files.end()) {
+            if (!ReadFileFrom(a, it->second, raw)) { why = "archive entry could not be read"; return false; }
+            return Decompress(raw, bytes, why);
+        }
     }
-    if (!s_decompress) return fail("oo2core_6_win64.dll is not loaded");
-    tpf.resize(rawLen);
-    const intptr_t got = s_decompress(dcx.data() + payload, compLen, tpf.data(), rawLen, 1, 0, 0, nullptr, 0, nullptr, nullptr, nullptr, 0, 3);
-    if (got != (intptr_t)rawLen) return fail("Oodle decompression failed");
-    return true;
+    why = name + " was not found in the installed game"; return false;
+}
+
+bool ArchiveReadRegulation(std::vector<uint8_t>& out, std::string& why, const std::wstring& gameDirectory) {
+    std::lock_guard<std::mutex> g(g_mtx); SelectDirectory(gameDirectory);
+    std::vector<uint8_t> input;
+    if (!ReadWhole(GameDir() + L"\\regulation.bin", input) || input.size() < 32 || input.size() % 16) { why = "regulation.bin is missing or invalid"; return false; }
+    // ER regulation AES-256-CBC format/key: SoulsFormatsNEXT RegulationDecryptor (see THIRD_PARTY.md).
+    const uint8_t secret[32] = {0x99,0xBF,0xFC,0x36,0x6A,0x6B,0xC8,0xC6,0xF5,0x82,0x7D,0x09,0x36,0x02,0xD6,0x76,0xC4,0x28,0x92,0xA0,0x1C,0x20,0x7F,0xB0,0x24,0xD3,0xAF,0x4E,0x49,0x3F,0xEF,0x99};
+    BCRYPT_ALG_HANDLE alg = nullptr; BCRYPT_KEY_HANDLE key = nullptr;
+    bool ok = BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, nullptr, 0)) &&
+              BCRYPT_SUCCESS(BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_CBC, sizeof(BCRYPT_CHAIN_MODE_CBC), 0)) &&
+              BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(alg, &key, nullptr, 0, (PUCHAR)secret, sizeof(secret), 0));
+    std::vector<uint8_t> raw(input.size()); ULONG got = 0; uint8_t iv[16]; std::memcpy(iv, input.data(), 16);
+    ok = ok && BCRYPT_SUCCESS(BCryptDecrypt(key, input.data()+16, (ULONG)input.size()-16, nullptr, iv, 16, raw.data(), (ULONG)raw.size(), &got, 0));
+    if (key) BCryptDestroyKey(key); if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    if (!ok) { why = "regulation.bin decryption failed"; return false; }
+    raw.resize(got); return Decompress(raw, out, why);
 }
 
 }

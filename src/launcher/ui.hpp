@@ -1,6 +1,7 @@
 #pragma once
 #include "system.hpp"
 #include "update.hpp"
+#include "weapon_workshop.hpp"
 #include "imgui.h"
 #include <functional>
 #include <optional>
@@ -28,7 +29,7 @@ void theme(ImGuiStyle& style);
 class App {
 public:
     // `updatedFrom`: the version an update replaced (--updated-from), empty on an ordinary start.
-    App(HWND window, Fonts fonts, std::string updatedFrom = {});
+    App(HWND window, Fonts fonts, ID3D11Device* device, std::string updatedFrom = {});
     ~App();
     // Reads the scan, the checks and the session; runs every loop, even while minimized.
     void poll();
@@ -40,7 +41,7 @@ public:
     std::wstring restartFolder() const { return update_.state == UpdateState::installed ? installFolder_ : std::wstring(); }
 
 private:
-    enum class Tab { play, options, controls, about };
+    enum class Tab { play, options, controls, weapons, about };
     enum class Mark { ok, warning, error, busy, info };
     // A button in the gold of the one thing to do, keylined in gold (the tip jar), in red (removing), or plain.
     enum class Ink { plain, primary, support, danger };
@@ -139,6 +140,7 @@ private:
     void copyLog();
     void note(LineKind kind, std::string text);
 
+    WeaponWorkshop workshop_;
     HWND window_;
     Fonts fonts_;
     float scale_ = 1;

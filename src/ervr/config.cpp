@@ -362,6 +362,9 @@ void Config::Load(const std::wstring& path) {
     skillAim = GetS(ini, L"Combat", L"SkillAim", skillAim);
     swingAimMaxDeg = Clamp(GetF(ini, L"Combat", L"SwingAimMaxDeg", swingAimMaxDeg), 0.f, 180.f);
     if (skillAim != "swing" && skillAim != "head" && skillAim != "hand") skillAim = "swing";
+    stanceHoldAnimation = GetB(ini, L"Combat", L"StanceHoldAnimation", stanceHoldAnimation);
+    skillProjectileFromBlade = GetB(ini, L"Combat", L"SkillProjectileFromBlade", skillProjectileFromBlade);
+    skillProjectileBladePoint = Clamp(GetF(ini, L"Combat", L"SkillProjectileBladePoint", skillProjectileBladePoint), 0.f, 1.f);
     criticals = GetS(ini, L"Combat", L"Criticals", criticals);
     // 0.7.5's "hold 1 s to relearn" is the held skill now (SkillHoldSeconds).
     retiredRelearnHold = !GetS(ini, L"Combat", L"TwoHandSkillRelearnHold", "").empty();
@@ -551,6 +554,9 @@ void Config::Load(const std::wstring& path) {
     autoPilotMenuPeriod  = GetF(ini, L"Experimental", L"AutoPilotMenuPeriod", autoPilotMenuPeriod);
     autoPilotMenuButton  = GetS(ini, L"Experimental", L"AutoPilotMenuButton", autoPilotMenuButton);
     autoPilotScript      = GetS(ini, L"Experimental", L"AutoPilotScript", autoPilotScript);
+    debugProjectileYawDeg  = GetF(ini, L"Experimental", L"DebugProjectileYawDeg", debugProjectileYawDeg);
+    debugProjectileRollDeg = GetF(ini, L"Experimental", L"DebugProjectileRollDeg", debugProjectileRollDeg);
+    debugProjectileLift    = GetF(ini, L"Experimental", L"DebugProjectileLift", debugProjectileLift);
 }
 
 Config& Cfg() { return g_cfg; }

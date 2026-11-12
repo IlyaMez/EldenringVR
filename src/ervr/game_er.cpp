@@ -6,6 +6,7 @@
 // (struct layouts), FreecamMod / TGA (FieldArea -> GameRend -> CSPersCam), and the
 // classic WorldChrMan AOB. Nothing here is guessed from scratch; see README.
 #include "game_er.h"
+#include "weapon_preset_runtime.h"
 #include "game_version.h"
 #include "head_anchor.h"
 #include "pose_frame.h"
@@ -23,6 +24,8 @@
 #include "rtti.h"
 #include "combat.h"
 #include "combat_moves.h"
+#include "projectile_frame.h"
+#include "params_er.h"
 #include "frame_probe.h"
 #include "stereo.h"
 #include "belt.h"
@@ -686,6 +689,35 @@ bool SeatTemplateReady() { return g_skel.boneCount > 0 && (int)g_seatedTemplate.
 struct BladeSample { bool valid = false; Vec3 grip{}, tip{}; double stamp = 0; };
 std::mutex g_bladeMtx;
 BladeSample g_blade[2];
+// Blade directions over the last second or two, per hand (pass 1, world): YOUR blade as the arm solve holds it, and
+// the blade of the game's OWN animation - the arm in the pose buffer as the animation left it, before ERVR replaces
+// it. A skill's projectile is turned from the plane the animation slashed in to the plane your swing swept
+// (projectile_frame.h, Hook_SpawnBullet). Guarded by g_bladeMtx.
+struct AxisTrail {
+    static constexpr int N = 256;
+    AxisSample s[N]; int head = 0, count = 0;
+    void Push(double t, const Vec3& a) {
+        if (count && t - s[(head + N - 1) % N].t < 0.004) return;   // UpdateArms runs at several write points a frame
+        s[head] = AxisSample{t, a}; head = (head + 1) % N; if (count < N) ++count;
+    }
+    // The samples from t0 on, oldest first, into out (at most cap). Returns how many.
+    int Since(double t0, AxisSample* out, int cap) const {
+        int n = 0;
+        for (int i = count; i > 0 && n < cap; --i) {
+            const AxisSample& x = s[(head + N - i) % N];
+            if (x.t >= t0) out[n++] = x;
+        }
+        return n;
+    }
+};
+AxisTrail g_vrTrail[2], g_animTrail[2];
+// The plane a trail swept between t0 and t1 (SweptPlaneNormal), zero when too little of it was sampled.
+Vec3 TrailPlane(const AxisTrail& tr, double t0, double t1, int* samples = nullptr) {
+    AxisSample buf[AxisTrail::N];   // 6 KB of stack, no allocation inside the game's spawn call
+    int n = 0; { std::lock_guard<std::mutex> g(g_bladeMtx); n = tr.Since(t0, buf, AxisTrail::N); }
+    if (samples) *samples = n;
+    return n >= 3 ? SweptPlaneNormal(buf, n, t0, t1) : Vec3{};
+}
 BodyPoseCaptureGuard g_poseCaptureGuard;
 Vec3 g_statPos{}; double g_statSince = 0; double g_templLastCapture = 0;
 // Stance re-capture settle guard: candidate snapshot of a pose that differs from the template, only promoted to
@@ -1048,6 +1080,7 @@ namespace posescan {
 // One pose per rendered frame, shared by repeated hooks and both eyes. The main
 // grip stays on the tracked controller; weight is angular resistance about it.
 struct InertiaState {
+    uint64_t presetFingerprint = 0;
     bool init = false;
     uint32_t frame = 0xFFFFFFFFu;
     Vec3 pos; Quat q;
@@ -1059,11 +1092,20 @@ struct InertiaState {
 InertiaState g_inertia[2];
 std::mutex g_inertiaMtx;
 
+Quat PresetCalibration(int hand, const Config& c, float pitch) {
+    const auto t = AppliedWeaponPreset(hand).tuning;
+    return Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY+t.Get(WeaponField::Yaw,0)),
+        Deg2Rad(pitch+t.Get(WeaponField::Pitch,0)),Deg2Rad(c.handRotOffZ+t.Get(WeaponField::Roll,0)));
+}
+
 void InertiaStep(int h, Vec3& p, Quat& q, double now,
                  bool twoHandAim, const Vec3& handLine, Vec3 shaftAxis) {
     const Config& c = Cfg();
+    const auto preset = AppliedWeaponPreset(h);
+    const auto& tuning = preset.tuning;
     std::lock_guard<std::mutex> lock(g_inertiaMtx);
     InertiaState& s = g_inertia[h];
+    if (s.presetFingerprint != preset.fingerprint) { s = InertiaState{}; s.presetFingerprint = preset.fingerprint; }
     const uint32_t fr = g_frame;
     if (s.init && s.frame == fr) { p = s.pos; q = s.q; return; }
     s.frame = fr;
@@ -1081,9 +1123,9 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now,
         const bool twoArms = CombatTwoHandWeaponHand() == h;
         q = StepWeaponOrientation(s.q, q, shaftAxis, dt, CombatHandWeight(h), reach,
                                   CombatHandCom(h), c.kineticAccelWeight, c.inertiaComRef,
-                                  c.inertiaSpringHz, c.inertiaAngAccel,
-                                  twoArms ? c.inertiaTwoHandTorque : 1.f,
-                                  c.inertiaBrake, c.inertiaMaxLagAngle);
+                                  tuning.Get(WeaponField::InertiaResponse,c.inertiaSpringHz), tuning.Get(WeaponField::InertiaAcceleration,c.inertiaAngAccel),
+                                  twoArms ? tuning.Get(WeaponField::TwoHandTorque,c.inertiaTwoHandTorque) : 1.f,
+                                  tuning.Get(WeaponField::InertiaBrake,c.inertiaBrake), Deg2Rad(tuning.Get(WeaponField::MaxLag,c.inertiaMaxLagAngle*57.2957795f)));
     }
     // Composing two bending corrections can introduce a twist even if each
     // individually has none. Keep the final rendered edge tied to the wrist.
@@ -1094,7 +1136,7 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now,
     const Vec3 tip = p * c.handScale + q.Rotate(shaftAxis) * reach;
     s.tipSpeed = goodDt ? (tip - previousTip).Length() / dt : 0.f;
     s.handSpeed = goodDt ? (p - s.pos).Length() * c.handScale / dt : 0.f;
-    const float offSpeed = c.kineticEnabled && c.kineticContinuous ? c.contactOffSpeed : c.swingOffSpeed;
+    const float offSpeed = c.kineticEnabled && c.kineticContinuous ? tuning.Get(WeaponField::ContactOff,c.contactOffSpeed) : tuning.Get(WeaponField::SwingOff,c.swingOffSpeed);
     if (goodDt && s.tipSpeed >= offSpeed) s.arc += s.tipSpeed * dt;
     else s.arc = 0.f;
     s.pos = p; s.q = q; s.init = true; s.stamp = now;
@@ -1148,7 +1190,7 @@ bool CastAimRay(const FrameInfo& f, int h, Vec3& origin, Vec3& dir) {
     } else if (h < 0 || h > 1 || !f.handValid[h]) return false;
     float handRotX = c.handRotOffX;
     DebugKeysHandRotX(&handRotX);
-    const Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
+    const Quat calib = PresetCalibration(h,c,handRotX);
     const Quat cq = (baseQ * f.handQ[h] * calib).Normalized();
     const Vec3 cf = cq.Rotate({0, 0, 1}), cu = cq.Rotate({0, 1, 0});   // controller forward / up (game frame)
     if (kind == 1) {
@@ -1460,7 +1502,9 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false) {
             Vec3 p = ToGame(hand.pos); Quat q = ToGame(hand.rot);
             float handRotX = c.handRotOffX;
             DebugKeysHandRotX(&handRotX);
-            const Quat calibration = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
+            const Quat calibration = PresetCalibration(h,c,handRotX);
+            const auto fit = AppliedWeaponPreset(h).tuning;
+            if (c.handScale > .001f) p = p + q.Rotate({fit.Get(WeaponField::GripX,0),fit.Get(WeaponField::GripY,0),fit.Get(WeaponField::GripZ,0)}) * (1.f / c.handScale);
             const Vec3 shaftAxis = WeaponShaftAxis(calibration, c.twoHandAxis != "forward");
             bool twoHandAim = false; Vec3 handLine;
             if (c.twoHandAim) {
@@ -2165,6 +2209,20 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
             if (ang > g_probeMaxDeg[k]) g_probeMaxDeg[k] = ang;
         }
     }
+    // The animation's own blade, while the buffer still holds what the animation wrote (foreign = not our echo): the
+    // hand bone's blade axis - the same hand-local axis the VR hand maps the controller's blade axis onto. A skill's
+    // projectile is turned from the plane this slashed in to the plane your blade did (Hook_SpawnBullet).
+    if (poseForeign && FramePumpCurrentPass() != 2) {
+        const double now = NowSec();
+        std::lock_guard<std::mutex> g(g_bladeMtx);
+        for (int h = 0; h < 2; ++h) {
+            const int bone = h == HandLeft ? g_skel.L_hand : g_skel.R_hand;
+            if (bone < 0 || !g_skel.handAxesOk[h]) continue;
+            const Vec3 fw = g_skel.handFwd[h], th = (g_skel.handThumb[h] - fw * g_skel.handThumb[h].Dot(fw)).Normalized();
+            const Vec3 a = w.q[bone].Rotate(Cfg().twoHandAxis != "forward" ? th : fw).Normalized();
+            if (a.Length() > 0.5f) g_animTrail[h].Push(now, a);
+        }
+    }
 
     Quat baseQ = Quat::YawQ(f.baseYaw);
     // Body follows head: shift the whole skeleton (root bones) so the character hangs under your view instead of
@@ -2447,12 +2505,12 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     }
     float handRotX = c.handRotOffX;
     DebugKeysHandRotX(&handRotX);   // Numpad 6/9 live calibration wins while active
-    Quat calib = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(handRotX), Deg2Rad(c.handRotOffZ));
+    const Quat calib[2] = {PresetCalibration(0,c,handRotX),PresetCalibration(1,c,handRotX)};
     bool any = false;
     Vec3 tp[2]; Quat tq[2]; Vec3 tcf[2], tcu[2]; bool tok[2] = {false, false};
     for (int h = 0; h < 2; ++h) {
         if (!f.handValid[h]) continue;
-        Quat cq = (baseQ * f.handQ[h] * calib).Normalized();          // controller orientation in game world
+        Quat cq = (baseQ * f.handQ[h] * calib[h]).Normalized();          // controller orientation in game world
         Vec3 cf = cq.Rotate({0, 0, 1}), cu = cq.Rotate({0, 1, 0});     // controller forward / up (game frame)
         Quat q = cq;
         if (g_skel.handAxesOk[h]) q = Quat::MapPairs(g_skel.handFwd[h], g_skel.handThumb[h], cf, cu);   // hand-local -> world
@@ -2471,7 +2529,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     TwoHandGripOrientation grip;
     const bool pinned = CombatTwoHandPin(&pin, &wep, &along, &handle, &grip) && pin >= 0 && wep >= 0 && tok[pin] && tok[wep];
     if (pinned && c.twoHandPinOrient) {
-        const Quat cq = grip.InGame(baseQ * f.handQ[wep], calib);
+        const Quat cq = grip.InGame(baseQ * f.handQ[wep], calib[wep]);
         tq[pin] = g_skel.handAxesOk[pin] ? Quat::MapPairs(g_skel.handFwd[pin], g_skel.handThumb[pin],
                                                        cq.Rotate({0, 0, 1}), cq.Rotate({0, 1, 0})) : cq;
     }
@@ -2500,11 +2558,13 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     // enemy - on horseback the difference between "never reached" and "reached and did nothing".
     if (FramePumpCurrentPass() != 2) {
         std::lock_guard<std::mutex> g(g_bladeMtx);
+        const double now = NowSec();
         for (int h = 0; h < 2; ++h) {
             g_blade[h].valid = tok[h];
             if (!tok[h]) continue;
             const Vec3 axis = c.twoHandAxis != "forward" ? tcu[h] : tcf[h];
-            g_blade[h].grip = tp[h]; g_blade[h].tip = tp[h] + axis * CombatHandReach(h); g_blade[h].stamp = NowSec();
+            g_blade[h].grip = tp[h]; g_blade[h].tip = tp[h] + axis * CombatHandReach(h); g_blade[h].stamp = now;
+            g_vrTrail[h].Push(now, axis.Normalized());
         }
     }
     // Publish the entire solved root in the native model frame. Mixing a render-frame
@@ -2812,6 +2872,237 @@ void __fastcall Hook_UpdateLockTgt(void* man, float dt) {
     uint8_t* player = MainPlayer(); if (!player) return;
     FrameInfo f; if (!BuildFrame(player, f)) return;
     ReassertFaceCamera(player, f);
+}
+
+// ---------------------------------------------------------------- skill projectiles from the VR blade
+// CSBulletManager::SpawnBullet(manager, int* out, BulletSpawnData*, int* error) (fromsoftware-rs bullet_manager.rs;
+// exe 2.7.2.0 0x3a2cb0, the RVA fromsoftware-rs publishes for this exe, found by its own prologue). A TAE
+// BulletBehavior reaches it synchronously: 0x427440 (event 2) -> 0x3c2d70 -> 0x3c0f80 -> 0x49e3a0 -> here, and the
+// spawn data's +0x50..+0x8F is the 4x4 frame 0x3c10c0 copied from the event's dummy poly (0x3c0330): rows right, up,
+// forward, position (fromsoftware-rs calls +0x70 "angle" and +0x80 "position"). The bullet is built from it inside
+// this call, so a frame rewritten before the original runs is where the projectile starts and which way it flies.
+constexpr const char* AOB_SpawnBullet = "40 53 55 56 57 48 81 EC 98 07 00 00 48 C7 44 24 50 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 07 00 00 49 8B D9 49 8B F0 48 8B FA 48 8B E9 48 8D 4C 24 38 E8 ?? ?? ?? ?? 90 C7 07 FF FF FF FF";
+constexpr size_t Spawn_Owner = 0x00, Spawn_BehaviorId = 0x08, Spawn_BulletId = 0x14, Spawn_DmyPoly = 0x1C, Spawn_Frame = 0x50;
+// What the bullet is: BehaviorParam_PC row (refType 0x09 = 1 means refId 0x0C is a bullet) -> BulletParam row, whose
+// FollowType (byte 0x9A, bits 0-2; libER BULLET_PARAM_ST, row 0x110) is 0 for a bullet that flies on its own. One that
+// follows its owner or its dummy poly (a blade-riding effect, blades hovering overhead) keeps the game's dummy poly:
+// taking that away would leave it behind. -1 = not readable.
+int BulletFollowType(int32_t behaviorId, int32_t bulletId) {
+    if (bulletId < 0 && behaviorId >= 0) {
+        uint32_t sz = 0; uint8_t* row = ParamsRow(PI_BehaviorParam_PC, (uint32_t)behaviorId, &sz);
+        uint8_t refType = 0; int32_t refId = -1;
+        if (row && (sz == 0 || sz == 0x20) && SafeRead(row + 0x09, &refType, 1) && SafeRead(row + 0x0C, &refId, 4) && refType == 1) bulletId = refId;
+    }
+    if (bulletId < 0) return -1;
+    static int s_layoutOk = -1;
+    if (s_layoutOk < 0) {
+        const char* name = ParamsStructName(PI_BulletParam);
+        if (!name || !*name) return -1;   // params not loaded yet: ask again next time
+        s_layoutOk = strcmp(name, "BULLET_PARAM_ST") == 0 ? 1 : 0;
+        if (!s_layoutOk) LOGW("[combat] param holder %d is %s, not BULLET_PARAM_ST: a skill projectile's follow type is unknown (taken over anyway)", (int)PI_BulletParam, name);
+    }
+    if (!s_layoutOk) return -1;
+    uint32_t sz = 0; uint8_t* row = ParamsRow(PI_BulletParam, (uint32_t)bulletId, &sz);
+    uint8_t b = 0;
+    if (!row || (sz != 0 && sz != 0x110) || !SafeRead(row + 0x9A, &b, 1)) return -1;
+    return b & 7;
+}
+constexpr size_t Chr_FieldInsHandle = 0x08;
+// CSBulletManager / CSBulletIns (fromsoftware-rs): the bullets' preallocated buffer (+0x00) and live list (+0x08);
+// a bullet's handle (+0x08, selector first), physics position (+0x10), orientation quaternion (+0x20) and the next
+// live bullet (+0xE18), 0xE30 bytes each.
+constexpr size_t BM_Prealloc = 0x00, BM_Head = 0x08;
+constexpr size_t Bullet_Handle = 0x08, Bullet_Pos = 0x10, Bullet_Orient = 0x20, Bullet_Next = 0xE18, Bullet_Size = 0xE30;
+using FnSpawnBullet = int32_t* (__fastcall*)(void* mgr, int32_t* out, uint8_t* spawn, int32_t* err);
+FnSpawnBullet g_origSpawnBullet = nullptr;
+
+// One projectile followed into its flight (game thread): did it leave where it was put, the way it was pointed?
+// SpawnBullet only queues it: the bullet shows up in the manager's live list a frame or two later (flat-measured
+// 2026-11-11: none right after the call, one 3 frames later), so the watch finds it on the following frames.
+struct ProjectileWatch {
+    bool active = false; uint8_t* mgr = nullptr; Vec3 from{}, fwd{}, up{}; double at = 0;
+    uint8_t* before[16]{}; int nBefore = 0;            // live bullets at the spawn: not the new one
+    uint8_t* bullet = nullptr; uint32_t sel = 0; Vec3 first{}; double firstAt = 0;
+};
+ProjectileWatch g_projWatch;
+
+bool FiniteRow(const float* r, int n) { for (int i = 0; i < n; ++i) if (!std::isfinite(r[i])) return false; return true; }
+float YawOf(const Vec3& v) { return std::atan2(v.x, v.z); }
+
+// Rewrites the spawn frame of one of the player's projectiles. Returns true when it wrote; *pos / *fwd = where it now
+// starts and which way it points.
+bool RewriteProjectileSpawn(uint8_t* spawn, int hand, double swingAt, bool debugOnly, Vec3* outPos, Vec3* outFwd, Vec3* outUp) {
+    const Config& c = Cfg();
+    uint8_t* player = MainPlayer(); if (!player) return false;
+    uint64_t owner = 0, me = 0;
+    if (!SafeRead(spawn + Spawn_Owner, &owner, 8) || !SafeRead(player + Chr_FieldInsHandle, &me, 8) || owner != me) return false;
+    float m[16];
+    if (!SafeRead(spawn + Spawn_Frame, m, sizeof(m)) || !FiniteRow(m, 16)) return false;
+    int32_t bulletId = -1, dmy = -1; SafeRead(spawn + Spawn_BulletId, &bulletId, 4); SafeRead(spawn + Spawn_DmyPoly, &dmy, 4);
+    ProjectileFrame g; g.right = {m[0], m[1], m[2]}; g.up = {m[4], m[5], m[6]}; g.fwd = {m[8], m[9], m[10]}; g.pos = {m[12], m[13], m[14]};
+    if (g.fwd.Length() < 0.5f) return false;
+    const double now = NowSec();
+    int32_t behaviorId = -1; SafeRead(spawn + Spawn_BehaviorId, &behaviorId, 4);
+    const int follow = BulletFollowType(behaviorId, bulletId);
+    if (follow > 0) {
+        static double s_l = 0.0;
+        if (now - s_l > 2.0) { s_l = now; LOGI("[combat] projectile (behavior %d, dummy poly %d) follows its owner or dummy poly (FollowType %d): left where the game puts it", behaviorId, dmy, follow); }
+        return false;
+    }
+    ProjectileFrame o; ProjectileTurn t; Vec3 pos = g.pos;
+    char what[200]; what[0] = 0;
+    if (debugOnly) {
+        // Flat test: the game's own frame, turned and lifted by the [Experimental] DebugProjectile* knobs.
+        const Vec3 aim = Quat::YawQ(Deg2Rad(c.debugProjectileYawDeg)).Rotate(g.fwd.Normalized());
+        o = TurnProjectile(g, aim, Vec3{}, Vec3{}, &t);
+        if (c.debugProjectileRollDeg != 0.f) {
+            const Quat rq = Quat::AxisAngle(o.fwd.Normalized(), Deg2Rad(c.debugProjectileRollDeg));
+            o.right = rq.Rotate(o.right); o.up = rq.Rotate(o.up);
+            t.rollDeg = c.debugProjectileRollDeg; t.rolled = true;
+        }
+        pos = g.pos + Vec3{0.f, c.debugProjectileLift, 0.f};
+        snprintf(what, sizeof(what), "debug: turned %.0f deg, rolled %.0f deg, lifted %.2f m", c.debugProjectileYawDeg, c.debugProjectileRollDeg, c.debugProjectileLift);
+    } else {
+        if (hand != HandLeft && hand != HandRight) return false;
+        // From the blade: SkillProjectileBladePoint of the way from the grip to the tip, as the arm solve last held it.
+        BladeSample b; { std::lock_guard<std::mutex> lk(g_bladeMtx); b = g_blade[hand]; }
+        const bool bladeOk = b.valid && now - b.stamp < 0.15;
+        if (bladeOk) pos = b.grip + (b.tip - b.grip) * c.skillProjectileBladePoint;
+        // Along SkillAim: locked on, at the enemy; else the live cast aim's ray (the swing's arc / the weapon arm).
+        Vec3 aim{}; const char* aimWhy = "the game's direction";
+        FrameInfo f;
+        if (BuildFrame(player, f)) {
+            float tgt[4];
+            if (f.lockedOn) {
+                if (SafeRead(player + off::Chr_LockOnTarget, tgt, 16) && FiniteRow(tgt, 3)) { aim = (Vec3{tgt[0], tgt[1], tgt[2]} - pos).Normalized(); aimWhy = "the locked-on enemy"; }
+            } else if (c.skillAim != "head") {
+                bool casting = false; Vec3 ro, rd;
+                if (CombatCastAimHand(&casting) == hand && casting && CastAimRay(f, hand, ro, rd)) {
+                    aim = rd; Vec3 sw; aimWhy = CombatCastAimKind(&sw) == 1 ? "the swing's aim" : "the weapon arm's aim";
+                }
+            }
+        }
+        // The roll: the game animation's slash plane (its last 0.3 s) onto your swing's (around the follow-up's press).
+        int animN = 0, vrN = 0;
+        const Vec3 gamePlane = TrailPlane(g_animTrail[hand], now - 0.3, now, &animN);
+        const Vec3 swingPlane = swingAt > 0.0 ? TrailPlane(g_vrTrail[hand], swingAt - 0.15, std::min(now, swingAt + 0.45), &vrN) : Vec3{};
+        o = TurnProjectile(g, aim, gamePlane, swingPlane, &t);
+        if (!bladeOk && aim.Length() < 0.5f) return false;
+        char roll[96];
+        if (t.rolled) snprintf(roll, sizeof(roll), "rolled %.0f deg into your swing's plane", t.rollDeg);
+        else snprintf(roll, sizeof(roll), "not rolled (%s)", swingAt <= 0.0 ? "no swing fired it" :
+                      gamePlane.Length() < kMinSweptRad ? "the animation's slash not seen" : "your swing swept no plane along it");
+        snprintf(what, sizeof(what), "moved %.2f m %s, turned %.0f deg to %s, %s", (pos - g.pos).Length(),
+                 bladeOk ? "to the blade" : "(no blade: kept)", t.aimDeg, aimWhy, roll);
+        if (Cfg().combatDebug)
+            LOGD("[combat] projectile planes: animation |%.2f| from %d samples, swing |%.2f| from %d samples (pressed %.2f s ago)",
+                 gamePlane.Length(), animN, swingPlane.Length(), vrN, swingAt > 0.0 ? now - swingAt : -1.0);
+    }
+    const float w0 = m[3], w1 = m[7], w2 = m[11], w3 = m[15];
+    const float nm[16] = {o.right.x, o.right.y, o.right.z, w0, o.up.x, o.up.y, o.up.z, w1, o.fwd.x, o.fwd.y, o.fwd.z, w2, pos.x, pos.y, pos.z, w3};
+    if (!FiniteRow(nm, 16) || !SafeWrite(spawn + Spawn_Frame, nm, sizeof(nm))) return false;
+    // With a dummy poly id the bullet is built from that dummy poly when it is created (a frame or two later) and the
+    // frame above is ignored: flat test 2026-11-11, Reduvia's blood blade (dummy poly 80) appeared exactly where the
+    // game had put it, 0.50 m from the lifted frame, with the game's own orientation, and flew 40 deg off the turned
+    // forward. A spawn without one (-1) is built from the frame (the request path 0x3c10c0 takes when it has none).
+    const int32_t noDmy = -1;
+    if (!SafeWrite(spawn + Spawn_DmyPoly, &noDmy, 4)) return false;
+    *outPos = pos; *outFwd = o.fwd.Normalized(); *outUp = o.up;
+    // The game's own frame, against the body's facing: which row is the flight is read off the first log lines.
+    float face = 0.f; Vec3 pp; const bool faceOk = GameERChrPhysics(player, &pp, &face);
+    const Vec3 gf = g.fwd.Normalized();
+    static double s_last = 0.0;
+    if (now - s_last > 0.25) {
+        s_last = now;
+        LOGI("[combat] projectile (behavior %d, follow type %d, dummy poly %d) %s | the game's frame pointed %.0f deg %s of the body, pitch %.0f, up %.2f",
+             behaviorId, follow, dmy, what, faceOk ? std::fabs(Rad2Deg(WrapPi(YawOf(gf) - face))) : -1.f, faceOk && WrapPi(YawOf(gf) - face) < 0.f ? "left" : "right",
+             Rad2Deg(std::asin(Clamp(gf.y, -1.f, 1.f))), g.up.Normalized().y);
+    }
+    return true;
+}
+bool SafeRewriteProjectileSpawn(uint8_t* spawn, int hand, double swingAt, bool debugOnly, Vec3* pos, Vec3* fwd, Vec3* up) {
+    __try { return RewriteProjectileSpawn(spawn, hand, swingAt, debugOnly, pos, fwd, up); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// The live bullets (a bullet handle has field-ins type 3 in its selector's top bits).
+template <class F> void ForEachLiveBullet(uint8_t* mgr, F f) {
+    uint8_t* b = Deref(mgr + BM_Head);
+    for (int i = 0; b && i < 512; ++i) {
+        uint32_t s = 0;
+        if (SafeRead(b + Bullet_Handle, &s, 4) && (s >> 28) == 3) f(b, s);
+        b = Deref(b + Bullet_Next);
+    }
+}
+// Right after the spawn: remember what was already flying; ProjectileWatchTick picks the new one up.
+void WatchProjectile(uint8_t* mgr, const Vec3& pos, const Vec3& fwd, const Vec3& up) {
+    ProjectileWatch w; w.active = true; w.mgr = mgr; w.from = pos; w.fwd = fwd; w.up = up; w.at = NowSec();
+    ForEachLiveBullet(mgr, [&](uint8_t* b, uint32_t) { if (w.nBefore < 16) w.before[w.nBefore++] = b; });
+    g_projWatch = w;
+}
+void SafeWatchProjectile(uint8_t* mgr, const Vec3& pos, const Vec3& fwd, const Vec3& up) {
+    __try { WatchProjectile(mgr, pos, fwd, up); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+// Game thread, pass 1. First the new bullet nearest the path it was sent along: where it started and how it is
+// oriented against the frame it was given. Then, 0.1 s on, which way it actually flew.
+void ProjectileWatchTick() {
+    ProjectileWatch& w = g_projWatch;
+    if (!w.active) return;
+    const double now = NowSec();
+    if (now - w.at > 1.0) { w.active = false; LOGI("[combat] projectile: no new bullet near its path within 1 s (it may wait, or hit at once)"); return; }
+    if (!w.bullet) {
+        float bestOff = 1e9f; uint8_t* best = nullptr; uint32_t bestSel = 0; Vec3 bestP{}; float bestAlong = 0.f;
+        ForEachLiveBullet(w.mgr, [&](uint8_t* b, uint32_t s) {
+            for (int i = 0; i < w.nBefore; ++i) if (w.before[i] == b) return;
+            float p[4]; if (!SafeRead(b + Bullet_Pos, p, 16) || !FiniteRow(p, 3)) return;
+            const Vec3 d = Vec3{p[0], p[1], p[2]} - w.from;
+            const float along = d.Dot(w.fwd), off = (d - w.fwd * along).Length();
+            if (along > -0.5f && off < 0.6f + 0.15f * std::fabs(along) && off < bestOff) { bestOff = off; best = b; bestSel = s; bestP = Vec3{p[0], p[1], p[2]}; bestAlong = along; }
+        });
+        if (!best) return;
+        w.bullet = best; w.sel = bestSel; w.first = bestP; w.firstAt = now;
+        float q[4];
+        if (SafeRead(best + Bullet_Orient, q, 16) && FiniteRow(q, 4)) {
+            const Quat qq = Quat{q[0], q[1], q[2], q[3]}.Normalized();
+            const Vec3 z = qq.Rotate(Vec3{0.f, 0.f, 1.f}), y = qq.Rotate(Vec3{0.f, 1.f, 0.f});
+            LOGI("[combat] projectile appeared %.2f s after its spawn, %.2f m along the way it was sent and %.2f m off it; its orientation's +Z is %.0f deg from that way, its +Y %.0f deg from the frame's up",
+                 now - w.at, bestAlong, bestOff, Rad2Deg(std::acos(Clamp(z.Dot(w.fwd), -1.f, 1.f))), Rad2Deg(std::acos(Clamp(y.Dot(w.up.Normalized()), -1.f, 1.f))));
+        }
+        return;
+    }
+    if (now - w.firstAt < 0.1) return;
+    w.active = false;
+    uint32_t s = 0; float p[4];
+    if (!SafeRead(w.bullet + Bullet_Handle, &s, 4) || s != w.sel || !SafeRead(w.bullet + Bullet_Pos, p, 16) || !FiniteRow(p, 3)) {
+        LOGI("[combat] projectile: gone %.2f s after it appeared (hit something, or a short-lived one)", now - w.firstAt);
+        return;
+    }
+    const Vec3 d = Vec3{p[0], p[1], p[2]} - w.first;
+    if (d.Length() < 0.05f) { LOGI("[combat] projectile: still within 5 cm of where it appeared after %.2f s (it waits before it flies)", now - w.firstAt); return; }
+    const Vec3 dn = d.Normalized();
+    LOGI("[combat] projectile in flight: %.2f m in %.2f s, %.0f deg off the way it was sent (%.0f deg %s, %.0f deg %s of it)", d.Length(), now - w.firstAt,
+         Rad2Deg(std::acos(Clamp(dn.Dot(w.fwd), -1.f, 1.f))), std::fabs(Rad2Deg(WrapPi(YawOf(dn) - YawOf(w.fwd)))), WrapPi(YawOf(dn) - YawOf(w.fwd)) < 0.f ? "left" : "right",
+         std::fabs(Rad2Deg(std::asin(Clamp(dn.y, -1.f, 1.f)) - std::asin(Clamp(w.fwd.y, -1.f, 1.f)))), dn.y < w.fwd.y ? "below" : "above");
+}
+void SafeProjectileWatchTick() {
+    __try { ProjectileWatchTick(); } __except (EXCEPTION_EXECUTE_HANDLER) { g_projWatch.active = false; }
+}
+int32_t* __fastcall Hook_SpawnBullet(void* mgr, int32_t* out, uint8_t* spawn, int32_t* err) {
+    int hand = -1; double swingAt = -1.0; bool debugOnly = false;
+    Vec3 pos, fwd, up; bool rewritten = false;
+    const bool ours = spawn && CombatPlayerProjectileNow(&hand, &swingAt, &debugOnly);
+    if (ours) rewritten = SafeRewriteProjectileSpawn(spawn, hand, swingAt, debugOnly, &pos, &fwd, &up);
+    const Config& c = Cfg();
+    if (spawn && (c.debugProjectileYawDeg != 0.f || c.debugProjectileRollDeg != 0.f || c.debugProjectileLift != 0.f)) {
+        // Flat test only: every spawn, so a run shows the path was reached at all.
+        static double s_last = 0.0; const double n = NowSec();
+        if (n - s_last > 0.2) {
+            s_last = n; int32_t id = -1; SafeRead(spawn + Spawn_BulletId, &id, 4);
+            LOGI("[game] SpawnBullet: bullet %d, inside the player's own bullet event %d, rewritten %d", id, ours ? 1 : 0, rewritten ? 1 : 0);
+        }
+    }
+    int32_t* r = g_origSpawnBullet(mgr, out, spawn, err);
+    if (rewritten) SafeWatchProjectile((uint8_t*)mgr, pos, fwd, up);
+    return r;
 }
 // Replay our camera after the game's own camera finalizer. Cheap by design: no frame rebuild, no bone solve -
 // just the matrix we already computed, written back into every camera object we know of.
@@ -3167,6 +3458,7 @@ void HkHandler(MidHookRegs*, void*) {
         const int pass = FramePumpCurrentPass();
         uint8_t* player = MainPlayer();
         if (pass != 2) CombatGameFrame(player, g_frame);
+        if (pass != 2) SafeProjectileWatchTick();
         if (pass != 2) WeaponWheelGameFrame(player);   // the slots and icons the weapon wheel shows
         if (pass != 2) BeltGameFrame(player);          // the pouch items the belt shows, and what a use changed
         if (pass != 2) BodyHapticsGameFrame(player, g_frame);   // HP, the attacker's side, falls: the bHaptics vest
@@ -3451,6 +3743,16 @@ bool GameERInit() {
     if (umod && MH_CreateHook(umod, (void*)&Hook_UpdateChrModelPos, (void**)&g_origUpdModelPos) == MH_OK && MH_EnableHook(umod) == MH_OK) LOGI("[game] chr model-pos hooked @ %p (final pose write point)", (void*)umod); else LOGW("[game] chr model-pos hook unavailable");
     uint8_t* ulock = g_status.versionOk ? g_base + GameRva(RVA_UpdateLockTgt) : AobScan(AOB_UpdateLockTgt);
     if (ulock && MH_CreateHook(ulock, (void*)&Hook_UpdateLockTgt, (void**)&g_origUpdLockTgt) == MH_OK && MH_EnableHook(ulock) == MH_OK) LOGI("[game] lock-target update hooked @ %p (cast aim re-forces its lock after it)", (void*)ulock); else LOGW("[game] lock-target update hook unavailable: cast aim cannot hold the lock the game rewrites");
+    // The bullet spawn: found by its own prologue (unique; exe+0x3a2cb0 on 2.7.2.0, fromsoftware-rs's RVA for it).
+    {
+        const Config& c = Cfg();
+        if (c.skillProjectileFromBlade || c.debugProjectileYawDeg != 0.f || c.debugProjectileRollDeg != 0.f || c.debugProjectileLift != 0.f) {
+            uint8_t* sb = AobScan(AOB_SpawnBullet);
+            if (sb && MH_CreateHook(sb, (void*)&Hook_SpawnBullet, (void**)&g_origSpawnBullet) == MH_OK && MH_EnableHook(sb) == MH_OK)
+                LOGI("[game] bullet spawn hooked @ %p (exe+0x%X): a melee weapon's skill projectile leaves from the VR blade", (void*)sb, (unsigned)(sb - g_base));
+            else LOGW("[game] bullet spawn not found: skill projectiles leave where the game's animation puts them");
+        }
+    }
     uint8_t* cfin = (g_status.versionOk && Cfg().fpCameraFinalWrite) ? g_base + GameRva(RVA_CamFinalize) : nullptr;
     if (cfin && MH_CreateHook(cfin, (void*)&Hook_CamFinalize, (void**)&g_origCamFinalize) == MH_OK && MH_EnableHook(cfin) == MH_OK) LOGI("[game] camera finalizer hooked @ %p (our matrix goes back after it)", (void*)cfin); else if (Cfg().fpCameraFinalWrite) LOGW("[game] camera finalizer hook unavailable");
     uint8_t* peval = (g_status.versionOk && Cfg().fpPoseAfterHavok) ? g_base + GameRva(RVA_PoseEval) : nullptr;

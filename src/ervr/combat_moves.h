@@ -93,14 +93,17 @@ private:
 //     pulled must come to rest first: the game has to be in the stance before the R1 arrives.
 // Light vs heavy: the tip's peak over armWindow against heavySpeed.
 //
-// Where the swing aims (SkillAim=swing): the middle of the arc the blade's tip sweeps around you - the tip's
-// horizontal offset from the head (s*), averaged over the whole swing and weighted by the tip's speed, from where it
-// rose past offSpeed (a short decaying pre-roll kept while Ready) through the press until it slows under offSpeed
-// again (also after the trigger is let go: a quick L2-R1-release still finishes its swing). Symmetric thresholds,
-// so a forehand is not pulled toward its end; the tip's position, not the blade's direction, so an upright blade's
-// sideways tilt does not decide it (2026-11-11 test 2 averaged the blade direction: blades 40-77 deg up, aims
-// scattered 3-109 deg, 16 of 18 to the left). A slash across an enemy in front centres on it; a slash off to the left
-// centres left. The stance's projectile flies that way.
+// Where the swing aims (SkillAim=swing): where the blade's tip strikes - the tip's horizontal offset from the head
+// (s*) over the FASTEST part of the swing: each sample weighted by how far its tip speed is above kAimTopShare of the
+// swing's peak (the top 15% of the speed profile), from where it rose past offSpeed (the last decaySeconds of that
+// rise kept while Ready) through the press until it slows under offSpeed again (also after the trigger is let go: a
+// quick L2-R1-release still finishes its swing). A slash is fastest where it means to hit; weighted by the plain speed
+// over the whole arc, the long follow-through pulled the centre toward the arc's end (2026-11-11 test 4: 18 of 22
+// right-hand slashes centred left, 8 of them past the 45 deg limit; a forehand peaking 10 deg right with a follow-
+// through twice as long as its rise centres 13 deg left that way, 2 deg right this way). The tip's position, not the
+// blade's direction, so an upright blade's sideways tilt does not decide it (test 2 averaged the blade direction:
+// blades 40-77 deg up, aims scattered 3-109 deg). A slash across an enemy in front centres on it; a slash off to the
+// left centres left. The stance's projectile flies that way.
 //
 // Wind-ups and returns are no follow-up (test 3: the presses that flew 41-174 deg off were slow swings centred to the
 // right - the sword drawn back before a forehand). A strike moves the tip toward the front of your view or keeps it
@@ -122,6 +125,7 @@ struct StanceSwingIn {
     float decaySeconds = 0.3f;  // the pre-roll's (and a refused wind-up's) fade
 };
 constexpr float kAwayDeg = 15.f, kFrontDeg = 30.f;
+constexpr float kAimTopShare = 0.85f;   // the aim counts the part of the swing faster than this share of its peak
 // The angle between a horizontal sample and the view's forward, degrees (0..180); -1 without either.
 inline float AngleFromView(float x, float z, float vx, float vz) {
     const float a = std::sqrt(x * x + z * z), v = std::sqrt(vx * vx + vz * vz);
@@ -137,12 +141,12 @@ public:
         switch (st_) {
         case Rest:
             Follow(in);
-            if (in.tip < in.offSpeed && in.now - lastPress_ >= in.gapSeconds) { st_ = Ready; accX_ = accY_ = accZ_ = 0.f; }
+            if (in.tip < in.offSpeed && in.now - lastPress_ >= in.gapSeconds) { st_ = Ready; if (!collecting_) n_ = 0; }
             break;
         case Ready:
-            // The pre-roll: the swing's rise from offSpeed, before it is fast enough to count, fading.
-            if (in.tip >= in.offSpeed) { Fade(in); Add(in); }
-            else accX_ = accY_ = accZ_ = 0.f;
+            // The pre-roll: the swing's rise from offSpeed, before it is fast enough to count - its last decaySeconds.
+            if (in.tip >= in.offSpeed) { Trim(in.now - in.decaySeconds); Add(in); }
+            else n_ = 0;
             if (in.heldFor >= in.settleSeconds && in.tip >= in.onSpeed && in.hand >= in.minHand) {
                 st_ = Rising; t_ = in.now; peak_ = in.tip; refused_ = false;
                 startAng_ = AngleFromView(in.sx, in.sz, in.vx, in.vz);
@@ -152,9 +156,9 @@ public:
             if (in.tip > peak_) peak_ = in.tip;
             if (in.tip < in.offSpeed) {   // a twitch over before the arm window, or a refused wind-up that came to rest
                 if (refused_) { ignored_ = true; ignoredAng_ = lastAng_; }
-                st_ = Ready; accX_ = accY_ = accZ_ = 0.f; break;
+                st_ = Ready; n_ = 0; break;
             }
-            if (refused_) Fade(in);
+            if (refused_) Trim(in.now - in.decaySeconds);   // a wind-up's start drops out as the strike comes round
             Add(in);
             if (in.now - t_ >= in.armWindow) {
                 const float ang = AngleFromView(in.sx, in.sz, in.vx, in.vz);
@@ -164,7 +168,7 @@ public:
                     break;
                 }
                 st_ = Rest; lastPress_ = in.now; pressPeak_ = peak_;
-                aimX_ = accX_; aimY_ = accY_; aimZ_ = accZ_; aimAt_ = in.now; collecting_ = true;
+                aimAt_ = in.now; collecting_ = true; Settle();
                 lastT_ = in.now;
                 return peak_ >= in.heavySpeed ? StancePress::Heavy : StancePress::Light;
             }
@@ -178,7 +182,7 @@ public:
         if (!collecting_) return;
         // Slowed, or a second has passed (a hand that stopped being tracked mid-swing must not fold a later motion in).
         if (in.tip < in.offSpeed || in.now - aimAt_ > 1.0) { collecting_ = false; finished_ = true; return; }
-        Add(in); aimX_ = accX_; aimY_ = accY_; aimZ_ = accZ_;
+        Add(in); Settle();
     }
     // A new hold (or none): the blade must come to rest before the first follow-up. The last swing's aim survives
     // (its projectile can leave after the trigger is let go).
@@ -199,17 +203,37 @@ public:
     }
 
 private:
-    void Add(const StanceSwingIn& in) { accX_ += in.sx * in.tip; accY_ += in.sy * in.tip; accZ_ += in.sz * in.tip; }
-    void Fade(const StanceSwingIn& in) {
-        const float dt = (float)(in.now - lastT_);
-        const float keep = dt > 0.f && in.decaySeconds > 0.f ? std::exp(-dt / in.decaySeconds) : 1.f;
-        accX_ *= keep; accY_ *= keep; accZ_ *= keep;
+    struct Sample { double t; float tip, x, y, z; };
+    static constexpr int kCap = 256;   // ~2.8 s at 90 Hz: a rise, the press and a second of follow-through
+    void Add(const StanceSwingIn& in) {
+        if (n_ == kCap) { for (int i = 1; i < kCap; ++i) buf_[i - 1] = buf_[i]; --n_; }   // rare: drop the oldest
+        buf_[n_++] = Sample{in.now, in.tip, in.sx, in.sy, in.sz};
+    }
+    void Trim(double t0) {   // drop the samples older than t0
+        int k = 0; while (k < n_ && buf_[k].t < t0) ++k;
+        if (!k) return;
+        for (int i = k; i < n_; ++i) buf_[i - k] = buf_[i];
+        n_ -= k;
+    }
+    // The aim from the samples so far: weighted by how far each is above kAimTopShare of the fastest.
+    void Settle() {
+        float peak = 0.f; int at = -1;
+        for (int i = 0; i < n_; ++i) if (buf_[i].tip > peak) { peak = buf_[i].tip; at = i; }
+        if (at < 0) return;
+        float x = 0.f, y = 0.f, z = 0.f;
+        for (int i = 0; i < n_; ++i) {
+            const float w = buf_[i].tip - kAimTopShare * peak;
+            if (w > 0.f) { x += buf_[i].x * w; y += buf_[i].y * w; z += buf_[i].z * w; }
+        }
+        if (!(std::sqrt(x * x + y * y + z * z) > 1e-6f)) { x = buf_[at].x; y = buf_[at].y; z = buf_[at].z; }
+        aimX_ = x; aimY_ = y; aimZ_ = z;
     }
     enum { Rest, Ready, Rising } st_ = Rest;
     double t_ = 0.0, lastPress_ = -1e9, aimAt_ = -1e9, lastT_ = 0.0;
     float peak_ = 0.f, pressPeak_ = 0.f, startAng_ = -1.f, lastAng_ = -1.f, ignoredAng_ = 0.f;
     bool refused_ = false, ignored_ = false;
-    float accX_ = 0.f, accY_ = 0.f, accZ_ = 0.f, aimX_ = 0.f, aimY_ = 0.f, aimZ_ = 0.f;
+    Sample buf_[kCap]; int n_ = 0;
+    float aimX_ = 0.f, aimY_ = 0.f, aimZ_ = 0.f;
     bool collecting_ = false, finished_ = false;
 };
 

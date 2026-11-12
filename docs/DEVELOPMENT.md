@@ -525,10 +525,18 @@ while L2 stays held (`DrawStanceRightAttackLight` -> `DrawStanceRightLoop` on `A
 so one hold follows up repeatedly. No input gate of ours: the game queues a press only while the animation allows
 it (`queued_action_inputs` = new presses AND `possible_action_inputs`). In the player's queue mode the input-queue
 entries record presses made, not inputs allowed (flat-measured: 0 at idle). Where the swing aims (`SkillAim=swing`):
-`StanceSwing` sums the tip's horizontal offset from the head (tracking space) weighted by tip speed, from where it
-rose past `SwingOffSpeed` (a pre-roll fading over 0.3 s) through the press to where it slows under it again - after
-the trigger is let go too - so the mean is the middle of the arc. (Test 2 averaged the blade's direction instead:
-upright blades made the sideways tilt decide, and the late start pulled every forehand left.) At the press
+`StanceSwing` keeps the swing's samples - the tip's horizontal offset from the head (tracking space) and tip speed -
+from where it rose past `SwingOffSpeed` (the last 0.3 s of that rise) through the press to where it slows under it
+again (after the trigger is let go too), and averages the offsets weighted by how far each sample's speed is above
+85% of the swing's peak (`kAimTopShare`): the fastest part, where the slash means to hit. Weighting by plain speed
+over the whole arc let the long follow-through pull it toward the end (test 4: 18 of 22 right-hand slashes centred
+left, 8 past the 45 deg limit). (Test 2 averaged the blade's direction instead: upright blades made the sideways tilt
+decide.) `StanceHoldAnimation=false` arms the follow-ups without holding the game's skill button (`g_stanceArmed`,
+nothing plays while held); a follow-up press is then chord 12/13 - the skill button, the attack `StanceSettle` later,
+the skill button released 0.12 s after (held, the game would return to the stance). A stance is a skill whose
+SwordArtsParam gives R1 an FP cost (`useMagicPoint_R1` +0x14: Transient Moonlight 1178 = L2 0 / R1 15 / R2 20,
+Unsheathe-like rows 110/111/114/115, bows' arrow stances 400-407; Reduvia's Blood Blade 1016 has R1 -1 / R2 6, so
+an R2 cost alone is no stance), read from the installed regulation; other skills hold as before. At the press
 `ArmSwingAim` makes the cast aim live for 1 s along it (`CombatCastAimKind` 1); `CastAimRay` turns it into a world
 ray from the weapon hand (`SwingAimDirection`: the swing's yaw, the head's pitch clamped to 45 deg), and the
 existing cast-aim path forces the lock target down it, so the game turns the follow-up toward it and its bullet aims
@@ -540,7 +548,34 @@ swing before it aims along the hand's ray (`CastAimAxis`, like a staff); `SkillA
 a TAE event (a bullet arming its own aim) is written at once (`GameERApplyCastAimNow`: flag, lock target, aim view
 matrix) before the event runs, since the bullet spawns inside that event; it used to reach the game at the next
 camera step, and the bullet left along the head's aim matrix from the eye. Locked on
-to a real enemy, cast aim stands aside. The skill button's hand follows the HKS `GetSwordArtInfo` (`SkillHand`:
+to a real enemy, cast aim stands aside.
+
+**Skill projectiles from the VR blade** (`projectile_frame.h`, `Hook_SpawnBullet` in game_er.cpp). Aiming through the
+lock target and the aim view matrix still left a melee skill's projectile where the game's animation launched it:
+from a dummy poly of the animated body or sword (Reduvia's blood blade: dummy poly 80, along the body's facing =
+"from my face"), and a stance follow-up's wave upright or flat by which follow-up the swing's speed picked.
+`CSBulletManager::SpawnBullet(mgr, int* out, BulletSpawnData*, int* err)` (fromsoftware-rs `bullet_manager.rs`; exe
+2.7.2.0 0x3a2cb0, found by its prologue) is where a TAE BulletBehavior ends up, synchronously: 0x427440 (event 2) ->
+0x3c2d70 -> 0x3c0f80 -> 0x49e3a0 -> SpawnBullet. Its spawn data holds the owner handle (+0x00), the behavior id
+(+0x08), the bullet id (+0x14, -1 when the behavior names it), the dummy poly id (+0x1C) and a 4x4 frame at +0x50 -
+rows right / up / forward / position, the dummy poly's matrix 0x3c10c0 copied in (flat-measured: Reduvia's row 2 runs
+along the body's facing, row 1 up). The bullet itself is created a frame or two LATER (none in the manager's list
+right after the call), and from the dummy poly when it has one: a rewritten frame alone was ignored (flat test: the
+blood blade appeared exactly where the game put it, 0.50 m below the lifted frame, with the game's own orientation).
+With the dummy poly id set to -1 the bullet is built from the frame - flat-verified, lifted 0.5 m, turned 40 deg and
+rolled 90 deg: it appeared 0.00 m from the frame's position, its orientation 5 deg from the frame's forward and up,
+and flew 5 deg off the frame's forward. So inside the player's own BulletBehavior event (a thread-local set around
+it in `Hook_ExecEvent` and for replayed bullets), for a projectile of a melee hand (`CombatPlayerProjectileNow`) whose
+BulletParam `FollowType` is 0 (byte 0x9A bits 0-2; behavior -> BehaviorParam_PC refType 1 / refId -> BulletParam,
+holder 10 checked by struct name; a bullet that follows its owner or dummy poly keeps it), the hook writes: position =
+the blade (`g_blade`) `SkillProjectileBladePoint` of the way up; forward = the live cast-aim ray (`CastAimRay`: the
+swing's aim or the weapon arm's), or at the locked-on enemy; then `TurnProjectile` rolls the frame about the new
+forward so the plane the game's animation slashed in maps onto the plane your swing swept. Both planes come from
+blade-direction trails (`AxisTrail`, `SweptPlaneNormal` = summed cross products of consecutive blade directions): the
+VR blade from the arm solve, the animation's from the hand bone in the pose buffer while it still holds the
+animation's output (`poseForeign` at the start of `UpdateArms`). The roll is the smaller of the two (a plane has no
+side). `[Experimental] DebugProjectileYawDeg/RollDeg/Lift` turn any projectile of the player's animation for a flat
+test; the log then says where it appeared and flew ("projectile appeared ... in flight ..."). The skill button's hand follows the HKS `GetSwordArtInfo` (`SkillHand`:
 one-handed, the left only for a shield or bow).
 
 **Criticals** (`combat_moves.h` `ThrowRowMatches`, `CriticalsFrame`). Backstabs and ripostes are the engine's throw

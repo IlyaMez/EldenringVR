@@ -40,6 +40,9 @@ ERVR is a fan mod by **Ilya Mezerowsky**, the maker of [Spidy](https://github.co
 puts ELDEN RING in VR: an image for each eye at your headset's resolution, first person with the weapons in
 your hands, and melee where the swing you make is the attack. One zip, one launcher, one **START VR** button.
 
+The launcher’s **Weapons** tab is a [Weapon Workshop](docs/WEAPON_PRESETS.md): browse real game weapons and
+icons, tune VR settings and action rules per weapon or family, and share presets by file or copied code.
+
 <p align="center">
   <a href="https://www.youtube.com/watch?v=eFyqIWHU5nA"><img src="docs/images/readme/reel.webp" alt="Recorded in the headset during a Seamless Co-op session: the partner's flame sweeps the catacomb past the player's sword, the floor burns behind the raised shield, and the partner walks up between the shield and the sword." width="100%"></a>
   <br>

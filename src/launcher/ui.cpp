@@ -277,8 +277,8 @@ void theme(ImGuiStyle& style) {
     c[ImGuiCol_NavCursor] = vec(kGoldLift);
 }
 
-App::App(HWND window, Fonts fonts, std::string updatedFrom)
-    : window_(window), fonts_(fonts), settings_(loadSettings()), installFolder_(installFolder(&installWhyNot_)),
+App::App(HWND window, Fonts fonts, ID3D11Device* device, std::string updatedFrom)
+    : workshop_(device), window_(window), fonts_(fonts), settings_(loadSettings()), installFolder_(installFolder(&installWhyNot_)),
       updatedFrom_(std::move(updatedFrom)) {
     scanner_.start(settings_);
     // One question to GitHub per start, on its own thread; updating waits for the player's click. Asked even where
@@ -912,6 +912,7 @@ void App::frame(float scale) {
         case Tab::play: play(origin, size); break;
         case Tab::options: options(origin, size); break;
         case Tab::controls: controls(origin, size); break;
+        case Tab::weapons: workshop_.draw(scan_.gameDir, iniPath(scan_), origin, size, scale_); break;
         case Tab::about: about(origin, size); break;
         }
     }
@@ -984,7 +985,7 @@ void App::tabs() {
     rule(draw, ImVec2(window.x, y + height - 1), width, kGoldDeep, 0.9f);
     float x = window.x + S(12);
     const std::pair<Tab, const char*> items[] = {
-        {Tab::play, "Play"}, {Tab::options, "Options"}, {Tab::controls, "Controls"}, {Tab::about, "About"}};
+        {Tab::play, "Play"}, {Tab::options, "Options"}, {Tab::controls, "Controls"}, {Tab::weapons, "Weapons"}, {Tab::about, "About"}};
     const float size = S(17), spacing = 0.1f;
     for (const auto& [tab, label] : items) {
         const std::string text = upper(label);

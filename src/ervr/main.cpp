@@ -14,6 +14,7 @@
 #include "game_er.h"
 #include "game_version.h"
 #include "combat.h"
+#include "weapon_preset_runtime.h"
 #include "crashlog.h"
 #include "reshade_addon.h"
 #include "stereo.h"
@@ -142,6 +143,7 @@ DWORD WINAPI Worker(LPVOID) {
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
         LOGE("MinHook init failed"); return 0;
     }
+    WeaponPresetRuntimeStart(dir);
     // GraphicsConfig.xml is a RACE against the game's own boot-time read of it, and this
     // write must run before anything slow. Measured 2026-08-22 evening: at +718 ms after
     // LogInit (its old position, behind the crashlog + backend init) the write LOST - every
@@ -344,6 +346,7 @@ DWORD WINAPI Worker(LPVOID) {
         DWORD sleepMs = (DWORD)((period - spent) * 1000.0);
         Sleep(sleepMs > 0 && sleepMs < 100 ? sleepMs : 1);
     }
+    WeaponPresetRuntimeStop();
     return 0;
 }
 

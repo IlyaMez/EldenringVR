@@ -48,6 +48,34 @@ foreach(_xr openxr_loader jsoncpp_object jsoncpp_static jsoncpp_lib)
   endif()
 endforeach()
 
+# Read the installed game's DCX containers in the weapon catalog (no game assets are bundled).
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_USE_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
+FetchContent_Declare(zstd GIT_REPOSITORY https://github.com/facebook/zstd.git GIT_TAG v1.5.7
+  GIT_SHALLOW TRUE SOURCE_SUBDIR build/cmake)
+FetchContent_Declare(zlib GIT_REPOSITORY https://github.com/madler/zlib.git GIT_TAG v1.3.1 GIT_SHALLOW TRUE)
+set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zstd zlib)
+foreach(_codec libzstd_static zlibstatic)
+  set_property(TARGET ${_codec} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endforeach()
+
+add_library(ervr_weapon_data STATIC src/ervr/game_archive.cpp src/ervr/icon_decode.cpp src/ervr/weapon_catalog.cpp)
+target_include_directories(ervr_weapon_data PUBLIC src/ervr PRIVATE ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+target_link_libraries(ervr_weapon_data PUBLIC libzstd_static zlibstatic bcrypt)
+# Reuse the JsonCpp sources already pinned by OpenXR, with strict parsing for imported presets.
+add_library(ervr_preset_json STATIC
+  ${openxr_SOURCE_DIR}/src/external/jsoncpp/src/lib_json/json_reader.cpp
+  ${openxr_SOURCE_DIR}/src/external/jsoncpp/src/lib_json/json_value.cpp
+  ${openxr_SOURCE_DIR}/src/external/jsoncpp/src/lib_json/json_writer.cpp)
+target_include_directories(ervr_preset_json PUBLIC ${openxr_SOURCE_DIR}/src/external/jsoncpp/include)
+add_library(ervr_weapon_presets STATIC src/ervr/weapon_presets.cpp)
+target_include_directories(ervr_weapon_presets PUBLIC src/ervr)
+target_link_libraries(ervr_weapon_presets PUBLIC ervr_preset_json bcrypt)
+
 # ---- bHaptics C/C++ SDK (body haptics: src/ervr/bhaptics_output.cpp) ---------------------------
 # bHaptics' own SDK, as Spidy uses it: its header names the functions, and its bhaptics_library.dll,
 # shipped unmodified beside ERVR.dll, is loaded at run time (nothing is linked). Both are bHaptics
@@ -129,6 +157,7 @@ add_library(ERVR SHARED
   src/ervr/game_version.cpp
   src/ervr/patches_er.cpp
   src/ervr/combat.cpp
+  src/ervr/weapon_preset_runtime.cpp
   src/ervr/params_er.cpp
   src/ervr/weapon_wheel.cpp
   src/ervr/belt.cpp
@@ -136,8 +165,6 @@ add_library(ERVR SHARED
   src/ervr/overlay_canvas.cpp
   src/ervr/overlay_layers.cpp
   src/ervr/item_icons.cpp
-  src/ervr/icon_decode.cpp
-  src/ervr/game_archive.cpp
   src/ervr/crashlog.cpp
   src/ervr/body_haptics.cpp
   src/ervr/bhaptics_output.cpp
@@ -146,7 +173,7 @@ add_library(ERVR SHARED
   src/ervr/pass2_interact.cpp
   ${minhook_SOURCE_DIR}/src/hde/hde64.c)          # length disassembler bundled with MinHook, reused for mid-function hooks
 target_include_directories(ERVR PRIVATE src/ervr src/launcher ${RESHADE_INCLUDE_DIR} ${minhook_SOURCE_DIR}/src/hde)
-target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi bcrypt)
+target_link_libraries(ERVR PRIVATE minhook openxr_loader d3d12 dxgi bcrypt ervr_weapon_data ervr_weapon_presets)
 target_compile_definitions(ERVR PRIVATE ERVR_VERSION="${PROJECT_VERSION}")
 set_target_properties(ERVR PROPERTIES OUTPUT_NAME "ERVR" PREFIX "")
 
@@ -184,7 +211,7 @@ if(ERVR_BUILD_LAUNCHER)
     SOURCE_SUBDIR  headers_only_do_not_build)    # sources listed below, no targets of its own
   FetchContent_MakeAvailable(imgui)
   set(ERVR_LAUNCHER_SOURCES src/launcher/main.cpp src/launcher/ui.cpp src/launcher/system.cpp src/launcher/probe.cpp
-      src/launcher/update.cpp)
+      src/launcher/update.cpp src/launcher/weapon_workshop.cpp src/ervr/config.cpp src/ervr/log.cpp)
   file(WRITE ${CMAKE_BINARY_DIR}/launcher_version.h
     "#define ERVR_RC_VERSION \"${PROJECT_VERSION}\"\n"
     "#define ERVR_RC_VERSION_NUMBERS ${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0\n")
@@ -206,7 +233,7 @@ if(ERVR_BUILD_LAUNCHER)
   # winhttp + bcrypt: the launcher's own updates (update.cpp: one GitHub question per start, the zip on request,
   # checked against its SHA-256).
   target_link_libraries(ervr_launcher PRIVATE openxr_loader d3d11 dxgi dwmapi version shell32 ole32 uuid advapi32
-                        winhttp bcrypt)
+                        winhttp bcrypt comdlg32 ervr_weapon_data ervr_weapon_presets)
   set_target_properties(ervr_launcher PROPERTIES OUTPUT_NAME "ERVR Launcher")
 endif()
 
@@ -231,6 +258,9 @@ if(ERVR_BUILD_REGRESSION_TESTS)
   add_executable(test_settings_tab tools/test_settings_tab.cpp)
   target_include_directories(test_settings_tab PRIVATE src/ervr src/launcher)
   add_test(NAME settings_tab COMMAND test_settings_tab)
+  add_executable(test_weapon_workshop tools/test_weapon_workshop.cpp src/ervr/config.cpp src/ervr/log.cpp src/ervr/weapon_preset_runtime.cpp)
+  target_link_libraries(test_weapon_workshop PRIVATE ervr_weapon_data ervr_weapon_presets)
+  add_test(NAME weapon_workshop COMMAND test_weapon_workshop)
   # The launcher's ERVR.ini edits, log reading and Steam parsing.
   add_executable(test_launcher_text tools/test_launcher_text.cpp)
   target_include_directories(test_launcher_text PRIVATE src/launcher src/ervr)
@@ -264,10 +294,14 @@ add_custom_target(dist ALL
   COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:dinput8_proxy> ${DIST_DIR}/dinput8.dll
   COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:ERVR>         ${DIST_DIR}/ERVR/ERVR.dll
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/config/ERVR.ini ${DIST_DIR}/ERVR/ERVR.ini
+  COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/docs/WEAPON_PRESETS.md ${DIST_DIR}/ERVR/WEAPON_PRESETS.md
   # Bundled ReShade (add-on build, unmodified) - see third_party/reshade/README.md and THIRD_PARTY.md.
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/third_party/reshade/ReShade64.dll ${DIST_DIR}/dxgi.dll
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/third_party/reshade/ReShade.ini   ${DIST_DIR}/ReShade.ini
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/third_party/reshade/LICENSE.md    ${DIST_DIR}/LICENSE-ReShade.txt
+  COMMAND ${CMAKE_COMMAND} -E copy ${zstd_SOURCE_DIR}/LICENSE ${DIST_DIR}/ERVR/LICENSE-Zstandard.txt
+  COMMAND ${CMAKE_COMMAND} -E copy ${zlib_SOURCE_DIR}/LICENSE ${DIST_DIR}/ERVR/LICENSE-zlib.txt
+  COMMAND ${CMAKE_COMMAND} -E copy ${openxr_SOURCE_DIR}/src/external/jsoncpp/LICENSE ${DIST_DIR}/ERVR/LICENSE-JsonCpp.txt
   # bHaptics' SDK library (unmodified, a bHaptics Redistributable) beside ERVR.dll, with the notices the
   # SDK agreement says travel with it.
   COMMAND ${CMAKE_COMMAND} -E copy ${BHAPTICS_LIBRARY}                     ${DIST_DIR}/ERVR/bhaptics_library.dll

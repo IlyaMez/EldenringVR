@@ -98,7 +98,7 @@ New-Item -ItemType Directory -Force (Join-Path $GameDir "ERVR") | Out-Null
 Copy-Item -Force (Freshest "dinput8.dll") $GameDir
 Copy-Item -Force (Freshest "ERVR\ERVR.dll") (Join-Path $GameDir "ERVR")
 # bHaptics' library (body haptics, [bHaptics] in ERVR.ini) and the notices that travel with it.
-foreach ($f in @("bhaptics_library.dll", "LICENSE-bHaptics.txt", "bHaptics-THIRD_PARTY_NOTICES.txt")) {
+foreach ($f in @("bhaptics_library.dll", "LICENSE-bHaptics.txt", "bHaptics-THIRD_PARTY_NOTICES.txt", "LICENSE-Zstandard.txt", "LICENSE-zlib.txt", "LICENSE-JsonCpp.txt", "WEAPON_PRESETS.md")) {
     $src = Join-Path $dist "ERVR\$f"
     if (Test-Path $src) { Copy-Item -Force $src (Join-Path $GameDir "ERVR") }
 }

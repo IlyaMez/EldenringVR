@@ -42,8 +42,27 @@ your Ash of War, so stances and charged skills work; a swing behind an enemy bac
   `[Combat] Debug=true` the face-to-face matches log that enemy's throw state words, so the next round can find it.
   Measured flat: the table loads and the player's throw state reads; the skill trigger and a backstab against an
   enemy are untested in the headset.
+* A stance without its animation while you hold the trigger: `[Combat] StanceHoldAnimation=false`. Holding then
+  plays nothing - no crouch, no sheathed sword - and each swing enters the stance and takes its follow-up at once
+  (the skill button, then the attack a moment later, both let go right after). The follow-up starts that moment
+  later, and the game no longer returns to the stance between swings. Only for stances - skills whose light attack
+  costs FP in the game's own table (Moonveil's Transient Moonlight, Unsheathe, Square Off); charged skills and
+  skills that fire on the press (Reduvia's) hold as before. The default (`true`) keeps the stance held.
 
 ### Fixes
+* A sword's skill projectile leaves from your blade, flies where you aimed it, and a Moonveil wave lies in the plane
+  of your swing. The game launches it from its own animation - a point on the animated body or sword - so it came
+  out of your chest and Reduvia's blood blades along your view ("from my face"), and Moonveil's wave was upright or
+  flat depending on which follow-up the swing's speed happened to pick ("seemingly random"). ERVR now rewrites the
+  launch inside the game's bullet spawn: it starts on your blade (`SkillProjectileBladePoint` of the way from the
+  grip to the tip), flies along `SkillAim` (the swing's aim, the weapon arm's for a skill you press, or at a
+  locked-on enemy), and the plane the game's animation slashed in is turned onto the plane your blade swept, so a
+  flat slash sends a flat wave and an upright or diagonal one an upright or diagonal wave. Measured flat with
+  Reduvia: the blood blade appeared exactly where it was put, oriented as told (5 degrees), and flew within 5
+  degrees of the way it was sent; before the fix it ignored a rewritten launch entirely. Projectiles that ride
+  their owner or the blade are left to the game. `[Combat] SkillProjectileFromBlade=false` puts the old launch back.
+  The swing's aim also counts the fastest part of the swing now (where the slash means to hit): 18 of 22 slashes in
+  the last test centred to the left, pulled there by the follow-through. In the headset: untested.
 * Dodge: every roll went where you looked, whatever the stick said (Willthethrill, MasterXploda, Valentin, Stÿks,
   ynko, Himi on 0.7.5). Players' logs showed the stick reaching the game - B with the stick held back or to the
   side - so the game was handed the right input and rolled forward anyway. A roll is the game's free movement: the
@@ -66,6 +85,10 @@ your Ash of War, so stances and charged skills work; a swing behind an enemy bac
   and Proton 10, SteamVR, Quest 3).
 
 ### For testers
+* Each skill projectile ERVR launches logs a line ("[combat] projectile ... moved ... turned ... rolled ...") and,
+  a moment later, where it appeared and which way it flew ("projectile in flight: ... deg off the way it was sent").
+  `[Experimental] DebugProjectileYawDeg` / `DebugProjectileRollDeg` / `DebugProjectileLift` turn every projectile of
+  your character's animation for a flat test.
 * The crash reporter now catches breakpoints (0x80000003) too, and names every frame's module, not just the
   game's. Players on Meta Quest Link (Meta's runtime 1.208) stopped with 0x80000003 inside the VR session's
   creation, and the log could not say whose code raised it. ERVR.log also lists the OpenXR API layers installed

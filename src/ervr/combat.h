@@ -55,6 +55,7 @@ bool CombatTwoHandPin(int* pinHand, int* weaponHand, float* alongToPommel, bool*
 bool CombatTwoHandGrip(int hand, bool* holding);
 // Weight the hand is carrying (EquipParamWeapon weight; both hands share it when two-handing;
 // 0 = empty/unknown). Drives the inertial arm in game_er.
+float CombatHapticScale(int hand);
 float CombatHandWeight(int hand);
 // The hand holding a two-handed weapon per the game's arm style, else -1 (both arms drive that weapon).
 int CombatTwoHandWeaponHand();
@@ -74,6 +75,13 @@ int CombatCastAimHand(bool* casting);
 // with no swing before it), 1 = where a stance follow-up's swing aimed (SkillAim=swing; *swingTracking = the middle of
 // its arc, a horizontal unit vector in the runtime's tracking space, OpenXR axes).
 int CombatCastAimKind(Vec3* swingTracking);
+// Game thread, from CSBulletManager::SpawnBullet: is the projectile being spawned right now one of the player's own
+// animation's (its BulletBehavior event, or a replayed one) from a melee weapon - Moonveil's wave, Reduvia's blood
+// blades - which SkillProjectileFromBlade moves to the VR blade? *hand = that weapon's hand; *swingAt = when the
+// stance follow-up's swing that fired it was pressed (NowSec clock, the plane of that swing rolls the wave), or a
+// negative value when no swing fired it. *debugOnly = [Experimental] DebugProjectile* is set: every projectile of the
+// player's animation is the flat test's (no headset, no blade). Cheap: a thread-local flag first.
+bool CombatPlayerProjectileNow(int* hand, double* swingAt, bool* debugOnly);
 // Haptic requests raised by the game-thread side (stamina empty, swing armed); worker drains them.
 // Returns a bitmask: bit0 = left hand, bit1 = right hand, bit2/3 = "fail" flavour for left/right,
 // bit4 = blocked hit (left), bit5 = deflect (left).

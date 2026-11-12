@@ -425,6 +425,16 @@ struct Config {
     bool  stanceSwings = true;            // while ERVR holds the skill, a swing is the game's R1/R2 (a stance's follow-up)
     float swingAimMaxDeg = 45.f;          // SkillAim=swing: the swing turns the projectile at most this far from your view (0 = no limit)
     std::string skillAim = "swing";       // a melee weapon's skill projectile (Moonveil's wave): swing = where the stance follow-up's swing aimed (height from your view) | head = where the body faces (your view) | hand = along the weapon hand's controller
+    // A stance (a skill with R1/R2 follow-ups: Moonveil, Unsheathe) while the trigger is held: true = the game holds
+    // the stance (its animation plays for the whole hold); false = the hold plays nothing, and each swing enters the
+    // stance and follows up at once (skill + light/heavy, StanceSettle apart). Skills without follow-ups (charged
+    // skills, a press like Reduvia's) are always held / pressed as before.
+    bool  stanceHoldAnimation = true;
+    // A melee weapon's skill projectile (Moonveil's wave, Reduvia's blood blades) leaves from the VR blade - at this
+    // fraction of the way from the grip to the tip - flies along SkillAim, and a stance follow-up's wave is turned
+    // into the plane of your swing (the game's spawn matrix is rewritten in CSBulletManager::SpawnBullet).
+    bool  skillProjectileFromBlade = true;
+    float skillProjectileBladePoint = 0.6f;
     bool  retiredRelearnHold = false;     // ERVR.ini still has TwoHandSkillRelearnHold (ConfigLogNotes)
     // Criticals (combat_moves.h): backstab = a swing behind an enemy the game's ThrowParam says can be backstabbed is
     // the game's own R1; log = predict and log only; off.
@@ -924,6 +934,10 @@ struct Config {
     // presses what it is told in the user's world, so keep it to menus and short test walks (A is a jump outside
     // one, Y talks and opens).
     std::string autoPilotScript;
+    // Flat test of the projectile spawn rewrite (no headset, so no blade): every projectile the player's own
+    // animation fires is turned this many degrees about the vertical (yaw) / about its flight axis (roll) and lifted
+    // this many metres at spawn; ERVR.log then reports where it actually flew. 0 = off (the default).
+    float debugProjectileYawDeg = 0.f, debugProjectileRollDeg = 0.f, debugProjectileLift = 0.f;
 
     void Load(const std::wstring& iniPath);
 };

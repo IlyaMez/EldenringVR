@@ -20,7 +20,8 @@ namespace {
 constexpr std::array kPayloadFiles{L"dxgi.dll", L"ReShade.ini", L"dinput8.dll", L"ERVR\\ERVR.dll", L"ERVR\\ERVR.ini"};
 // Documents that travel with an install when the package has them.
 constexpr std::array kPayloadDocuments{L"LICENSE-ReShade.txt", L"ERVR\\README.md", L"ERVR\\CHANGELOG.md",
-                                       L"ERVR\\LICENSE.txt", L"ERVR\\THIRD_PARTY.md"};
+                                       L"ERVR\\LICENSE.txt", L"ERVR\\THIRD_PARTY.md", L"ERVR\\WEAPON_PRESETS.md",
+                                       L"ERVR\\LICENSE-Zstandard.txt", L"ERVR\\LICENSE-zlib.txt", L"ERVR\\LICENSE-JsonCpp.txt"};
 // bHaptics' library beside ERVR.dll (body haptics) and the notices that travel with it: installed with ERVR.dll
 // when the package has them, removed with it. Without it ERVR only goes without body haptics.
 constexpr std::array kPayloadBhaptics{L"ERVR\\bhaptics_library.dll", L"ERVR\\LICENSE-bHaptics.txt",

@@ -264,7 +264,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     ImGui_ImplDX11_Init(device, context);
     std::wstring restartFolder; // an update installed itself: its launcher starts once this one has let go of all
     {
-        launcher::App application(window, fonts, updatedFrom);
+        launcher::App application(window, fonts, device, updatedFrom);
         bool done = false, occluded = false;
         while (!done) {
             // In the background (the game in front) a few frames a second are plenty.

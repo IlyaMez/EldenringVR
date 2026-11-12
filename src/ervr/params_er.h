@@ -13,6 +13,7 @@ enum ParamIndex {
     PI_EquipParamWeapon = 0,
     PI_EquipParamGoods  = 3,
     PI_AtkParam_Pc      = 8,
+    PI_BulletParam      = 10,   // BULLET_PARAM_ST (0x110): checked by struct name before use
     PI_BehaviorParam_PC = 13,
     PI_SpEffectParam    = 15,
     PI_SwordArtsParam   = 82,

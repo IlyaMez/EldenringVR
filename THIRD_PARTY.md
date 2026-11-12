@@ -40,7 +40,9 @@ haptics' patterns and output thread are ported from the author's own Spidy (GPL-
 | [HDE64](https://github.com/TsudaKageyu/minhook) (bundled inside MinHook) | v1.3.4 | BSD-2-Clause | Length-disassembler, reused for ERVR's mid-function hooks (`src/ervr/midhook.cpp`). |
 | [ReShade headers](https://github.com/crosire/reshade) (`include/reshade*.hpp`) | v6.8.0 | BSD-3-Clause | Header-only add-on API. `reshade.hpp` finds the loaded ReShade module at runtime; nothing is linked. |
 | [OpenXR SDK loader](https://github.com/KhronosGroup/OpenXR-SDK) | release-1.1.62 | Apache-2.0 | Statically linked into `ERVR.dll` so the distribution stays a single DLL. ERVR creates and owns its own `XrSession` bound to the game's D3D12 device. |
-| [JsonCpp](https://github.com/open-source-parsers/jsoncpp) (vendored by the OpenXR loader) | as shipped with the loader | MIT / Public Domain | Runtime-manifest parsing inside the loader. |
+| [JsonCpp](https://github.com/open-source-parsers/jsoncpp) (vendored by the OpenXR loader) | as shipped with the loader | MIT / Public Domain | Runtime-manifest parsing inside the loader; separately compiled for bounded weapon preset JSON in the launcher and mod. |
+| [Zstandard](https://github.com/facebook/zstd) | v1.5.7 | BSD-3-Clause | Decompression of the installed game’s regulation data. Statically linked; notice shipped as `ERVR/LICENSE-Zstandard.txt`. |
+| [zlib](https://github.com/madler/zlib) | v1.3.1 | zlib | DFLT game-container decompression. Statically linked; notice shipped as `ERVR/LICENSE-zlib.txt`. |
 | [Dear ImGui](https://github.com/ocornut/imgui) | v1.92.9b | MIT | The window of `ERVR Launcher.exe` (Win32 + DirectX 11 backends). Fetched by CMake `FetchContent`; not in ERVR.dll. |
 | [Barlow](https://github.com/jpt/barlow) (Medium, SemiBold, Condensed Bold and SemiBold) | as in the repository | SIL OFL 1.1 | The launcher's text, compiled into `ERVR Launcher.exe`. Files and license in [`src/launcher/fonts/`](src/launcher/fonts/). |
 | [Cinzel](https://github.com/NDISCOVER/Cinzel) (Bold) | as in the repository | SIL OFL 1.1 | The launcher's name, headlines and tabs, compiled into `ERVR Launcher.exe`. Files and license in [`src/launcher/fonts/`](src/launcher/fonts/). |
@@ -53,6 +55,10 @@ The OpenXR loader is also linked into the launcher, for its headset check.
 No source from the following is copied into this repository. They are credited because ERVR's
 memory layouts and event templates were derived from their published research:
 
+* [SoulsFormats](https://github.com/JKAnderson/SoulsFormats) and
+  [SoulsFormatsNEXT](https://github.com/soulsmods/SoulsFormatsNEXT): documented BND4, FMG and
+  regulation AES container layouts used by ERVR's independent, bounded catalog reader.
+* [Paramdex](https://github.com/soulsmods/Paramdex): EquipParamWeapon field offsets and weapon-type names.
 * [DSAnimStudio](https://github.com/Meowmaritus/DSAnimStudio) (Meowmaritus): TAE event templates,
   specifically the `AttackBehavior` argument layout in `TAE.Template.ER.xml`.
 * [fromsoftware-rs](https://github.com/vswarte/fromsoftware-rs) and erfps2 (Dasaav):
@@ -76,6 +82,6 @@ contained R.E.A.L. code, headers, binaries, or decompiled output.
 
 ## Game assets
 
-No ELDEN RING code, assets, or binaries are included. ERVR reads and writes the memory of a
+No ELDEN RING code, assets, or binaries are included. The launcher reads weapon names, definitions and icons from the player’s installed game, using its existing Oodle DLL for KRAK containers. Oodle and the extracted assets are not redistributed. ERVR reads and writes the memory of a
 running, legitimately owned copy of the game. Addresses and byte patterns in this repository are
 ERVR's own research output, not copied game code.

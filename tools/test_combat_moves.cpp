@@ -1,4 +1,5 @@
 #include "combat_moves.h"
+#include "projectile_frame.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -189,6 +190,26 @@ int main() {
               "a forehand rising and falling through SwingOffSpeed still centres on the middle of its arc");
     }
     {
+        // A forehand that peaks where it means to hit (10 deg right) and follows through, slower but for longer, to
+        // 90 deg left: weighted by the plain speed its centre was ~20 deg left (test 4: 18 of 22 slashes centred
+        // left); weighted by the speed cubed it stays within 10 deg of the strike.
+        StanceSwing st; st.Reset();
+        StanceSwingIn in; in.heldFor = 1.0; in.hand = 2.0f;
+        in.now = 0.0; in.tip = 0.2f; in.sz = 1.f; st.Step(in);
+        double t = 0.0;
+        for (int d = 60; d >= -90; d -= 5) {
+            const float peakAt = 10.f, spread = d > peakAt ? 25.f : 60.f;   // quick rise, long follow-through
+            t += 0.01; in.now = t; in.tip = 1.6f + 6.f * std::exp(-((d - peakAt) * (d - peakAt)) / (2.f * spread * spread));
+            in.sx = std::sin(d * 0.0174533f); in.sy = 0.f; in.sz = std::cos(d * 0.0174533f);
+            st.Step(in);
+        }
+        t += 0.01; in.now = t; in.tip = 0.5f; st.Step(in);
+        float x, y, z;
+        const bool ok = st.Aim(&x, &y, &z, nullptr);
+        const float deg = std::atan2(x, z) * 57.29578f;
+        Check(ok && deg > 0.f && deg < 10.f, "a forehand with a long follow-through aims where it struck, not toward its end");
+    }
+    {
         // A wind-up: the sword drawn back from in front toward your right and behind. Then, without stopping, the
         // forehand. No follow-up while it moves away from your view; one once the strike comes round.
         StanceSwing st; st.Reset();
@@ -311,6 +332,44 @@ int main() {
         Check(BackstabHolds(bs, MeasureThrow(f)), "start window distance");
         ThrowParamRow noStart = bs; noStart.distStart = 0.f;
         Check(!BackstabHolds(noStart, MeasureThrow(f)), "without a start window the main one (1.5 m) decides");
+    }
+    // ---- skill projectiles (projectile_frame.h) ----
+    {
+        auto nearV = [](const Vec3& a, const Vec3& b, float eps = 1e-3f) { return (a - b).Length() < eps; };
+        // A blade turning about the vertical, right to left in front (+Z forward): the plane's normal is vertical.
+        AxisSample s[20];
+        for (int i = 0; i < 20; ++i) { const float a = 1.2f - 0.12f * i; s[i] = AxisSample{0.01 * i, Vec3{std::sin(a), 0.f, std::cos(a)}}; }
+        float swept = 0.f;
+        const Vec3 n = SweptPlaneNormal(s, 20, 0.0, 1.0, 0.05, &swept);
+        Check(std::fabs(std::fabs(n.Normalized().y) - 1.f) < 1e-3f && std::fabs(swept - 19 * std::sin(0.12f)) < 1e-3f, "a flat slash sweeps a horizontal plane");
+        Check(SweptPlaneNormal(s, 20, 0.105, 1.0).Length() < SweptPlaneNormal(s, 20, 0.0, 1.0).Length(), "the window keeps only its own steps");
+        AxisSample gap[3] = {s[0], s[1], AxisSample{0.5, s[2].axis}};
+        Check(SweptPlaneNormal(gap, 3, 0.0, 1.0).Length() < std::sin(0.13f), "a step across a gap does not count");
+
+        ProjectileFrame g; g.right = {1, 0, 0}; g.up = {0, 1, 0}; g.fwd = {0, 0, 1}; g.pos = {1, 2, 3};
+        ProjectileTurn t;
+        ProjectileFrame o = TurnProjectile(g, Vec3{1, 0, 0}, Vec3{}, Vec3{}, &t);
+        Check(nearV(o.fwd, {1, 0, 0}) && nearV(o.up, {0, 1, 0}) && nearV(o.right, {0, 0, -1}) && nearV(o.pos, g.pos) && std::fabs(t.aimDeg - 90.f) < 0.1f && !t.rolled,
+              "re-aimed by the smallest turn: a level frame stays level");
+        o = TurnProjectile(g, Vec3{}, Vec3{0, 1, 0}, Vec3{1, 0, 0}, &t);
+        Check(t.rolled && std::fabs(std::fabs(t.rollDeg) - 90.f) < 0.1f && nearV(o.fwd, g.fwd) && std::fabs(o.up.y) < 1e-3f,
+              "the animation's flat slash, your upright one: the wave stands up");
+        o = TurnProjectile(g, Vec3{}, Vec3{0, 1, 0}, Vec3{0, -1, 0}, &t);
+        Check(t.rolled && std::fabs(t.rollDeg) < 0.1f && nearV(o.up, g.up), "a slash the other way round is the same plane: no roll");
+        const float a30 = 0.5235988f;
+        o = TurnProjectile(g, Vec3{}, Vec3{0, 0.6f, 0}, Vec3{std::sin(a30), std::cos(a30), 0}, &t);
+        Check(t.rolled && std::fabs(std::fabs(t.rollDeg) - 30.f) < 0.1f, "a diagonal swing rolls the wave by its tilt");
+        o = TurnProjectile(g, Vec3{}, Vec3{1, 0, 0}, Vec3{0, 1, 0}, &t);
+        Check(t.rolled && std::fabs(std::fabs(t.rollDeg) - 90.f) < 0.1f && std::fabs(std::fabs(o.up.x) - 1.f) < 1e-3f,
+              "the animation's upright slash, your flat one: the wave lies down");
+        o = TurnProjectile(g, Vec3{}, Vec3{0, 0, 1}, Vec3{0, 1, 0}, &t);
+        Check(!t.rolled && nearV(o.up, g.up), "a slash plane across the flight (a thrust) gives no roll");
+        o = TurnProjectile(g, Vec3{}, Vec3{0, 0.2f, 0}, Vec3{1, 0, 0}, &t);
+        Check(!t.rolled, "an animation that hardly turned its blade gives no roll");
+        // Re-aimed AND rolled: flying right (+X), your swing upright across it (normal along Z).
+        o = TurnProjectile(g, Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}, &t);
+        Check(nearV(o.fwd, {1, 0, 0}) && std::fabs(o.up.y) < 1e-3f && std::fabs(o.up.Dot(o.fwd)) < 1e-3f && std::fabs(o.right.Dot(o.up)) < 1e-3f,
+              "turned to the aim, then stood up about it: still a frame");
     }
     std::puts("combat moves: ok");
     return 0;

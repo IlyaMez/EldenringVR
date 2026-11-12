@@ -46,6 +46,7 @@ void GameERAddBodyYaw(float amount) { yaw += amount; }
 void GameHandAimTick(const VRTracking&, const VRInputState&, double) {}
 void CombatSetMenuOpen(bool open) { combatMenu = open; }
 bool CombatMenuOpen() { return combatMenu; }
+float CombatHapticScale(int) { return 1.f; }
 bool CombatHandlesSwings() { return !combatMenu; }
 void CombatPollHands(const VRTracking&, const VRInputState&, double) {}
 void CombatNotifyButton(uint16_t, double) {}

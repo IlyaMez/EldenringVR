@@ -20,7 +20,15 @@ namespace ervr {
 // The decompressed MENU_Knowledge_<iconId> TPF. The first call opens the archive index (well under a
 // second); call it from a background thread, never the game's or the pad worker's. Thread-safe.
 // On failure `why` (optional) says what was missing.
-bool ArchiveReadItemIcon(int iconId, std::vector<uint8_t>& tpf, std::string* why = nullptr);
+bool ArchiveReadItemIcon(int iconId, std::vector<uint8_t>& tpf, std::string* why = nullptr,
+                         const std::wstring& gameDirectory = {});
+// Launcher callers name the installed game directory; the mod defaults to its executable's directory.
+// Serialized with icon reads. These functions perform IO/decompression only on background threads.
+bool ArchiveReadFile(const char* archivePath, std::vector<uint8_t>& bytes, std::string& why,
+                     const std::wstring& gameDirectory = {});
+bool ArchiveDecompress(const std::vector<uint8_t>& bytes, std::vector<uint8_t>& out, std::string& why,
+                       const std::wstring& gameDirectory = {});
+bool ArchiveReadRegulation(std::vector<uint8_t>& out, std::string& why, const std::wstring& gameDirectory);
 
 // ELDEN RING's archive path hash: lower case, forward slashes, h = h * 0x85 + c over 64 bits.
 uint64_t ArchivePathHash(const char* path);

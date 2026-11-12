@@ -37,6 +37,7 @@
 // next swing uses. FP/stamina costs come from SwordArtsParam (the applied gem's arts id via
 // CSGaitem, else the weapon's own). Event ids: DSAnimStudio TAE.Template.ER.xml.
 #include "combat.h"
+#include "weapon_preset_runtime.h"
 #include "body_haptics_er.h"
 #include "config.h"
 #include "equipment_layout.h"
@@ -119,6 +120,12 @@ constexpr size_t   Gem_SwordArtsId   = 0x18;   // i32
 constexpr uint32_t Gem_RowSize       = 0x60;
 constexpr size_t   Arts_UsePointL2   = 0x09;   // i8  stamina cost of the skill button (L2)
 constexpr size_t   Arts_UseMpL2      = 0x12;   // i16 FP cost of the skill button
+// i16 FP costs of the light / heavy attack pressed in the skill: a stance's follow-ups. Read from the installed
+// regulation (2026-11-11): Moonveil's Transient Moonlight 1178 = L2 0 / R1 15 / R2 20, the Unsheathe-like rows
+// 110/111/114/115 carry R1 too, bows' arrow stances (400-407) as well; Reduvia's Blood Blade 1016 = L2 6 / R1 -1 /
+// R2 6 - an R2 cost alone is no stance, so R1 > 0 is what marks one (97 of 278 rows have some R1/R2 cost).
+constexpr size_t   Arts_UseMpR1      = 0x14;
+constexpr size_t   Arts_UseMpR2      = 0x16;
 constexpr uint32_t Arts_RowSize      = 0x20;
 // CSGaitemImp (singleton "CSGaitem"): gaitems[5120] OwnedPtr<CSGaitemIns> @+8; CSGaitemIns item_id @0xC;
 // CSWepGaitemIns: gem slot table @0x18 -> slot 0's gaitem handle @0x28 (fromsoftware-rs gaitem.rs).
@@ -411,13 +418,22 @@ struct SkillRecording {
 std::vector<SkillRecording> g_skillLib;    // game thread only
 struct SkillRec { bool active = false; double start = 0; int fpStart = 0, fpMin = 0; SkillRecording rec; } g_rec;
 struct SkillPlay {
-    bool active = false; double start = 0; int libIndex = -1;
+    bool active = false; double start = 0; int libIndex = -1; int hand = -1;
     struct St { bool started = false, done = false; CSTaeAnimEventArgs args{}; float time = 0.f; uint8_t argBuf[64]{}; };
     std::vector<St> st;                    // sized once at start: the game keys instances on the args pointer
     bool costCharged = false; int fpCost = 0, stamCost = 0;
 } g_play;
 struct SkillSwing { bool armed = false; double until = 0; AttackBehaviorArgs a{}; } g_skillSwing;   // game thread
-struct SkillInfo { int weaponId = 0; int arts = -1, gem = -1; int fpCost = 0, stamCost = 0; bool logged = false; } g_skillInfo[2];   // per hand, game thread
+struct SkillInfo { int weaponId = 0; int arts = -1, gem = -1; int fpCost = 0, stamCost = 0; int fpR1 = -1, fpR2 = -1; bool logged = false; } g_skillInfo[2];   // per hand, game thread
+std::atomic<bool> g_skillFollowUps[2]{};   // game thread -> worker: that hand's skill is a stance with follow-ups (SwordArtsParam R1 FP > 0)
+// StanceHoldAnimation=false: the trigger arms a stance's follow-ups without holding the game's skill button (the
+// stance does not play while held); each follow-up press is then the skill button AND the attack (chords 12/13).
+std::atomic<bool> g_stanceArmed{false};    // worker: armed that way right now
+std::atomic<double> g_stanceChordLead{0.15};   // worker: s the skill button leads the attack in chords 12/13 (StanceSettle)
+// The player's own BulletBehavior is running on this thread (the TAE hook or a replay): CSBulletManager::SpawnBullet
+// asks CombatPlayerProjectileNow whether the projectile it is spawning is one ERVR moves to the blade.
+thread_local int t_playerBulletEvent = 0;
+thread_local int t_replayBulletHand = -1;  // ... from a skill replay: its weapon's hand
 
 uint32_t ParseVRButton(const std::string& n) {
     if (n == "RTrigger") return VRB_RTrigger; if (n == "LTrigger") return VRB_LTrigger;
@@ -669,6 +685,19 @@ void __fastcall Hook_ExecEvent(CSChrTaeAnimEvent* self, CSTaeAnimEventArgs* args
         }
     }
     (void)isPlayer;
+    // The player's bullet: CSBulletManager::SpawnBullet runs inside this call (exe 2.7.2.0: 0x427440 -> 0x3c2d70 ->
+    // 0x3c0f80 -> 0x49e3a0 -> 0x3a2cb0), and asks CombatPlayerProjectileNow whether to move it to the blade.
+    if (!g_tripped && SafeRead(&args->eventId, &id, 4) && id == EV_BulletBehavior && SafeRead(&self->owner, &owner, sizeof(owner)) && owner && owner == g_player) {
+        const Config& c = Cfg();
+        if (c.debugProjectileYawDeg != 0.f || c.debugProjectileRollDeg != 0.f || c.debugProjectileLift != 0.f) {   // flat test only
+            static double s_last = 0.0; const double n = NowSec(); uint8_t fx = 0; SafeRead(&args->isFirstExecution, &fx, 1);
+            if (fx && n - s_last > 0.2) { s_last = n; LOGI("[combat] the player's BulletBehavior event runs (anim %u)", self->animId); }
+        }
+        t_playerBulletEvent = 1;
+        g_origExec(self, args);
+        t_playerBulletEvent = 0;
+        return;
+    }
     g_origExec(self, args);
 }
 
@@ -779,7 +808,7 @@ bool CheckRowSize(const char* what, uint32_t got, uint32_t expected) {
 
 void ReadEquipment(uint8_t* player) {
     uint8_t* asmp = Deref(player + Player_ChrAsm);
-    if (!asmp) { g_wep[0].valid = g_wep[1].valid = false; g_wepWeight[0].store(0.f); g_wepWeight[1].store(0.f); return; }
+    if (!asmp) { g_wep[0].valid = g_wep[1].valid = false; g_wepWeight[0].store(0.f); g_wepWeight[1].store(0.f); WeaponPresetEquipment(0,0,0); WeaponPresetEquipment(1,0,0); return; }
     int style = 0; uint32_t slotL = 0, slotR = 0;
     SafeRead(asmp + Asm_ArmStyle, &style, 4); SafeRead(asmp + Asm_LeftSlot, &slotL, 4); SafeRead(asmp + Asm_RightSlot, &slotR, 4);
     if (slotL > 2) slotL = 0; if (slotR > 2) slotR = 0;
@@ -788,16 +817,25 @@ void ReadEquipment(uint8_t* player) {
     for (int h = 0; h < 2; ++h) {
         int id = 0; SafeRead(asmp + Asm_ParamIds + idx[h] * 4, &id, 4);
         HandWeapon& w = g_wep[h];
-        if (id <= 0 || id >= 100000000) { w.valid = false; continue; }
+        if (id <= 0 || id >= 100000000) { w.valid = false; WeaponPresetEquipment(h,0,0); continue; }
         if (w.valid && w.paramId == id) continue;   // unchanged: keep the resolved row
         w = HandWeapon{}; w.paramId = id;
-        if (!ParamsReady()) continue;
+        if (!ParamsReady()) { WeaponPresetEquipment(h,0,0); continue; }
         uint32_t sz = 0;
         uint8_t* row = ParamsRow(PI_EquipParamWeapon, (uint32_t)(id / 100) * 100u, &sz);
-        if (!row) { LOGW("[combat] %s weapon %d: no EquipParamWeapon row", HandName(h), id); w.valid = true; continue; }
-        CheckRowSize("EQUIP_PARAM_WEAPON_ST", sz, Wep_RowSize);
+        if (!row) { LOGW("[combat] %s weapon %d: no EquipParamWeapon row", HandName(h), id); WeaponPresetEquipment(h,0,0); w.valid = true; continue; }
+        if (!CheckRowSize("EQUIP_PARAM_WEAPON_ST", sz, Wep_RowSize)) { WeaponPresetEquipment(h,0,0); continue; }
         SafeRead(row + Wep_VariationId, &w.variation, 4); SafeRead(row + Wep_Weight, &w.weight, 4); SafeRead(row + Wep_Type, &w.wepType, 2);
         w.row = row; w.isShield = IsShieldType(w.wepType); w.isRanged = !w.isShield && IsRangedWepType(w.wepType); w.valid = true;
+        uint32_t canonical=(uint32_t)(id/100)*100;
+        uint8_t* originRow=row;
+        for(int depth=0;depth<8;++depth){int32_t origin=-1;SafeRead(originRow+0x60,&origin,4);
+            if(origin<=0||(uint32_t)origin==canonical)break;
+            uint32_t originSize=0;auto* next=ParamsRow(PI_EquipParamWeapon,(uint32_t)origin,&originSize);uint16_t type=0;
+            if(!next||originSize!=Wep_RowSize||!SafeRead(next+Wep_Type,&type,2)||type!=w.wepType)break;
+            canonical=(uint32_t)origin;originRow=next;
+        }
+        WeaponPresetEquipment(h,canonical,w.wepType);
         const WeaponGeom g = GeomFor(w);
         LOGI("[combat] %s hand: weapon %d variation %d weight %.1f wepType %u%s length %.2f m mass at %.2f m (player level %d)", HandName(h), id, w.variation, w.weight, w.wepType, w.isShield ? " (shield)" : w.isRanged ? " (ranged: cast aim)" : "", g.length, g.length * g.com, GameERPlayerLevel());
     }
@@ -1179,7 +1217,7 @@ uint8_t* GaitemByHandle(uint8_t* imp, uint32_t handle) {
 // then gives the skill button's FP / stamina cost. Re-resolved when the weapon changes.
 void ResolveSkill(uint8_t* player, int h) {
     SkillInfo& si = g_skillInfo[h]; const HandWeapon& w = g_wep[h];
-    if (!w.valid || !w.row) { si = SkillInfo{}; return; }
+    if (!w.valid || !w.row) { si = SkillInfo{}; g_skillFollowUps[h].store(false); return; }
     if (si.weaponId == w.paramId && si.logged) return;
     si = SkillInfo{}; si.weaponId = w.paramId;
     static uint8_t* s_slot = nullptr; static bool s_tried = false;
@@ -1204,11 +1242,19 @@ void ResolveSkill(uint8_t* player, int h) {
     if (si.arts < 0) SafeRead(w.row + Wep_SwordArtsId, &si.arts, 4);
     if (si.arts >= 0) {
         uint32_t sz = 0; uint8_t* row = ParamsRow(PI_SwordArtsParam, (uint32_t)si.arts, &sz);
-        if (row && (sz == 0 || sz == Arts_RowSize)) { int16_t mp = 0; int8_t sp = 0; SafeRead(row + Arts_UseMpL2, &mp, 2); SafeRead(row + Arts_UsePointL2, &sp, 1); si.fpCost = mp; si.stamCost = sp; }
+        if (row && (sz == 0 || sz == Arts_RowSize)) {
+            int16_t mp = 0, r1 = -1, r2 = -1; int8_t sp = 0;
+            SafeRead(row + Arts_UseMpL2, &mp, 2); SafeRead(row + Arts_UsePointL2, &sp, 1);
+            SafeRead(row + Arts_UseMpR1, &r1, 2); SafeRead(row + Arts_UseMpR2, &r2, 2);
+            si.fpCost = mp; si.stamCost = sp; si.fpR1 = r1; si.fpR2 = r2;
+        }
         else if (row) LOGW("[combat] SWORD_ARTS_PARAM_ST row size 0x%X != 0x%X: skill costs unknown", sz, Arts_RowSize);
     }
     si.logged = true;
-    LOGI("[combat] %s hand skill: SwordArtsParam %d%s (FP %d, stamina %d)", HandName(h), si.arts, si.gem >= 0 ? " from the applied Ash of War" : " (the weapon's own)", si.fpCost, si.stamCost);
+    g_skillFollowUps[h].store(si.fpR1 > 0);
+    char follow[96]; follow[0] = 0;
+    if (si.fpR1 > 0) snprintf(follow, sizeof(follow), "; a stance: follow-ups R1 FP %d / R2 FP %d", si.fpR1, si.fpR2);
+    LOGI("[combat] %s hand skill: SwordArtsParam %d%s (FP %d, stamina %d%s)", HandName(h), si.arts, si.gem >= 0 ? " from the applied Ash of War" : " (the weapon's own)", si.fpCost, si.stamCost, follow);
 }
 
 int FindRecording(int weaponId, int arts) {
@@ -1252,7 +1298,7 @@ bool StartReplay(uint8_t* player, int h, double now) {
     int maxFp = 0; const int fp = ReadFp(player, &maxFp);
     const int cost = si.fpCost > 0 ? si.fpCost : rec.fpObserved;
     if (c.skillChargeFp && cost > 0 && maxFp > 0 && fp >= 0 && fp < cost) { g_haptic.fetch_or(4u << h); LOGI("[combat] skill: not enough FP (%d < %d)", fp, cost); return true; }
-    g_play = SkillPlay{}; g_play.active = true; g_play.start = now; g_play.libIndex = idx; g_play.st.resize(rec.ev.size());
+    g_play = SkillPlay{}; g_play.active = true; g_play.start = now; g_play.libIndex = idx; g_play.hand = h; g_play.st.resize(rec.ev.size());
     g_play.fpCost = c.skillChargeFp ? cost : 0; g_play.stamCost = si.stamCost;
     // Replayed bullets bypass the TAE hooks (they go straight to the trampoline), so a recording that shoots
     // arms the aim here: its bullets fly where the two-handed weapon's hand points.
@@ -1287,7 +1333,12 @@ void RunReplay(uint8_t* player, CSChrTaeAnimEvent* ev, double now) {
             s.time = e.animTime0 + (t - e.firstT); s.args.isFirstExecution = 0;
         }
         pending = true;
-        if (behavior) g_origExec(ev, &s.args); else g_origGeneric(ev, &s.args);
+        if (e.id == EV_BulletBehavior) {   // a replayed projectile leaves from the blade too (CombatPlayerProjectileNow)
+            t_playerBulletEvent = 1; t_replayBulletHand = p.hand;
+            g_origExec(ev, &s.args);
+            t_playerBulletEvent = 0; t_replayBulletHand = -1;
+        }
+        else if (behavior) g_origExec(ev, &s.args); else g_origGeneric(ev, &s.args);
         InterlockedIncrement(&g_injected);
     }
     // Costs go on after the first frame's events ran (331 decides "enough FP" on its own).
@@ -2051,7 +2102,7 @@ void GameFrameBody(uint8_t* player) {
         // drains far less per frame). If the shield was moving into the attack, it is a deflect.
         if (!anyStrike && maxStam > 0 && g_prevStam != INT_MIN && g_prevStam - stamAtEntry >= c.blockImpactStamina) {
             const int drop = g_prevStam - stamAtEntry;
-            const bool deflect = blk.into >= c.deflectSpeed && (NowSec() - blk.intoT) < 0.25;
+            const bool deflect = blk.into >= AppliedWeaponPreset(HandLeft).tuning.Get(WeaponField::DeflectSpeed,c.deflectSpeed) && (NowSec() - blk.intoT) < 0.25;
             if (deflect) { WriteStamina(player, g_prevStam); stam = g_prevStam; g_haptic.fetch_or(32u); g_tally.stamRefunded += drop; }
             else g_haptic.fetch_or(16u);
             BodyHapticsPost(deflect ? BodyKind::Deflect : BodyKind::Block, HandLeft, deflect ? 1.f : Clamp(.4f + (float)drop / 100.f, .4f, 1.f));
@@ -2063,15 +2114,16 @@ void GameFrameBody(uint8_t* player) {
 }
 
 // ---------------------------------------------------------------- swing detection (worker thread)
-Vec3 WeaponAxisVR() {
+Vec3 WeaponAxisVR(int hand) {
     const Config& c = Cfg();
+    const auto t = AppliedWeaponPreset(hand).tuning;
     float pitch = c.handRotOffX; DebugKeysHandRotX(&pitch);
-    const Quat calibration = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY), Deg2Rad(pitch), Deg2Rad(c.handRotOffZ));
+    const Quat calibration = Quat::FromEulerYXZ(Deg2Rad(c.handRotOffY+t.Get(WeaponField::Yaw,0)), Deg2Rad(pitch+t.Get(WeaponField::Pitch,0)), Deg2Rad(c.handRotOffZ+t.Get(WeaponField::Roll,0)));
     const Vec3 gameAxis = WeaponShaftAxis(calibration, c.twoHandAxis != "forward");
     return {gameAxis.x, gameAxis.y, -gameAxis.z};
 }
-float TipSpeed(const Pose& p, float reach, float* handSpeed) {
-    Vec3 tip = WeaponTipVelocity(p.linVel * Cfg().handScale, p.angVel, p.rot, WeaponAxisVR(), reach);
+float TipSpeed(const Pose& p, float reach, float* handSpeed, int hand) {
+    Vec3 tip = WeaponTipVelocity(p.linVel * Cfg().handScale, p.angVel, p.rot, WeaponAxisVR(hand), reach);
     if (handSpeed) *handSpeed = p.linVel.Length() * Cfg().handScale;
     return tip.Length();
 }
@@ -2138,7 +2190,9 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
     auto geometry = [&](int w, float* along, float* perp) {
         const Pose& wp = tr.hand[w]; const Pose& fp = tr.hand[1 - w];
         if (!wp.valid || !fp.valid || !in.controllerConnected[w] || !in.controllerConnected[1 - w]) return false;
-        Vec3 d = fp.pos - wp.pos; Vec3 ax = -wp.rot.Rotate(WeaponAxisVR());
+        const auto fit = AppliedWeaponPreset(w).tuning;
+        const Vec3 offset = wp.rot.Rotate({fit.Get(WeaponField::GripX,0),fit.Get(WeaponField::GripY,0),-fit.Get(WeaponField::GripZ,0)});
+        Vec3 d = fp.pos - wp.pos - offset; Vec3 ax = -wp.rot.Rotate(WeaponAxisVR(w));
         *along = d.Dot(ax); *perp = (d - ax * *along).Length();
         return true;
     };
@@ -2170,7 +2224,9 @@ void PollTwoHand(const VRTracking& tr, const VRInputState& in, double now) {
             // Nor is one that took an item from the belt (a weapon hanging low puts its hilt by the hip).
             if (WeaponWheelOwnsHand(1 - w) || BeltOwnsHand(1 - w)) continue;
             if (!g_wepPresent[w].load() || !geometry(w, &along, &perp)) continue;
-            if (!(along >= c.twoHandGrabMin && along <= c.twoHandGrabMax && perp <= c.twoHandGrabRadius)) continue;
+            const auto preset=AppliedWeaponPreset(w);const auto& tuning=preset.tuning;
+            if(DecideWeaponAction(preset,WeaponEvent::Grip,{w,TwoHandedStyle(g_armStyleShared.load()),GameERRiding()})==WeaponAction::Suppress)continue;
+            if (!(along >= tuning.Get(WeaponField::GrabMin,c.twoHandGrabMin) && along <= tuning.Get(WeaponField::GrabMax,c.twoHandGrabMax) && perp <= tuning.Get(WeaponField::GrabRadius,c.twoHandGrabRadius))) continue;
             zoneNow = true; s.pinHand = 1 - w; s.weaponHand = w;
             s_geoBlock = !gripOf(1 - w) ? "grip not squeezed"
                        : now - s_gripCloseT[1 - w] > 0.75 ? "grip was already closed - open it and squeeze again"
@@ -2217,20 +2273,32 @@ void PollSkillTrigger(const VRInputState& in, double now) {
     if (in.handTrigger[HandRight]  >= c.gripThreshold)    buttons |= VRB_RGrip;
     const int style = g_armStyleShared.load();
     const bool two = TwoHandedStyle(style);
+    const int owner=SkillHand(two,TwoHandedWeaponHand(style),g_wepShield[HandLeft].load()!=0||g_wepBow[HandLeft].load()!=0);
+    const auto preset=AppliedWeaponPreset(owner);
+    const auto policy=DecideWeaponAction(preset,WeaponEvent::Skill,{owner,two,GameERRiding()});
     SkillTriggerIn ti;
-    ti.down = mask && (buttons & mask) != 0;
+    ti.down = mask && (buttons & mask) != 0 && policy!=WeaponAction::Suppress;
     ti.twoHanded = two;
     ti.oneHandAllowed = OneHandSkillAllowed(c, VRButtonHand(mask));
-    ti.effectMode = c.twoHandSkill == "effect";
-    ti.gameMode = c.twoHandSkill == "game";
+    ti.effectMode = c.twoHandSkill != "off" && (policy==WeaponAction::EffectSkill || (policy==WeaponAction::Default && c.twoHandSkill == "effect"));
+    ti.gameMode = c.twoHandSkill != "off" && (policy==WeaponAction::GameSkill || (policy==WeaponAction::Default && c.twoHandSkill == "game"));
     ti.now = now;
-    ti.holdSeconds = c.skillHoldSeconds > 0.05f ? c.skillHoldSeconds : 0.05f;
+    ti.holdSeconds = std::max(.05f,preset.tuning.Get(WeaponField::SkillHold,c.skillHoldSeconds));
     const SkillTriggerOut o = g_skillTrig.Step(ti);
-    if (o.request) g_skillReq.store(o.request);
-    g_skillHeld.store(o.hold);
+    // StanceHoldAnimation=false, a stance (its skill has follow-ups): the hold only arms the follow-ups. The game's
+    // skill button stays up - no stance animation while you hold - and each follow-up swing presses it together with
+    // the attack (chords 12/13). A held game skill is nothing to record then. Anything else holds as before.
+    const bool deferred = o.hold && !c.stanceHoldAnimation && c.stanceSwings && !GameERRiding() && owner >= 0 && owner <= 1 &&
+                          g_skillFollowUps[owner].load();
+    if (o.request && !(deferred && o.request == 3)) g_skillReq.store(o.request);
+    g_skillHeld.store(o.hold && !deferred);
+    g_stanceArmed.store(deferred);
     if (o.started) g_skillHeldAt = now;
     if (o.hold) g_gameMoveUntil.store(now + kGameMoveGrace);
-    if (o.started)
+    if (o.started && deferred)
+        LOGI("[combat] skill: the %s arms the stance's follow-ups (StanceHoldAnimation=false): nothing plays while it is held - each swing presses %s and the attack together",
+             c.twoHandSkillButton.c_str(), c.skillButton.c_str());
+    else if (o.started)
         LOGI("[combat] skill: holding %s for the game while the %s is held (%s)", c.skillButton.c_str(), c.twoHandSkillButton.c_str(),
              two ? (ti.gameMode ? "two-handed, TwoHandSkill=game" : "two-handed, held past SkillHoldSeconds: the game's own skill, recorded") : "one-handed");
     // A two-handed skill (replayed or the game's): remember the weapon's hand for the skill's own aim events - a bow
@@ -2248,11 +2316,14 @@ void PollSkillTrigger(const VRInputState& in, double now) {
 // coverage of the head/chest line, steadiness - which only shapes absorption and stability.
 void PollBlock(const VRTracking& tr, double now) {
     const Config& c = Cfg();
+    const auto preset = AppliedWeaponPreset(HandLeft);
+    const auto& tuning = preset.tuning;
+    const bool suppressed = DecideWeaponAction(preset,WeaponEvent::Guard,{HandLeft,TwoHandedStyle(g_armStyleShared.load()),GameERRiding()}) == WeaponAction::Suppress;
     BlockState b;
     { std::lock_guard<std::mutex> g(g_mtx); b = g_block; }
     const Pose& sh = tr.hand[HandLeft]; const Pose& hd = tr.head;
     static double s_upSince = 0, s_downSince = 0, s_lastLog = 0;
-    if (!g_leftShield.load() || !sh.valid || !hd.valid) { b.raised = false; b.quality = 0.f; b.into = 0.f; s_upSince = s_downSince = 0; }
+    if (suppressed || !g_leftShield.load() || !sh.valid || !hd.valid) { b.raised = false; b.quality = 0.f; b.into = 0.f; s_upSince = s_downSince = 0; }
     else {
         Vec3 fwd = hd.rot.Forward(); fwd.y = 0.f; fwd = fwd.Normalized();
         if (fwd.Length() < 0.5f) fwd = {0.f, 0.f, -1.f};
@@ -2268,12 +2339,12 @@ void PollBlock(const VRTracking& tr, double now) {
         // arm at rest for a block: the guard was held all the time, and stamina regenerates slowly while guarding
         // (0.7.0 player log: LB in every pad line while walking to a door, 2026-11-05).
         const float slack = b.raised ? 0.15f : 0.f;
-        const bool up = fd > c.shieldUpForward - slack && lateral < 0.5f + slack &&
-                        height > c.shieldUpHeight - slack && height < 0.35f;
+        const bool up = fd > tuning.Get(WeaponField::ShieldForward,c.shieldUpForward) - slack && lateral < 0.5f + slack &&
+                        height > tuning.Get(WeaponField::ShieldHeight,c.shieldUpHeight) - slack && height < 0.35f;
         if (up) { s_downSince = 0; if (s_upSince == 0) s_upSince = now; }
         else { s_upSince = 0; if (s_downSince == 0) s_downSince = now; }
         if (!b.raised && up && now - s_upSince >= 0.05) b.raised = true;
-        if (b.raised && !up && now - s_downSince >= c.blockReleaseSeconds) b.raised = false;
+        if (b.raised && !up && now - s_downSince >= tuning.Get(WeaponField::ShieldRelease,c.blockReleaseSeconds)) b.raised = false;
         // Quality: how squarely the shield sits between the threat and the head/chest.
         const float cov = band(fd, 0.10f, 0.80f, 0.20f) * band(lateral, 0.f, 0.30f, 0.30f) * band(height, -0.70f, 0.20f, 0.20f);
         const float brace = 1.f - Clamp((sh.linVel.Length() - 0.6f) / 1.4f, 0.f, 1.f);
@@ -2537,6 +2608,27 @@ int CombatCastAimKind(Vec3* swingTracking) {
     return kAimSwing;
 }
 
+bool CombatPlayerProjectileNow(int* hand, double* swingAt, bool* debugOnly) {
+    if (t_playerBulletEvent <= 0) return false;
+    const Config& c = Cfg();
+    *hand = -1; *swingAt = -1.0; *debugOnly = false;
+    const double now = NowSec();
+    // The flat test's knobs take every projectile of the player's animation (no headset: no blade to move it to).
+    if (c.debugProjectileYawDeg != 0.f || c.debugProjectileRollDeg != 0.f || c.debugProjectileLift != 0.f) { *debugOnly = true; return true; }
+    // The hand that fired it: a replay's weapon hand, else the hand whose attack / skill button the game was handed
+    // last (a stance follow-up's press sets it too) - the same hand cast aim picks.
+    const int h = t_replayBulletHand >= 0 ? t_replayBulletHand : (now - g_castPressAt.load() < kCastPressMemory ? g_castPressHand.load() : -1);
+    if (c.skillProjectileFromBlade && MeleeProjectileHand(h)) {
+        *hand = h;
+        if (g_castKind.load() == kAimSwing) {
+            std::lock_guard<std::mutex> g(g_swingAimMtx);
+            if (g_swingAim.valid && g_swingAim.hand == h && now - g_swingAim.at < kSwingAimMemory) *swingAt = g_swingAim.at;
+        }
+        return true;
+    }
+    return false;
+}
+
 int CombatCastAimHand(bool* casting) {
     const Config& c = Cfg();
     if (casting) *casting = false;
@@ -2561,8 +2653,17 @@ uint16_t CombatBlockedButtons() {
     // A catalyst / bow in the attacking hand CASTS with the light/heavy buttons (no animation to keep off
     // the arms): those pass. Two-handed, the attacking hand is the two-handed weapon's.
     const int attackHand = TwoHandedStyle(g_armStyleShared.load()) ? TwoHandedWeaponHand(g_armStyleShared.load()) : HandRight;
-    const bool castsWithButtons = c.castAim && g_wepRanged[attackHand].load() != 0;
-    uint16_t m = c.combatBlockAttackButtons && !castsWithButtons ? (uint16_t)(ParseXInputButton(c.lightAttackButton) | ParseXInputButton(c.heavyAttackButton)) : 0;
+    const bool suppressCast = DecideWeaponAction(AppliedWeaponPreset(attackHand),WeaponEvent::Cast,{attackHand,TwoHandedStyle(g_armStyleShared.load()),GameERRiding()}) == WeaponAction::Suppress;
+    const bool castsWithButtons = !suppressCast && c.castAim && g_wepRanged[attackHand].load() != 0;
+    uint16_t m = (c.combatBlockAttackButtons || suppressCast) && !castsWithButtons ? (uint16_t)(ParseXInputButton(c.lightAttackButton) | ParseXInputButton(c.heavyAttackButton)) : 0;
+    const bool two = TwoHandedStyle(g_armStyleShared.load());
+    const bool mounted = GameERRiding();
+    if (!two && g_wepRanged[HandLeft].load() &&
+        DecideWeaponAction(AppliedWeaponPreset(HandLeft),WeaponEvent::Cast,{HandLeft,false,mounted}) == WeaponAction::Suppress)
+        m |= ParseXInputButton(c.leftSwingButton);
+    const int skillHand = SkillHand(two,attackHand,g_wepShield[HandLeft].load() || g_wepBow[HandLeft].load());
+    const auto skillPolicy = DecideWeaponAction(AppliedWeaponPreset(skillHand),WeaponEvent::Skill,{skillHand,two,mounted});
+    if (skillPolicy != WeaponAction::Default) m |= MappedButtonOf(c.twoHandSkillButton,c);
     if (c.twoHandMode == "grab") {
         // The grip that holds the weapon is a grab, not the button it is mapped to (LT = the skill).
         std::lock_guard<std::mutex> g(g_mtx);
@@ -2606,6 +2707,11 @@ uint16_t CombatForcedButtons(double now) {
         case 10: r.key = ParseXInputButton(c.heavyAttackButton); break;
         // A critical: the game's own light attack, where ThrowParam says it backstabs.
         case 11: r.key = ParseXInputButton(c.lightAttackButton); break;
+        // A stance follow-up with the stance not held (StanceHoldAnimation=false): the skill button enters the stance,
+        // the attack follows StanceSettle later, and the skill button lets go soon after - held through the
+        // follow-up, the game would return to the stance (and its animation) when it ends.
+        case 12: r.lead = ParseXInputButton(c.skillButton); r.key = ParseXInputButton(c.lightAttackButton); break;
+        case 13: r.lead = ParseXInputButton(c.skillButton); r.key = ParseXInputButton(c.heavyAttackButton); break;
         default: r.phase = 0; return 0;
         }
         if (!r.key) { r.phase = 0; LOGW("[combat] chord %d: no button configured", req); return 0; }
@@ -2616,7 +2722,8 @@ uint16_t CombatForcedButtons(double now) {
     // A lone key (skill / learn press) uses the gesture press duration; a chord uses the slower,
     // human-like two-hand timing (the game watches for RB/LB while Y is held).
     const double press = r.lead ? (c.twoHandChordPress > 0.05f ? c.twoHandChordPress : 0.05) : (c.gesturePressDuration > 0.08 ? c.gesturePressDuration : 0.08);
-    const double lead = c.twoHandChordLead > 0.05f ? c.twoHandChordLead : 0.05, tail = c.twoHandChordTail > 0.02f ? c.twoHandChordTail : 0.02;
+    double lead = c.twoHandChordLead > 0.05f ? c.twoHandChordLead : 0.05, tail = c.twoHandChordTail > 0.02f ? c.twoHandChordTail : 0.02;
+    if (r.kind == 12 || r.kind == 13) { lead = g_stanceChordLead.load(); tail = 0.12; }   // the stance's entry, then a short hold past the attack
     switch (r.phase) {
     case 1: if (now - r.t >= lead) { r.phase = 2; r.t = now; } return r.lead;                       // modifier down first
     case 2: if (now - r.t >= press) { r.phase = 3; r.t = now; } return (uint16_t)(r.lead | r.key);   // + the key
@@ -2644,17 +2751,20 @@ bool CombatTwoHandGrip(int hand, bool* holding) {
     return mine && (g_two.want || g_two.inZone);
 }
 
+float CombatHapticScale(int hand) { return AppliedWeaponPreset(hand).tuning.Get(WeaponField::HapticScale,1.f); }
 float CombatHandWeight(int hand) { return hand == HandLeft || hand == HandRight ? g_wepWeight[hand].load() : 0.f; }
 int CombatTwoHandWeaponHand() { const int style = g_armStyleShared.load(); return TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : -1; }
 float CombatHandReach(int hand) {
     if (hand != HandLeft && hand != HandRight) return 0.f;
     const float r = g_wepReach[hand].load();
-    return r > 0.05f ? r : (hand == HandRight ? Cfg().weaponReachRight : Cfg().weaponReachLeft);
+    return AppliedWeaponPreset(hand).tuning.Get(WeaponField::Reach, r > 0.05f ? r : (hand == HandRight ? Cfg().weaponReachRight : Cfg().weaponReachLeft));
 }
 float CombatHandCom(int hand) {
     if (hand != HandLeft && hand != HandRight) return 0.f;
     const float m = g_wepCom[hand].load();
-    return m > 0.01f ? m : 0.45f * CombatHandReach(hand);
+    const float reach = CombatHandReach(hand), original = g_wepReach[hand].load();
+    const float fraction = m > .01f && original > .05f ? m / original : .45f;
+    return AppliedWeaponPreset(hand).tuning.Get(WeaponField::Balance,fraction) * reach;
 }
 
 void CombatSetMenuOpen(bool open) {
@@ -2686,7 +2796,7 @@ void PublishSwingAim(int h, const VRTracking& tr) {
     if (!g_stance[h].Aim(&x, &y, &z, &at)) return;
     // Within SwingAimMaxDeg of where you look: a swing centred further off still flies, turned in to the limit.
     float vx, vz; ViewForward(tr, &vx, &vz);
-    ClampTowardView(&x, &z, vx, vz, Cfg().swingAimMaxDeg);
+    ClampTowardView(&x, &z, vx, vz, AppliedWeaponPreset(h).tuning.Get(WeaponField::AimClamp,Cfg().swingAimMaxDeg));
     std::lock_guard<std::mutex> g(g_swingAimMtx);
     g_swingAim.valid = true; g_swingAim.hand = h; g_swingAim.dir = Vec3{x, y, z}; g_swingAim.at = at;
 }
@@ -2704,7 +2814,7 @@ void FinishSwingAim(int h, const VRTracking& tr, double now) {
     float d = (std::atan2(x, -z) - std::atan2(hf.x, -hf.z)) * 57.29578f;
     while (d > 180.f) d -= 360.f;
     while (d < -180.f) d += 360.f;
-    const float lim = Cfg().swingAimMaxDeg;
+    const float lim = AppliedWeaponPreset(h).tuning.Get(WeaponField::AimClamp,Cfg().swingAimMaxDeg);
     const bool clamped = lim > 0.f && std::fabs(d) > lim;
     char aimed[64]; aimed[0] = 0;
     if (clamped) snprintf(aimed, sizeof(aimed), " - flies %.0f deg %s (SwingAimMaxDeg)", lim, d >= 0.f ? "right" : "left");
@@ -2715,13 +2825,21 @@ void FinishSwingAim(int h, const VRTracking& tr, double now) {
 void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
     const Config& c = Cfg();
     const bool continuous = c.kineticEnabled && c.kineticContinuous;
-    if (!CombatHandlesSwings()) {
+    bool neutral = tr.head.valid && in.buttons == 0 && !g_skillHeld.load() && !g_stanceArmed.load() && g_chord.phase == 0;
+    for (int h = 0; h < 2; ++h) neutral = neutral && tr.hand[h].valid &&
+        tr.hand[h].linVel.Length() < .2f && tr.hand[h].angVel.Length() < .6f &&
+        in.handTrigger[h] < c.gripThreshold && in.indexTrigger[h] < c.triggerThreshold && g_sm[h].st != HandSM::Swinging && g_sm[h].st != HandSM::Armed;
+    { std::lock_guard<std::mutex> g(g_mtx); neutral = neutral && !g_block.raised && !g_two.want; }
+    const bool presetChanged = WeaponPresetApplyPending(neutral);
+    if (!CombatHandlesSwings() || !tr.head.valid || presetChanged) {
         for (int h = 0; h < 2; ++h) {
             EndSwing(h, true);
             const uint32_t next = g_sm[h].nextId;
             g_sm[h] = HandSM{}; g_sm[h].nextId = next;
         }
-        g_skillTrig.Reset(); g_skillHeld.store(false);   // a menu or a transition lets go of a held skill
+        for (auto& stance : g_stance) stance.Reset();
+        g_skillReq.store(0); g_chordReq.store(0); g_chord = ChordRun{};
+        g_skillTrig.Reset(); g_skillHeld.store(false); g_stanceArmed.store(false);   // a menu or a transition lets go of a held skill
         std::lock_guard<std::mutex> g(g_mtx); g_block = BlockState{}; g_two = TwoHandState{};
         return;
     }
@@ -2735,31 +2853,38 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
     const int style = g_armStyleShared.load();
     // While ERVR holds the skill (StanceSwings), no hand strikes: the attacking hand's deliberate swing is the
     // stance's follow-up, the game's R1/R2 (StanceSwing, combat_moves.h).
-    const bool stanceHeld = c.stanceSwings && g_skillHeld.load() && !riding;
+    const bool stanceArmed = g_stanceArmed.load();   // StanceHoldAnimation=false: armed, the game's skill button up
+    const bool stanceHeld = c.stanceSwings && (g_skillHeld.load() || stanceArmed) && !riding;
     const int attackHand = TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : HandRight;
     int freeHand = TwoHandedStyle(style) ? 1 - TwoHandedWeaponHand(style) : -1;
     { std::lock_guard<std::mutex> g(g_mtx); if (g_two.want) freeHand = g_two.pinHand; }
     for (int h = 0; h < 2; ++h) {
+        const auto preset = AppliedWeaponPreset(h);
+        const auto& tuning = preset.tuning;
+        const auto event = stanceHeld ? WeaponEvent::Stance : WeaponEvent::Contact;
+        const auto action = DecideWeaponAction(preset,event,{h,TwoHandedStyle(style),riding});
         HandSM& s = g_sm[h];
         const Pose& p = tr.hand[h];
         bool grip = in.handTrigger[h] >= c.gripThreshold;   // analog in VRInputState; VRB_*Grip is never set by the backend
         // A hand choosing on the weapon wheel is not swinging, however fast it moves onto a weapon, and neither is
         // one carrying an item from the belt.
-        bool allowed = p.valid && in.controllerConnected[h] && h != freeHand && (h == HandRight || (c.combatLeftHand && !leftShield)) &&
+        bool allowed = action != WeaponAction::Suppress && p.valid && in.controllerConnected[h] && h != freeHand && (h == HandRight || (c.combatLeftHand && !leftShield)) &&
                        (!c.gestureRequiresGrip || grip) && !WeaponWheelOwnsHand(h) && !BeltOwnsHand(h);
         if (!allowed) {
             // Also cancel an undelivered short contact while already cooling
             // down; tracking loss or taking the support grip must never replay it.
+            WeaponPresetTrace(h,0,0,event,action);
+            g_stance[h].Reset();
             EndSwing(h, true);
             const uint32_t next = s.nextId;
             s = HandSM{}; s.nextId = next;
             continue;
         }
         const float reach = CombatHandReach(h);
-        const float onSpeed = continuous ? c.contactOnSpeed : c.swingOnSpeed;
-        const float offSpeed = continuous ? c.contactOffSpeed : c.swingOffSpeed;
+        const float onSpeed = continuous ? tuning.Get(WeaponField::ContactOn, c.contactOnSpeed) : tuning.Get(WeaponField::SwingOn, c.swingOnSpeed);
+        const float offSpeed = std::min(onSpeed * .95f, continuous ? tuning.Get(WeaponField::ContactOff, c.contactOffSpeed) : tuning.Get(WeaponField::SwingOff, c.swingOffSpeed));
         float handSpd = 0.f;
-        float tip = allowed ? TipSpeed(p, reach, &handSpd) : 0.f;
+        float tip = allowed ? TipSpeed(p, reach, &handSpd, h) : 0.f;
         const float weight = g_wepWeight[h].load();
         const float rawTip = tip;   // the controller's own tip speed (the inertial weapon's replaces it below)
         // With the inertial arm (game_er) the WEAPON the game renders and sweeps lags the
@@ -2771,22 +2896,25 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         else if (p.valid) {
             // Arc: tip path length since the tip last came to rest (captures the windup before the
             // on-threshold).
-            Vec3 tipPos = p.pos * c.handScale + p.rot.Rotate(WeaponAxisVR()) * reach;
+            Vec3 tipPos = p.pos * c.handScale + p.rot.Rotate(WeaponAxisVR(h)) * reach;
             if (s.tipValid && tip >= offSpeed) s.arc += (tipPos - s.lastTip).Length();
             else if (tip < offSpeed) s.arc = 0.f;
             s.lastTip = tipPos; s.tipValid = true;
         } else { s.tipValid = false; s.arc = 0.f; }
+        WeaponPresetTrace(h,tip,handSpd,event,action);
         StanceSwingIn si;
+        si.settleSeconds = tuning.Get(WeaponField::StanceSettle,si.settleSeconds);
+        si.gapSeconds = tuning.Get(WeaponField::StanceGap,si.gapSeconds);
         si.now = now; si.heldFor = now - g_skillHeldAt; si.tip = tip; si.hand = handSpd;
         {   // the aim sample: the tip's horizontal offset from the head (tracking space; the blade's direction without a head)
-            const Vec3 blade = p.rot.Rotate(WeaponAxisVR());
+            const Vec3 blade = p.rot.Rotate(WeaponAxisVR(h));
             if (tr.head.valid) {
                 const Vec3 off = (p.pos - tr.head.pos) * c.handScale + blade * reach;
                 si.sx = off.x; si.sy = 0.f; si.sz = off.z;
             } else { si.sx = blade.x; si.sy = 0.f; si.sz = blade.z; }
         }
-        si.onSpeed = c.swingOnSpeed; si.offSpeed = c.swingOffSpeed; si.minHand = c.minHandSpeed;
-        si.heavySpeed = c.heavySwingSpeed; si.armWindow = c.swingArmWindow;
+        si.onSpeed = tuning.Get(WeaponField::SwingOn, c.swingOnSpeed); si.offSpeed = std::min(si.onSpeed * .95f,tuning.Get(WeaponField::SwingOff, c.swingOffSpeed)); si.minHand = tuning.Get(WeaponField::MinHand, c.minHandSpeed);
+        si.heavySpeed = tuning.Get(WeaponField::Heavy, c.heavySwingSpeed); si.armWindow = tuning.Get(WeaponField::ArmWindow, c.swingArmWindow);
         ViewForward(tr, &si.vx, &si.vz);
         if (stanceHeld) {
             EndSwing(h, true);
@@ -2800,16 +2928,19 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                 if (c.combatDebug) LOGD("[combat] %s swing in the stance dropped (%s)", HandName(h), g_chordReq.load() ? "another press is running" : "a critical is playing");
                 continue;
             }
-            const bool heavy = pr == StancePress::Heavy;
-            g_chordReq.store(heavy ? 10 : 9);
+            const bool heavy = action == WeaponAction::Heavy || (action != WeaponAction::Light && pr == StancePress::Heavy);
+            // Armed without the hold (StanceHoldAnimation=false): the skill button leads the attack by StanceSettle -
+            // the game enters the stance and takes the follow-up from it at once.
+            if (stanceArmed) g_stanceChordLead.store(std::max(0.05, (double)si.settleSeconds));
+            g_chordReq.store(stanceArmed ? (heavy ? 13 : 12) : (heavy ? 10 : 9));
             g_gameMoveUntil.store(now + kGameMoveGrace);
             g_haptic.fetch_or(1u << h);
             PublishSwingAim(h, tr);
             ArmSwingAim(h, now);
             g_followUpAt.store(now);
-            LOGI("[combat] %s swing while the skill is held (tip %.1f m/s, %.2f s into the hold): pressing the game's %s attack (%s) for its follow-up",
-                 HandName(h), g_stance[h].PressPeak(), now - g_skillHeldAt, heavy ? "heavy" : "light",
-                 heavy ? c.heavyAttackButton.c_str() : c.lightAttackButton.c_str());
+            LOGI("[combat] %s swing while the skill is held (tip %.1f m/s, %.2f s into the hold): pressing the game's %s%s attack (%s) for its follow-up",
+                 HandName(h), g_stance[h].PressPeak(), now - g_skillHeldAt, stanceArmed ? "skill button and, right after, its " : "",
+                 heavy ? "heavy" : "light", heavy ? c.heavyAttackButton.c_str() : c.lightAttackButton.c_str());
             continue;
         }
         // The trigger was let go mid-swing (L2, R1, release): the pressed swing's aim follows it to its end.
@@ -2832,7 +2963,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         if (s.rearmMin > 0.f && (s.st == HandSM::Cooldown || s.st == HandSM::Idle)) s.rearmMin = std::min(s.rearmMin, std::max(tip, 0.01f));
         switch (s.st) {
         case HandSM::Idle:
-            if (pending || !WeaponContactStarts(allowed, continuous, tip, handSpd, onSpeed, c.minHandSpeed) || !RearmReady(tip, s.rearmMin)) break;
+            if (pending || !WeaponContactStarts(allowed, continuous, tip, handSpd, onSpeed, tuning.Get(WeaponField::MinHand, c.minHandSpeed)) || !RearmReady(tip, s.rearmMin)) break;
             s.st = HandSM::Armed; s.t = now; s.peak = tip; s.rearmMin = 0.f;
             [[fallthrough]];
         case HandSM::Armed: {
@@ -2840,13 +2971,15 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             bool decel = tip < s.prevTip && tip < s.peak * 0.85f;
             if (!allowed || tip < offSpeed) { s.st = HandSM::Idle; break; }
             if (WeaponContactReady(continuous, inertial, c.kineticEnabled, now - s.t,
-                                   c.swingArmWindow, weight, c.kineticArmPerWeight, decel)) {
+                                   tuning.Get(WeaponField::ArmWindow, c.swingArmWindow), weight, c.kineticArmPerWeight, decel)) {
                 const float vq = c.kineticEnabled ? s.vVirtPeak : s.peak;
                 const float q = StrikeQuality(vq, s.arc, weight, reach, c);
                 int slot;
                 if (h == HandLeft && !TwoHandedStyle(style)) slot = SlotLeft;
                 else if (c.kineticEnabled) slot = (q >= c.kineticHeavyQuality && s.arc >= 0.8f * ArcRefFor(weight, c)) ? SlotHeavy : SlotLight;
-                else slot = s.peak >= c.heavySwingSpeed ? SlotHeavy : SlotLight;
+                else slot = s.peak >= tuning.Get(WeaponField::Heavy, c.heavySwingSpeed) ? SlotHeavy : SlotLight;
+                if (slot != SlotLeft && action == WeaponAction::Heavy) slot = SlotHeavy;
+                if (slot != SlotLeft && action == WeaponAction::Light) slot = SlotLight;
                 // On Torrent with RideAttacks=buttons the swing is the game's own mounted attack: the matching
                 // button is pressed (never learned from - mounted rows are not the on-foot ones) and nothing is
                 // injected. The arms stay on the controllers either way.
@@ -2862,7 +2995,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                 if (throwState == 3 || throwState == 4) { s.st = HandSM::Cooldown; s.t = now; s.restSpeed = 0.f; break; }
                 // While ERVR holds the skill the swing is no strike of ours (with StanceSwings the stance branch
                 // above has already taken the hand; without it the swing is simply swallowed).
-                if (g_skillHeld.load()) { s.st = HandSM::Cooldown; s.t = now; s.restSpeed = 0.f; break; }
+                if (g_skillHeld.load() || g_stanceArmed.load()) { s.st = HandSM::Cooldown; s.t = now; s.restSpeed = 0.f; break; }
                 // A backstab the game's own ThrowParam allows right now (the game thread's match, CriticalsFrame):
                 // the swing is the game's light attack, and the game plays the critical. Not with a staff, seal or
                 // bow in the attacking hand (its light attack casts) and not from the left hand's own swing.
@@ -2924,7 +3057,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             if (continuous && tip < valley) { if (s.slowSince == 0) s.slowSince = now; }
             else s.slowSince = 0;
             const int liveEnd = LiveContactEnd(continuous, spent, s.slowSince > 0 ? now - s.slowSince : 0.0,
-                                               c.contactDwellSeconds, now - s.t, c.contactMaxSeconds);
+                                               tuning.Get(WeaponField::ContactDwell, c.contactDwellSeconds), now - s.t, tuning.Get(WeaponField::ContactMax, c.contactMaxSeconds));
             const bool slowEnd = liveEnd == 3, longEnd = liveEnd == 4;
             if (valleyEnd || timeoutEnd || slowEnd || longEnd ||
                 !WeaponContactContinues(continuous, tip, offSpeed, now - s.t, c.swingMaxSeconds)) {
@@ -2946,8 +3079,8 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         case HandSM::Cooldown: {
             const float rest = !continuous ? onSpeed : s.restSpeed > offSpeed ? s.restSpeed : offSpeed;
             // Continuous: a strike that landed waits ContactCooldownSeconds; a missed one re-arms at once.
-            const bool waited = continuous ? ContactCooldownDone(s.landed, now - s.t, c.contactCooldownSeconds)
-                                           : now - s.t >= c.swingCooldown;
+            const bool waited = continuous ? ContactCooldownDone(s.landed, now - s.t, tuning.Get(WeaponField::ContactCooldown, c.contactCooldownSeconds))
+                                           : now - s.t >= tuning.Get(WeaponField::SwingCooldown, c.swingCooldown);
             if (tip < rest && waited) { s.st = HandSM::Idle; s.restSpeed = 0.f; }
             break; }
         }
@@ -2956,6 +3089,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
 }
 
 void CombatGameFrame(uint8_t* player, uint32_t frame) {
+    if (!player) { WeaponPresetEquipment(0,0,0); WeaponPresetEquipment(1,0,0); }
     if (g_tripped || !g_status.taeHooked || !player) return;
     if (frame == g_lastFrame) return;
     g_lastFrame = frame;

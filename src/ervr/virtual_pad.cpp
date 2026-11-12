@@ -425,18 +425,19 @@ void VirtualPadUpdate(double now) {
     // Physical combat (swing -> game AttackBehavior event) takes over from button pulses when active.
     // The T-pose is no swing: combat sees still hands while the calibration panel asks.
     bool physical = CombatHandlesSwings();
-    if (physical && !g_menuMode && !calib.showing) CombatPollHands(tr, in, now);
+    if (!g_menuMode && !calib.showing) CombatPollHands(tr, in, now); // fit presets also apply with physical combat disabled
     else CombatPollHands(VRTracking{}, VRInputState{}, now);   // keeps its state machine idle
     if (uint32_t hr = CombatTakeHapticRequests(); hr && c.gestureHaptics) {
+        auto weaponHaptic = [&](Hand h,float amplitude,double at,double duration) { Haptic(h,amplitude*CombatHapticScale(h),at,duration); };
         for (int h = 0; h < 2; ++h) {
-            if (hr & (4u << h)) Haptic((Hand)h, 1.0f, now, 0.25);          // rejected (no stamina): long buzz
-            else if (hr & (1u << h)) Haptic((Hand)h, 0.35f, now, 0.05);    // swing armed: short tick
+            if (hr & (4u << h)) weaponHaptic((Hand)h, 1.0f, now, 0.25);          // rejected (no stamina): long buzz
+            else if (hr & (1u << h)) weaponHaptic((Hand)h, 0.35f, now, 0.05);    // swing armed: short tick
         }
-        if (hr & 32u) Haptic(HandLeft, 1.0f, now, 0.18);                    // deflect: hard, long
-        else if (hr & 16u) Haptic(HandLeft, 0.6f, now, 0.08);               // blocked hit: thud
-        for (int h = 0; h < 2; ++h) if (hr & (64u << h)) Haptic((Hand)h, 0.9f, now, 0.07);   // strike landed: thud in the weapon hand
-        if (hr & 256u) { Haptic(HandLeft, 0.7f, now, 0.15); Haptic(HandRight, 0.7f, now, 0.15); }   // two-handed: both hands close on the weapon
-        else if (hr & 512u) { Haptic(HandLeft, 0.4f, now, 0.06); Haptic(HandRight, 0.4f, now, 0.06); }   // back to one hand
+        if (hr & 32u) weaponHaptic(HandLeft, 1.0f, now, 0.18);                    // deflect: hard, long
+        else if (hr & 16u) weaponHaptic(HandLeft, 0.6f, now, 0.08);               // blocked hit: thud
+        for (int h = 0; h < 2; ++h) if (hr & (64u << h)) weaponHaptic((Hand)h, 0.9f, now, 0.07);   // strike landed: thud in the weapon hand
+        if (hr & 256u) { weaponHaptic(HandLeft, 0.7f, now, 0.15); weaponHaptic(HandRight, 0.7f, now, 0.15); }   // two-handed: both hands close on the weapon
+        else if (hr & 512u) { weaponHaptic(HandLeft, 0.4f, now, 0.06); weaponHaptic(HandRight, 0.4f, now, 0.06); }   // back to one hand
     }
     // A hand holding a belt item is not swinging (its pose reads as untracked to the detector).
     auto gesturePose = [&](int h) { Pose p = tr.hand[h]; if (BeltOwnsHand(h)) p.valid = false; return p; };

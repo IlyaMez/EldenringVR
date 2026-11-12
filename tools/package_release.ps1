@@ -43,7 +43,8 @@ if (-not $Version) {
 }
 
 $required = @("ERVR Launcher.exe", "dxgi.dll", "ReShade.ini", "dinput8.dll", "LICENSE-ReShade.txt", "ERVR\ERVR.dll", "ERVR\ERVR.ini",
-               "ERVR\bhaptics_library.dll", "ERVR\LICENSE-bHaptics.txt", "ERVR\bHaptics-THIRD_PARTY_NOTICES.txt")
+               "ERVR\bhaptics_library.dll", "ERVR\LICENSE-bHaptics.txt", "ERVR\bHaptics-THIRD_PARTY_NOTICES.txt",
+               "ERVR\LICENSE-Zstandard.txt", "ERVR\LICENSE-zlib.txt", "ERVR\LICENSE-JsonCpp.txt", "ERVR\WEAPON_PRESETS.md")
 $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
 if ($missing) { throw "missing from build\dist: $($missing -join ', ') - run .\build.ps1" }
 
