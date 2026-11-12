@@ -557,6 +557,8 @@ void Config::Load(const std::wstring& path) {
     debugProjectileYawDeg  = GetF(ini, L"Experimental", L"DebugProjectileYawDeg", debugProjectileYawDeg);
     debugProjectileRollDeg = GetF(ini, L"Experimental", L"DebugProjectileRollDeg", debugProjectileRollDeg);
     debugProjectileLift    = GetF(ini, L"Experimental", L"DebugProjectileLift", debugProjectileLift);
+    rideFrameAnchor        = GetB(ini, L"Experimental", L"RideFrameAnchor", rideFrameAnchor);
+    rideTiltExtrapolate    = GetB(ini, L"Experimental", L"RideTiltExtrapolate", rideTiltExtrapolate);
 }
 
 Config& Cfg() { return g_cfg; }

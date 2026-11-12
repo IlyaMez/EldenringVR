@@ -1726,6 +1726,7 @@ uint64_t __fastcall Hook_QueueTasks(void* self, void* a, void* b) {
     // report with the camera the renderer really used. Must precede DoSecondPass, which
     // stashes pass 2's own pending report.
     GameERFinalizePassReport();
+    GameERAfterPass1();   // on horseback: the rider as drawn vs the final camera ([ride] drawn)
     if (g_winTrace.load(std::memory_order_relaxed)) {
         LARGE_INTEGER tm; QueryPerformanceCounter(&tm);
         const int k = g_p1N.fetch_add(1, std::memory_order_relaxed);

@@ -682,8 +682,56 @@ std::atomic<uint32_t> g_stereoPair{0};
 uint32_t RiderHoldPair() { const uint32_t k = g_stereoPair.load(); return FramePumpCurrentPass() == 2 ? k - 1 : k; }
 std::mutex g_rideStabMtx;
 RideCameraStabilizer g_rideStab;
+RideFrameAnchor g_rideFrame;   // under g_rideStabMtx
+// The rider's rebuilds (pass 1): their count tells frames apart (RideFrameAnchor), the last matrix and the physics
+// it was built from are what the frame's first write predicts the next rebuild from (RidePredictRider), and how
+// well each guess did goes to the log.
+struct RideTrack {
+    std::mutex mtx;
+    std::atomic<uint32_t> gen{0};
+    RigidPose rider, riderPhys; bool haveRider = false;
+    // 0 = the last matrix, 1 = carried by the physics, 2 = carried with the ride's tilt continued (ExtrapolateTilt)
+    static constexpr int kGuesses = 3;
+    uint32_t guessGen = ~0u; RigidPose guess[kGuesses]; bool have[kGuesses]{};
+    float maxMm[kGuesses]{}, maxDeg[kGuesses]{}; double sumMm[kGuesses]{}, sumDeg[kGuesses]{}; int n[kGuesses]{}, usedN[kGuesses]{};
+    // The tilt (physics^-1 * matrix) of the last two rebuilds, and each guess's running rotation error (deg, EMA over
+    // ~20 rebuilds): the extrapolated tilt is used only while it has been the better guess.
+    Quat resBefore{}, resLast{}; int resN = 0; double resAt = 0;
+    float emaDeg[kGuesses]{}; int emaN[kGuesses]{};
+} g_rideTrack;
 std::mutex g_rideFollowMtx;
 RideHeadFollow g_rideFollow;
+// Ride probe: what the renderer really draws on horseback. Of a frame's pose writes only the Havok pose hook's
+// is drawn (2026-11-12 flat test: a rider lifted 40 cm in each kind of write in turn floated only for the pose
+// hook), hung off the model matrix the rider's rebuild produces after it; the eyes see the last camera written
+// before the frame is drawn. The [body] probe reads back the model-pos post write, which is never drawn. This
+// records, per pass-1 frame, every write in order with how far the rider's model matrix had moved since the
+// previous one, and after pass 1 (GameERAfterPass1) compares the drawn head with the final camera.
+enum RideProbeKind : uint8_t { RP_Pose, RP_RiderPre, RP_RiderRebuilt, RP_MountPre, RP_MountRebuilt, RP_CamStep,
+                               RP_CamWrite, RP_Finalize, RP_Rewrite };
+struct RideProbe {
+    std::mutex mtx;
+    struct Ev { uint8_t kind; int16_t tag; int16_t movedMm; };
+    Ev ev[24]; int n = 0;                  // this pass-1 frame, in order
+    Vec3 lastRider{}; bool haveLast = false;
+    bool havePre = false, haveRebuilt = false, havePost = false, haveMount = false;
+    Vec3 headPre{}, headPost{};            // head bone in the frame it was written in: drawn (pose hook) / post write
+    Vec3 rebuiltPos{}; Quat rebuiltRot{};  // the model matrix the rider's rebuild produced
+    Vec3 mountRebuilt{};
+    // Upper-body points of the drawn pose (pose hook, model frame): head, neck, left/right clavicle, torso.
+    static constexpr int kBodyPts = 5;
+    Vec3 bodyPre[kBodyPts]{}; bool haveBody[kBodyPts]{};
+    // 5 s window (signed per-axis maxima: x lateral, y vertical, z forward along the rider's heading)
+    int frames = 0;
+    Vec3 drawnCam{}, postCam{}, drawnPost{};
+    // The drawn head against the final camera, both extremes per axis: the signed maximum above only ever showed the
+    // side away from the camera (the head sits ~9 cm behind and ~5 cm below it), never a head coming TOWARD the eye.
+    Vec3 drawnMin{}, drawnMax{}; bool haveRange = false;
+    // The nearest drawn upper-body point within 60 deg of the camera's forward: how close the body came into view.
+    float nearestM = 1e9f, nearestDeg = 0.f; int nearestPt = -1; Vec3 nearestAxes{};
+    float drawnPostSum = 0.f, matLate = 0.f, mountLate = 0.f, camLate = 0.f;
+} g_rideProbe;
+void RideProbeEvent(RideProbeKind k);   // below, with the ride summary
 bool SeatTemplateReady() { return g_skel.boneCount > 0 && (int)g_seatedTemplate.size() == g_skel.boneCount; }
 // The blade each hand's arm was last solved holding (world, pass 1): GameERBladeWorld.
 struct BladeSample { bool valid = false; Vec3 grip{}, tip{}; double stamp = 0; };
@@ -1150,6 +1198,9 @@ struct FrameInfo {
     bool seatPose = false;// seated and the rider is the captured seated pose (PoseMode=vr), upright in its own frame
     bool latePost = false;// built in the player's model-pos POST of pass 1: the frame's final camera write
     Vec3 rideCamShift{};  // seated: how far the smoothed view sits off the rider's own anchor - the body goes with it
+    bool haveRider = false; RigidPose rider; // riding: the rider's model matrix this write is built on - before the
+                          // frame's rebuild the one that rebuild will produce, predicted (RidePredictRider)
+    bool rideOpens = false; uint32_t rideGen = 0;   // this write opens the ride frame (RideFrameAnchor) at that count
     bool capturePose = false; // menu/exit poses cannot replace the template; this never gates rendering
     uint8_t* mount = nullptr; // validated, fully mounted Torrent (null during transitions)
     Vec3 root; Quat rootQ; // character root the whole frame is built on (model matrix, physics fallback)
@@ -1356,23 +1407,43 @@ void BuildCameraAnchor(uint8_t* player, FrameInfo& f) {
     }
 }
 
-// Gallop bounce out of the view (RideCameraStabilizer): the anchor is smoothed in Torrent's own frame. Only the
-// frame's final camera write moves the smoothing - the model-pos post with CameraAfterModelPos - so the earlier
-// writes of a frame, built on last frame's rider matrix, cannot drag it. The seated body is moved by the same
-// offset (rideCamShift): a view smoothed over a body that kept the saddle's bounce let the body rise into it on
-// every jump and stride ("horse animations affect the body but not the camera", 2026-11-02). Now the horse
-// moves under a rider and view that move together.
+// Gallop bounce out of the view (RideCameraStabilizer): the anchor is smoothed in Torrent's own frame, and the
+// seated body is moved by the same offset (rideCamShift), so the horse moves under a rider and view that move
+// together ("horse animations affect the body but not the camera", 2026-11-02).
+// The smoothing advances once per frame, in the write that opens it (BuildFrame: the Havok pose hook - the one
+// write that is drawn), solved in the matrix the rider's rebuild is about to produce and against Torrent's physics
+// as that rebuild will pair them. The smoothed anchor is kept in the rider's own frame (g_rideFrame), and every
+// other write of the frame - model-pos pre and post, the camera steps, the finalize replay - places the view at
+// that same point. Before (2026-11-12), every write smoothed again against Torrent's physics as it stood then -
+// before or after the physics step, against an old or a new rider matrix - and each came out somewhere else.
 void StabilizeRideCamera(FrameInfo& f) {
     const Config& c = Cfg();
     Vec3 mp; Quat mq;
     f.rideCamShift = {};
     std::lock_guard<std::mutex> g(g_rideStabMtx);
-    if (!f.mount || c.rideCameraSmoothing <= 0.f || !PlayerRoot(f.mount, mp, mq)) { g_rideStab.Reset(); return; }
-    const bool advance = FramePumpCurrentPass() != 2 && (f.latePost || !c.fpCameraAfterModelPos);
+    if (!f.mount || !f.haveRider || c.rideCameraSmoothing <= 0.f || !PlayerRoot(f.mount, mp, mq)) {
+        g_rideStab.Reset(); g_rideFrame.Reset(); return;
+    }
     const Vec3 raw = f.anchor;
-    f.anchor = g_rideStab.Apply(f.anchor, mp, HeadingQ(mq), NowSec(), advance, c.rideCameraSmoothing, c.rideCameraMaxDeviation);
+    const double now = NowSec();
+    const int pass = FramePumpCurrentPass();
+    if (!c.rideFrameAnchor) {
+        // [Experimental] RideFrameAnchor=false: the old pipeline, for an A/B of the "[ride] drawn" probe only.
+        const bool advance = pass != 2 && (f.latePost || !c.fpCameraAfterModelPos);
+        f.anchor = g_rideStab.Apply(raw, mp, HeadingQ(mq), now, advance, c.rideCameraSmoothing, c.rideCameraMaxDeviation);
+        if (advance) { std::lock_guard<std::mutex> s(g_rideStats.mtx); g_rideStats.camDev = std::max(g_rideStats.camDev, g_rideStab.deviation); }
+    } else if (f.rideOpens) {
+        f.anchor = g_rideStab.Apply(raw, mp, HeadingQ(mq), now, true, c.rideCameraSmoothing, c.rideCameraMaxDeviation);
+        g_rideFrame.Set(f.rideGen, f.rider, f.anchor, now);
+        std::lock_guard<std::mutex> s(g_rideStats.mtx);
+        g_rideStats.camDev = std::max(g_rideStats.camDev, g_rideStab.deviation);
+    } else if (g_rideFrame.Fresh(now)) {
+        f.anchor = g_rideFrame.Anchor(f.rider);
+    } else {
+        // No frame opened lately (neither the pose hook nor the model-pos pre-write ran): smooth here, in pass 1.
+        f.anchor = g_rideStab.Apply(raw, mp, HeadingQ(mq), now, pass != 2, c.rideCameraSmoothing, c.rideCameraMaxDeviation);
+    }
     if (f.seatPose) f.rideCamShift = f.anchor - raw;
-    if (advance) { std::lock_guard<std::mutex> s(g_rideStats.mtx); g_rideStats.camDev = std::max(g_rideStats.camDev, g_rideStab.deviation); }
 }
 
 // Free look on horseback (RideHeadFollow): within RideFreeLookDeg of the way you face, looking around neither steers
@@ -1397,7 +1468,11 @@ void RideFollowHead(const FrameInfo& f, bool headValid) {
     g_rideStats.Turn(g_rideStats.physical, turn);
 }
 
-bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false) {
+RigidPose RidePredictRider(uint8_t* player, const RigidPose& last, uint8_t* mount);   // below, with the ride probe
+// Which write a frame is built for, on horseback: the two that can open the ride frame (RideFrameAnchor) - the Havok
+// pose hook, whose write is the one drawn, and the model-pos pre-write in case the pose hook did not run - and the rest.
+enum RideWrite : int { kWriteOther = 0, kWritePoseHook = 1, kWriteModelPosPre = 2 };
+bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false, int write = kWriteOther) {
     const Config& c = Cfg();
     Vec3 root; Quat rootQ;
     const int pass = FramePumpCurrentPass();
@@ -1430,6 +1505,20 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false) {
             if ((held = g_riderHold.Held(RiderHoldPair(), NowSec()))) { mPos = g_riderHold.pos; mRot = g_riderHold.rot; }
         }
         if (!held && !ModelMatrixRoot(player, mPos, mRot) && !PlayerRoot(player, mPos, mRot)) return false;
+        // Before the frame's rebuild, solve in the matrix that rebuild will produce, not the one it replaces: the
+        // write that opens the frame predicts it, the others before the rebuild reuse that prediction.
+        RigidPose m{mPos, mRot};
+        if (pass != 2 && !held && f.mount && c.rideFrameAnchor) {
+            const uint32_t gen = g_rideTrack.gen.load();
+            const double now = NowSec();
+            std::lock_guard<std::mutex> g(g_rideStabMtx);
+            if (g_rideFrame.Opens(gen, write != kWriteOther, now)) {
+                m = RidePredictRider(player, m, f.mount);
+                f.rideOpens = true; f.rideGen = gen;
+            } else if (g_rideFrame.Fresh(now)) m = g_rideFrame.RiderFor(gen, m);
+        }
+        mPos = m.pos; mRot = m.rot;
+        f.rider = m; f.haveRider = true;
         if (f.seatPose) UprightSeatRoot(mPos, mRot, g_seatPelvis, root, rootQ);
         else { root = mPos; rootQ = mRot; }
     } else if (!SkeletonRoot(player, root, rootQ)) return false;
@@ -1800,6 +1889,9 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
     if (c.fpCameraRotation == "hmd") {
         // full HMD orientation composed onto the base yaw
         qHead = Quat::YawQ(f.baseYaw) * f.headQ;
+        // Flat harness (no headset): ForcePitchDeg tilts every write of the view, positive = down - a look at your
+        // own body and Torrent's neck from the saddle.
+        if (!f.headValid && c.fpForcePitchDeg != 0.f) qHead = (qHead * Quat::AxisAngle({1.f, 0.f, 0.f}, Deg2Rad(c.fpForcePitchDeg))).Normalized();
         haveHeadBasis = true;
         Quat q = stereo ? qHead * el.req.rot : qHead;   // per-eye cant; identity on most headsets
         fw = q.Rotate({0, 0, 1}); r = q.Rotate({1, 0, 0}); u = q.Rotate({0, 1, 0});
@@ -1895,6 +1987,7 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
       }
       s_prevPos = pos; s_havePrev = true; }
     g_lastWrittenPos = pos; g_lastCamRoot = f.root;
+    RideProbeEvent(RP_CamWrite);
     { std::lock_guard<std::mutex> g(g_camMtxLock);
       float m[16] = { r.x, r.y, r.z, 0.f, u.x, u.y, u.z, 0.f, fw.x, fw.y, fw.z, 0.f, pos.x, pos.y, pos.z, 1.f };
       memcpy(g_lastCamMtx, m, sizeof(m)); g_haveCamMtx.store(true, std::memory_order_relaxed); }
@@ -2573,7 +2666,12 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
     // and left its derived/propagated matrices disagreeing with the one we had flipped.
     if (vrPose || seatedPose || followsHead) {
         Vec3 renderPos; Quat renderQ;
-        if (ModelMatrixRoot(player, renderPos, renderQ)) {
+        // On horseback the matrix this write was built on: before the rider's rebuild - the drawn pose hook's write -
+        // the one that rebuild is about to produce (RidePredictRider); the matrix it replaces would hang the drawn
+        // pose a stride and a frame of Torrent's pitch away from the view.
+        const bool riderFrame = f.haveRider && FramePumpCurrentPass() != 2;
+        if (riderFrame) { renderPos = f.rider.pos; renderQ = f.rider.rot; }
+        if (riderFrame || ModelMatrixRoot(player, renderPos, renderQ)) {
             // Second eye, seated: until pass 2 has re-placed the rider this frame, its rebuild is predicted, so the
             // pose written now already lands where pass 1 drew the rider (RiderPassHold).
             if (seatedPose && FramePumpCurrentPass() == 2) {
@@ -2675,6 +2773,7 @@ void CountPass(PassCount& c) {
 bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
     const Config& c = Cfg();
     uint8_t* player = MainPlayer(); if (!player) return false;
+    RideProbeEvent(RP_CamStep);
     FrameInfo f; if (!BuildFrame(player, f)) return false;
     if (g_camWallRecovery && c.fpCameraMode != "passthrough") WR(g_camWallRecovery, (uint8_t)0);   // the game refreshes this global; keep it off
     if (g_haveWrittenYaw) {
@@ -2784,7 +2883,7 @@ bool CameraStepBody(bool& skipOriginal, bool afterOriginal) {
     // KNOWN angle; a landmark's on-screen displacement divided by it measures px/deg
     // directly, immune to camera position. Flat harness only; hot-reloads for one-session
     // before/after shots.
-    if (c.fpForcePitchDeg != 0.f) GameERDebugPitchCamera(c.fpForcePitchDeg);
+    if (c.fpForcePitchDeg != 0.f && c.fpCameraRotation != "hmd") GameERDebugPitchCamera(c.fpForcePitchDeg);   // hmd: UpdateCamera pitched it
     g_lastWrittenYaw = f.baseYaw; g_haveWrittenYaw = true;
     if (dump) { DumpMatrix("ervr chr_cam (after write)", ChrCam()); DumpMatrix("ervr pers_cam_1 (after write)", PersCam1()); }
     skipOriginal = (c.fpCameraMode == "block");
@@ -3132,6 +3231,7 @@ uint64_t __fastcall Hook_CamFinalize(void* a, void* b, void* c, void* d) {
         g_finArgs.tick.store(GetTickCount64(), std::memory_order_release);
     }
     uint64_t rv = g_origCamFinalize(a, b, c, d);
+    RideProbeEvent(RP_Finalize);
     if (g_tripped || !FirstPersonActive() || !Cfg().fpCameraFinalWrite) return rv;
     __try { ReassertCameraMatrix(); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; }
     return rv;
@@ -3169,6 +3269,255 @@ void NoteRidePass(uint8_t* chr, bool isMount) {
     for (int i = 0; i < 3; ++i) if (std::fabs(axis[i]) > std::fabs(*keep[i])) *keep[i] = axis[i];
     ++g_rideStats.pass2;
 }
+
+// ---- ride probe (g_rideProbe) ----
+void RideProbeEventLocked(RideProbeKind k, uint8_t* player) {
+    RideProbe& r = g_rideProbe;
+    if (r.n >= 24) return;
+    Vec3 p; const bool have = player && ModelMatrixPos(player, p);
+    const float mm = have && r.haveLast ? (p - r.lastRider).Length() * 1000.f : 0.f;
+    const int tag = FramePumpCurrentTaskGroup();
+    r.ev[r.n++] = {(uint8_t)k, (int16_t)Clamp(tag, -32768, 32767), (int16_t)std::fmin(mm, 32000.f)};
+    if (have) { r.lastRider = p; r.haveLast = true; }
+}
+void RideProbeEvent(RideProbeKind k) {
+    if (!g_moveRiding.load() || FramePumpCurrentPass() == 2) return;
+    uint8_t* player = MainPlayer(); if (!player) return;
+    std::lock_guard<std::mutex> g(g_rideProbe.mtx);
+    RideProbeEventLocked(k, player);
+}
+// Whose model-pos rebuild this is, on horseback in pass 1: 1 the rider, 2 Torrent, 0 anyone else (or on foot, or
+// pass 2).
+int RideWho(void* ctrl) {
+    if (!g_moveRiding.load() || FramePumpCurrentPass() == 2) return 0;
+    uint8_t* player = MainPlayer(); if (!player) return 0;
+    if (Deref(player + off::Chr_ChrCtrl) == (uint8_t*)ctrl) return 1;
+    if (uint8_t* mount = CurrentTorrent(player); mount && Deref(mount + off::Chr_ChrCtrl) == (uint8_t*)ctrl) return 2;
+    return 0;
+}
+// After the rider's rebuild (RideWho's `who` 1): how far each guess the frame's first write made landed from the
+// matrix the rebuild really produced, and that matrix and the physics it was built from for the next guess. The
+// rebuild count is what tells the frames apart (RideFrameAnchor).
+void RideTrackRebuilt(int who) {
+    if (who != 1) return;
+    uint8_t* player = MainPlayer(); if (!player) return;
+    RigidPose m; if (!ModelMatrixRoot(player, m.pos, m.rot)) return;
+    RigidPose phys; const bool havePhys = PlayerRoot(player, phys.pos, phys.rot);
+    RideTrack& t = g_rideTrack;
+    std::lock_guard<std::mutex> g(t.mtx);
+    if (t.guessGen == t.gen.load())
+        for (int i = 0; i < RideTrack::kGuesses; ++i) {
+            if (!t.have[i]) continue;
+            const float mm = (t.guess[i].pos - m.pos).Length() * 1000.f;
+            const Quat d = (t.guess[i].rot * m.rot.Conj()).Normalized();
+            const float deg = Rad2Deg(2.f * std::acos(std::fmin(1.f, std::fabs(d.w))));
+            t.maxMm[i] = std::fmax(t.maxMm[i], mm); t.maxDeg[i] = std::fmax(t.maxDeg[i], deg);
+            t.sumMm[i] += mm; t.sumDeg[i] += deg; ++t.n[i];
+            if (deg < 30.f) {   // a warp or a world shift is no measure of how well a guess follows the ride
+                t.emaDeg[i] = t.emaN[i] == 0 ? deg : t.emaDeg[i] + (deg - t.emaDeg[i]) * 0.05f;
+                ++t.emaN[i];
+            }
+        }
+    t.rider = m; t.haveRider = havePhys;
+    if (havePhys) t.riderPhys = phys;
+    // The tilt history: rebuilds more than 0.2 s apart (a pause, a remount) start it again.
+    const double now = NowSec();
+    if (!havePhys || now - t.resAt > 0.2) t.resN = 0;
+    if (havePhys) {
+        t.resBefore = t.resLast; t.resLast = (phys.rot.Conj() * m.rot).Normalized();
+        t.resN = std::min(t.resN + 1, 2); t.resAt = now;
+    }
+    t.gen.fetch_add(1);
+}
+// The frame's first write guesses the matrix the rider's rebuild is about to produce: the last one carried the way
+// the rider's physics moved since that rebuild. The game builds the matrix from the physics position and
+// orientation (fromsoftware-rs ChrCtrl), and nothing moves the physics between the frame's first write and the
+// rebuild - except a stick turn of the pair, taken at the first rebuild of the two (ApplyMountedTurn), which is
+// added here as it will be applied. 2026-11-12, measured at the model-pos pre-write: the position exact (0 mm), the
+// orientation within 2.7 degrees (the ride's pitch, eased in); the last matrix alone up to 196 mm and 7.7 degrees
+// off at a gallop, and Torrent's own move up to 155 mm (its matrix bobs over its physics).
+RigidPose RidePredictRider(uint8_t* player, const RigidPose& last, uint8_t* mount) {
+    RigidPose phys; const bool havePhys = PlayerRoot(player, phys.pos, phys.rot);
+    Vec3 horseP; Quat horseQ; const bool haveHorse = mount && PlayerRoot(mount, horseP, horseQ);
+    const float turn = haveHorse ? g_mountedTurns.Peek(mount) : 0.f;
+    RideTrack& t = g_rideTrack;
+    std::lock_guard<std::mutex> g(t.mtx);
+    t.guessGen = t.gen.load();
+    t.guess[0] = last; t.have[0] = true;
+    t.have[1] = t.haveRider && havePhys;
+    if (t.have[1]) t.guess[1] = CarriedBy(last, t.riderPhys, phys);
+    Quat tilted;
+    t.have[2] = t.have[1] && t.resN >= 2 && ExtrapolateTilt(phys.rot, t.resBefore, t.resLast, 10.f, tilted);
+    if (t.have[2]) t.guess[2] = {t.guess[1].pos, tilted};
+    for (int i = 0; i < RideTrack::kGuesses; ++i)
+        if (t.have[i] && turn != 0.f) TurnRiderAboutMount(horseP, turn, horseQ, t.guess[i].pos, t.guess[i].rot);
+    // The continued tilt only once it has measured better than the plain carry over the last ~20 rebuilds.
+    int used = t.have[1] ? 1 : 0;
+    if (t.have[2] && Cfg().rideTiltExtrapolate && t.emaN[2] >= 20 && t.emaN[1] >= 20 && t.emaDeg[2] < t.emaDeg[1]) used = 2;
+    ++t.usedN[used];
+    return t.guess[used];
+}
+// A bone of the live pose buffer in the model frame (root bones relative to the model matrix).
+bool BoneModelPos(int bone, Vec3& out) {
+    HkQsTransform* pose = g_skel.LivePose(); if (!pose || bone < 0 || bone >= g_skel.boneCount) return false;
+    int chain[64]; int n = 0;
+    for (int i = bone; i >= 0 && n < 64; i = (g_skel.parents[i] < i ? g_skel.parents[i] : -1)) chain[n++] = i;
+    Vec3 p{}; Quat q{};
+    for (int k = n - 1; k >= 0; --k) {
+        HkQsTransform t; if (!SafeRead(&pose[chain[k]], &t, sizeof(t))) return false;
+        p = p + q.Rotate(Vec3{t.t[0], t.t[1], t.t[2]}); q = (q * Quat{t.q[0], t.q[1], t.q[2], t.q[3]}).Normalized();
+    }
+    out = p; return true;
+}
+const char* const kRideBodyPt[RideProbe::kBodyPts] = {"head", "neck", "left clavicle", "right clavicle", "torso"};
+// The pose that is drawn (the pose hook's write, HkBody): its head and upper body in the frame it was written in,
+// for "[ride] drawn".
+void RideProbeDrawnPose() {
+    if (!g_moveRiding.load() || FramePumpCurrentPass() == 2) return;
+    uint8_t* player = MainPlayer(); if (!player) return;
+    Vec3 head; const bool have = HeadBoneWorld(player, Vec3{}, Quat{}, head);
+    static int s_neck = -2; static int s_neckCount = -1;
+    if (s_neckCount != g_skel.boneCount) { s_neckCount = g_skel.boneCount; s_neck = g_skel.Find("Neck"); }
+    const int bones[RideProbe::kBodyPts] = {g_skel.head, s_neck, g_skel.L_clav, g_skel.R_clav, g_skel.torso};
+    Vec3 pts[RideProbe::kBodyPts]; bool ok[RideProbe::kBodyPts];
+    for (int k = 0; k < RideProbe::kBodyPts; ++k) ok[k] = have && BoneModelPos(bones[k], pts[k]);
+    std::lock_guard<std::mutex> g(g_rideProbe.mtx);
+    g_rideProbe.havePre = have; g_rideProbe.headPre = head;
+    for (int k = 0; k < RideProbe::kBodyPts; ++k) { g_rideProbe.haveBody[k] = ok[k]; g_rideProbe.bodyPre[k] = pts[k]; }
+    RideProbeEventLocked(RP_Pose, player);
+}
+
+// Around the game's model-pos rebuild (Hook_UpdateChrModelPos), for `who` (RideWho). stage 0 = before the original
+// (after our pre-write), 1 = after it (the matrix it built), 2 = after our post write (the pose ERVR measures in
+// "[body]" - never the one drawn).
+void RideProbeAround(int stage, int who) {
+    if (!who) return;
+    uint8_t* player = MainPlayer(); if (!player) return;
+    RideProbe& r = g_rideProbe;
+    Vec3 head; bool haveHead = false; Vec3 p; Quat q; bool haveMat = false;
+    uint8_t* mount = who == 2 ? CurrentTorrent(player) : nullptr;
+    if (who == 1 && stage == 2) haveHead = HeadBoneWorld(player, Vec3{}, Quat{}, head);
+    if (who == 1 && stage == 1) haveMat = ModelMatrixRoot(player, p, q);
+    if (who == 2 && stage == 1 && mount) haveMat = ModelMatrixPos(mount, p);
+    std::lock_guard<std::mutex> g(r.mtx);
+    if (who == 1) {
+        if (stage == 0) RideProbeEventLocked(RP_RiderPre, player);
+        else if (stage == 1) { r.haveRebuilt = haveMat; r.rebuiltPos = p; r.rebuiltRot = q; RideProbeEventLocked(RP_RiderRebuilt, player); }
+        else { r.havePost = haveHead; r.headPost = head; }
+    } else if (who == 2) {
+        if (stage == 0) RideProbeEventLocked(RP_MountPre, player);
+        else if (stage == 1) { r.haveMount = haveMat; r.mountRebuilt = p; RideProbeEventLocked(RP_MountRebuilt, player); }
+    }
+}
+void RideProbeAfterPass1() {
+    RideProbe& r = g_rideProbe;
+    uint8_t* player = MainPlayer();
+    const bool riding = g_moveRiding.load() && player;
+    static double s_last = 0;
+    const double now = NowSec();
+    // How well the frame's first write guessed the rider's new matrix, per guess: taken (and cleared) with the 5 s line.
+    char guesses[512] = "";
+    if (riding && now - s_last >= 5.0) {
+        RideTrack& t = g_rideTrack;
+        std::lock_guard<std::mutex> tg(t.mtx);
+        static const char* kGuess[RideTrack::kGuesses] = {"its last matrix", "carried by its physics", "carried with its tilt continued"};
+        int o = 0;
+        for (int i = 0; i < RideTrack::kGuesses; ++i) {
+            if (t.n[i] > 0)
+                o += snprintf(guesses + o, sizeof(guesses) - o, "%s%s %.0f mm (mean %.0f) %.1f deg (mean %.2f), used %d", i ? "; " : "",
+                              kGuess[i], t.maxMm[i], t.sumMm[i] / t.n[i], t.maxDeg[i], t.sumDeg[i] / t.n[i], t.usedN[i]);
+            else o += snprintf(guesses + o, sizeof(guesses) - o, "%s%s never available, used %d", i ? "; " : "", kGuess[i], t.usedN[i]);
+            t.maxMm[i] = t.maxDeg[i] = 0.f; t.sumMm[i] = t.sumDeg[i] = 0.0; t.n[i] = t.usedN[i] = 0;
+            if (o >= (int)sizeof(guesses)) o = (int)sizeof(guesses) - 1;
+        }
+        if (t.emaN[1] > 0 && t.emaN[2] > 0)
+            snprintf(guesses + o, sizeof(guesses) - o, " | running error: carried %.2f deg, tilt continued %.2f deg", t.emaDeg[1], t.emaDeg[2]);
+    }
+    std::lock_guard<std::mutex> g(r.mtx);
+    if (!riding) { r.frames = 0; s_last = now; }
+    Vec3 endPos; Quat endRot;
+    const bool haveEnd = riding && ModelMatrixRoot(player, endPos, endRot);
+    float lateMm = 0.f;
+    if (haveEnd && r.haveLast) lateMm = (endPos - r.lastRider).Length() * 1000.f;
+    if (riding && haveEnd && r.havePre && r.haveRebuilt && r.havePost) {
+        // The final camera: what pers_cam_1 holds once pass 1 has drawn (our last write, unless something re-wrote it).
+        Vec3 cam = g_lastWrittenPos, camF{};
+        float m[16];
+        if (uint8_t* pc = PersCam1(); pc && SafeRead(pc + off::Cam_Matrix, m, sizeof(m))) { cam = {m[12], m[13], m[14]}; camF = Vec3{m[8], m[9], m[10]}.Normalized(); }
+        r.camLate = std::fmax(r.camLate, (cam - g_lastWrittenPos).Length());
+        r.matLate = std::fmax(r.matLate, (endPos - r.rebuiltPos).Length());
+        if (uint8_t* mount = CurrentTorrent(player); mount && r.haveMount) {
+            Vec3 mp; if (ModelMatrixPos(mount, mp)) r.mountLate = std::fmax(r.mountLate, (mp - r.mountRebuilt).Length());
+        }
+        // Axes along the rider's heading: x lateral (right +), y vertical, z forward.
+        const Vec3 fw3 = endRot.Rotate({0.f, 0.f, -1.f});
+        const float yaw = std::atan2(fw3.x, fw3.z);
+        const float cy = std::cos(yaw), sy = std::sin(yaw);
+        auto axes = [&](const Vec3& d) { return Vec3{d.x * cy - d.z * sy, d.y, d.x * sy + d.z * cy}; };
+        auto keep = [](Vec3& mx, const Vec3& v) {
+            if (std::fabs(v.x) > std::fabs(mx.x)) mx.x = v.x;
+            if (std::fabs(v.y) > std::fabs(mx.y)) mx.y = v.y;
+            if (std::fabs(v.z) > std::fabs(mx.z)) mx.z = v.z;
+        };
+        const Vec3 drawn = endPos + endRot.Rotate(r.headPre), solved = endPos + endRot.Rotate(r.headPost);
+        keep(r.drawnCam, axes(drawn - cam));
+        const Vec3 dc = axes(drawn - cam);
+        if (!r.haveRange) { r.drawnMin = r.drawnMax = dc; r.haveRange = true; }
+        else {
+            r.drawnMin = {std::fmin(r.drawnMin.x, dc.x), std::fmin(r.drawnMin.y, dc.y), std::fmin(r.drawnMin.z, dc.z)};
+            r.drawnMax = {std::fmax(r.drawnMax.x, dc.x), std::fmax(r.drawnMax.y, dc.y), std::fmax(r.drawnMax.z, dc.z)};
+        }
+        if (camF.Length() > 0.5f)
+            for (int k = 0; k < RideProbe::kBodyPts; ++k) {
+                if (!r.haveBody[k]) continue;
+                const Vec3 v = endPos + endRot.Rotate(r.bodyPre[k]) - cam;
+                const float dist = v.Length(); if (dist < 1e-4f) continue;
+                const float deg = Rad2Deg(std::acos(Clamp(v.Dot(camF) / dist, -1.f, 1.f)));
+                if (deg <= 60.f && dist < r.nearestM) { r.nearestM = dist; r.nearestDeg = deg; r.nearestPt = k; r.nearestAxes = axes(v); }
+            }
+        keep(r.postCam, axes(solved - cam));
+        const Vec3 dp = axes(drawn - solved);
+        keep(r.drawnPost, dp);
+        r.drawnPostSum += dp.Length();
+        ++r.frames;
+    }
+    if (riding && r.frames > 0 && now - s_last >= 5.0) {
+        s_last = now;
+        static const char* kName[] = {"pose hook (drawn)", "rider pre-write", "rider rebuilt", "Torrent pre-write", "Torrent rebuilt",
+                                      "camera step", "camera write", "camera finalize", "post-Havok rewrite"};
+        char order[640]; int o = 0;
+        for (int i = 0; i < r.n && o < (int)sizeof(order) - 48; ++i)
+            o += snprintf(order + o, sizeof(order) - o, "%s%s@%d%s", i ? " > " : "", kName[r.ev[i].kind < 9 ? r.ev[i].kind : 0],
+                          r.ev[i].tag, "");
+        if (o < (int)sizeof(order) - 48) o += snprintf(order + o, sizeof(order) - o, " > end of pass 1");
+        char moves[400]; int mo = 0;
+        for (int i = 0; i < r.n && mo < (int)sizeof(moves) - 32; ++i)
+            if (r.ev[i].movedMm > 0) mo += snprintf(moves + mo, sizeof(moves) - mo, "%s%s +%d", mo ? ", " : "", kName[r.ev[i].kind < 9 ? r.ev[i].kind : 0], r.ev[i].movedMm);
+        if (lateMm > 0.5f && mo < (int)sizeof(moves) - 32) mo += snprintf(moves + mo, sizeof(moves) - mo, "%send of pass 1 +%.0f", mo ? ", " : "", lateMm);
+        LOGI("[ride] drawn (%d frames, 5 s, mm; lateral/vertical/forward along the rider): the drawn head vs the final camera "
+             "lateral %+.0f..%+.0f vertical %+.0f..%+.0f forward %+.0f..%+.0f, the post write's (the [body] line, max) %+.0f/%+.0f/%+.0f, "
+             "drawn minus post %+.0f/%+.0f/%+.0f (mean %.0f) | after its rebuild the rider's matrix moved %.0f, Torrent's %.0f, the camera %.0f",
+             r.frames, r.drawnMin.x * 1000.f, r.drawnMax.x * 1000.f, r.drawnMin.y * 1000.f, r.drawnMax.y * 1000.f,
+             r.drawnMin.z * 1000.f, r.drawnMax.z * 1000.f,
+             r.postCam.x * 1000.f, r.postCam.y * 1000.f, r.postCam.z * 1000.f,
+             r.drawnPost.x * 1000.f, r.drawnPost.y * 1000.f, r.drawnPost.z * 1000.f, r.drawnPostSum * 1000.f / (float)r.frames,
+             r.matLate * 1000.f, r.mountLate * 1000.f, r.camLate * 1000.f);
+        if (r.nearestPt >= 0)
+            LOGI("[ride] the drawn body's nearest point in view (within 60 deg of the camera's forward, 5 s): the %s, %.0f mm from the eye, "
+                 "%.0f deg off the view axis, at lateral/vertical/forward %+.0f/%+.0f/%+.0f mm", kRideBodyPt[r.nearestPt],
+                 r.nearestM * 1000.f, r.nearestDeg, r.nearestAxes.x * 1000.f, r.nearestAxes.y * 1000.f, r.nearestAxes.z * 1000.f);
+        else LOGI("[ride] the drawn body's nearest point in view (5 s): no head, neck, clavicle or torso within 60 deg of the camera's forward");
+        LOGI("[ride] one frame in order (runner tag): %s | rider matrix moved (mm) at: %s", order, mo ? moves : "nowhere");
+        if (guesses[0]) LOGI("[ride] the drawn write's guess at the rider's rebuilt matrix (5 s max): %s", guesses);
+        r.frames = 0; r.drawnCam = r.postCam = r.drawnPost = {}; r.drawnPostSum = r.matLate = r.mountLate = r.camLate = 0.f;
+        r.haveRange = false; r.nearestM = 1e9f; r.nearestPt = -1;
+    }
+    r.n = 0; r.havePre = r.haveRebuilt = r.havePost = r.haveMount = false;
+    for (bool& b : r.haveBody) b = false;
+    // The next frame's first move is measured from here, so a move between frames shows on its first write.
+    if (haveEnd) { r.lastRider = endPos; r.haveLast = true; } else r.haveLast = false;
+}
+void SafeRideProbeAfterPass1() { __try { RideProbeAfterPass1(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
 // Every 5 s on horseback: whether the horse was found, which body rides, how far the smoothed view sat off the
 // bouncing rider, how far the second eye's pass re-placed rider and horse, and what turned the pair.
@@ -3227,7 +3576,9 @@ void UpdateChrModelPosBody(void* ctrl, bool post) {
             g_skewMax = 0.f;
         }
     }
-    FrameInfo f; if (!BuildFrame(player, f, post)) return;
+    // On horseback the pre-write comes before the rider's rebuild: it is built in the matrix that rebuild will
+    // produce, and opens the ride frame itself when the pose hook did not (BuildFrame / StabilizeRideCamera).
+    FrameInfo f; if (!BuildFrame(player, f, post, post ? kWriteOther : kWriteModelPosPre)) return;
     // Last word on the facing before the original rebuilds the model matrix FROM the physics orientation.
     // The pin written at the pose hook / camera step can be overwritten by the game's own turn-toward-move
     // logic later in the frame (it only runs while moving), and then the matrix - the rotation the renderer
@@ -3298,6 +3649,7 @@ void RewriteIfClobbered() {
     uint8_t* player = MainPlayer(); if (!player) return;
     FrameInfo f; if (!BuildFrame(player, f)) return;
     UpdateArms(player, f, 3);
+    RideProbeEvent(RP_Rewrite);
 }
 uint64_t __fastcall Hook_PoseEval(void* a, void* b, void* c, void* d) {
     CountPass(g_cntPoseEval);
@@ -3308,13 +3660,20 @@ uint64_t __fastcall Hook_PoseEval(void* a, void* b, void* c, void* d) {
 }
 void __fastcall Hook_UpdateChrModelPos(void* ctrl) {
     CountPass(g_cntModelPos);
-    // Pre-write as well: the buffer measured OURS after this hook still rendered the layer's animation, so the
-    // renderer's pose consumption happens INSIDE this function - the pose present at entry is what gets skinned.
-    // The upper-body layer ran just before us; put ours back first, then let the original consume it.
+    // Pre-write as well (an older note held that the pose at this function's entry is what gets skinned). Measured
+    // on Torrent 2026-11-12: a body lifted in this pre-write, the post write or the camera-step writes is not drawn
+    // - only one lifted at the Havok pose hook (HkBody) is. These writes keep the pose ERVR solves the frame with.
     bool act = !g_tripped && FirstPersonActive() && (Cfg().handTracking || g_moveRiding.load());
+    // On horseback in pass 1: 1 = the rider's rebuild, 2 = Torrent's. Torrent is rebuilt first; its matrices are
+    // what the rider's skinned write predicts the rider's new matrix from (RidePredictRider / RideTrackRebuilt).
+    int who = 0;
+    if (act) { __try { who = RideWho(ctrl); } __except (EXCEPTION_EXECUTE_HANDLER) { who = 0; } }
     if (act) { __try { UpdateChrModelPosBody(ctrl, false); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; act = false; } }
+    if (who) { __try { RideProbeAround(0, who); } __except (EXCEPTION_EXECUTE_HANDLER) { who = 0; } }
     g_origUpdModelPos(ctrl);
+    if (who) { __try { RideTrackRebuilt(who); RideProbeAround(1, who); } __except (EXCEPTION_EXECUTE_HANDLER) { who = 0; } }
     if (act) { __try { UpdateChrModelPosBody(ctrl, true); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; } }
+    if (who == 1) { __try { RideProbeAround(2, who); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 }
 void HookCameraStepImpl(void* a, void* b);
 // Near-camera dither fade. The renderer asks, per drawn part, for the part's dither entry and dithers it
@@ -3436,7 +3795,9 @@ void HkBody() {
     InterlockedIncrement(&g_hkSolves);
     ScopedTicks st(&g_hkTicks);
     uint8_t* player = MainPlayer(); if (!player) return;
-    FrameInfo f; if (!BuildFrame(player, f)) return;
+    // This write is the pose that is drawn (2026-11-12: of the frame's pose writes on horseback, only a body
+    // lifted here floated on screen) - on horseback it opens the ride frame (BuildFrame).
+    FrameInfo f; if (!BuildFrame(player, f, false, kWritePoseHook)) return;
     // Re-assert the strafe flags here too: the camera hook runs once, at one point in the frame, and the game
     // is free to put the character back into free-turn before it reads them.
     ReassertFaceCamera(player, f);
@@ -3445,6 +3806,7 @@ void HkBody() {
     // once-per-SIM-frame actions and must not double-fire.
     if (FramePumpCurrentPass() != 2) DirectLocomotion(player, f);
     UpdateArms(player, f);
+    RideProbeDrawnPose();
 }
 void HkHandler(MidHookRegs*, void*) {
     InterlockedIncrement(&g_hkCalls);
@@ -3616,6 +3978,8 @@ bool GameERApplySecondEyeCamera() {
 // Called by the frame pump on the frame thread right after each pass's queue_tasks returns
 // (all camera writers and the smoother are done, the pass's Flip has presented, and the
 // present that will consume this report has not run yet).
+void GameERAfterPass1() { SafeRideProbeAfterPass1(); }
+
 void GameERFinalizePassReport() {
     PendingReport pr;
     {

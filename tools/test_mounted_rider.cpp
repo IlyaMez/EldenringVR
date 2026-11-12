@@ -143,6 +143,9 @@ void TurnsStayWithTheMountedPair() {
     Near(queue.Take(nullptr, 1), 0.f, "unmounted input is discarded");
     queue.SetMount(&first);
     queue.Add(Deg2Rad(30.f)); queue.Add(Deg2Rad(15.f));
+    Near(queue.Peek(&first), Deg2Rad(45.f), "the pose drawn before the rebuild can see the turn that rebuild will make");
+    Near(queue.Peek(&first), Deg2Rad(45.f), "... without taking it");
+    Near(queue.Peek(nullptr), 0.f, "no mount, no turn to see");
     const float turn = queue.Take(&first, 2);
     Near(turn, Deg2Rad(45.f), "smooth or snap input is accumulated once for the game thread");
     Near(queue.Take(&first, 2), 0.f, "the other character/model hook cannot apply the same turn twice");
@@ -256,6 +259,44 @@ void CameraRidesTheHorseNotTheBounce() {
     Near((out - reseat).Length(), 0.f, "a rider placed somewhere else on the horse restarts on the new anchor");
 }
 
+void DrawnPoseAndCameraRideOneMatrix() {
+    // Between two rebuilds Torrent galloped on, turned and pitched; the rider's physics moved with it. The game builds
+    // the rider's matrix from that physics: its position raised by a fixed offset, its rotation pitched by the ride.
+    const RigidPose physPrev{{1.f, 2.f, 3.f}, Quat::YawQ(0.4f)};
+    const RigidPose physNow{{1.2f, 2.05f, 3.15f}, Quat::YawQ(0.45f)};
+    const Vec3 raise{0.f, 0.3f, 0.f};
+    const Quat ridePitch = Quat::AxisAngle({1.f, 0.f, 0.f}, 0.1f);
+    auto built = [&](const RigidPose& p) { return RigidPose{p.pos + raise, (p.rot * ridePitch).Normalized()}; };
+    const RigidPose last = built(physPrev), next = built(physNow);
+    const RigidPose guess = CarriedBy(last, physPrev, physNow);
+    Near((guess.pos - next.pos).Length(), 0.f, "the last matrix carried by the physics it is built from is the next one", 1e-4f);
+    Near(std::fabs((guess.rot * next.rot.Conj()).Normalized().w), 1.f, "... turn included", 1e-5f);
+    Check((last.pos - next.pos).Length() > 0.2f, "while the last matrix alone is a stride behind");
+    const Vec3 p{0.3f, -0.1f, 2.f};
+    Near((OutOfFrame(guess, IntoFrame(guess, p)) - p).Length(), 0.f, "into a frame and back is the same point", 1e-5f);
+
+    // Frames are told apart by the rider's rebuild count. The pose hook (the drawn write) opens the frame at count 7.
+    RideFrameAnchor frame;
+    Check(frame.Opens(7, true, 1.0), "the first write that may open a frame opens it");
+    Check(!frame.Opens(7, false, 1.0), "... no other kind of write does");
+    const Vec3 eye = OutOfFrame(guess, {0.05f, 0.76f, 0.1f});
+    frame.Set(7, guess, eye, 1.0);
+    Check(!frame.Opens(7, true, 1.001), "the model-pos pre-write after it, still before the rebuild, does not open it again");
+    const RigidPose rebuilt{next.pos + Vec3{0.f, 0.02f, 0.f}, next.rot};   // the rebuild came out 2 cm higher (eased)
+    Near((frame.RiderFor(7, last).pos - guess.pos).Length(), 0.f, "a write before the rebuild is built on the prediction, not on the matrix it replaces");
+    Near((frame.RiderFor(8, rebuilt).pos - rebuilt.pos).Length(), 0.f, "a write after it on the matrix the rebuild produced");
+    // The drawn body: written before the rebuild in the guess, hung on the real matrix. The view: a camera step after.
+    const Vec3 written = eye + Vec3{0.f, -0.045f, 0.08f};
+    const Vec3 drawnHead = OutOfFrame(rebuilt, IntoFrame(guess, written));
+    const Vec3 cam = frame.Anchor(frame.RiderFor(8, rebuilt));
+    Near(((drawnHead - cam) - (written - eye)).Length(), 0.f, "the drawn body keeps its place under the view whatever the rebuild did", 1e-5f);
+    Near((cam - eye).Length(), 0.02f, "the guess's miss moves the view by just the miss", 1e-4f);
+    Check(frame.Opens(8, true, 1.016), "the next frame's pose hook opens the next frame");
+    Check(frame.Opens(7, true, 1.2), "after a long gap any write that may open a frame does");
+    frame.Reset();
+    Check(!frame.Fresh(1.001), "a reset drops the frame");
+}
+
 void PhysicalTurnsFollowTheHead() {
     RideHeadFollow follow;
     Near(follow.Step(0.3f, 0.0, 1, 0.f, 0.f), 0.f, "the first sample only sets the reference");
@@ -314,9 +355,29 @@ void SecondEyeDrawsTheRiderWhereTheFirstDid() {
     Check(!hold.Held(8), "a reset drops the hold");
 }
 
+void ARidesTiltIsCarriedOn() {
+    // The ride eases the rider's pitch over its physics: 0.020, 0.035, 0.050 rad on three rebuilds (a steady change),
+    // while the physics turns. The plain carry keeps the last tilt; the extrapolation continues its change.
+    auto tilt = [](float a) { return Quat::AxisAngle({1.f, 0.f, 0.f}, a); };
+    const Quat physNow = Quat::YawQ(0.7f);
+    const Quat truth = (physNow * tilt(0.065f)).Normalized();
+    Quat out{};
+    Check(ExtrapolateTilt(physNow, tilt(0.035f), tilt(0.050f), 10.f, out), "a steady tilt change is continued");
+    Near(std::fabs((out * truth.Conj()).Normalized().w), 1.f, "... and lands on the next rebuild's rotation", 1e-6f);
+    const Quat carried = (physNow * tilt(0.050f)).Normalized();
+    Check(std::fabs((carried * truth.Conj()).Normalized().w) < 0.99999f, "where the plain carry is a step behind");
+    Check(ExtrapolateTilt(physNow, tilt(0.050f), tilt(0.050f), 10.f, out) &&
+          std::fabs((out * carried.Conj()).Normalized().w) > 0.999999f, "a held tilt is the plain carry");
+    Check(!ExtrapolateTilt(physNow, tilt(0.f), tilt(0.4f), 10.f, out), "a 23 deg jump is no eased tilt: refused");
+    // The same rotation written with the opposite sign must not read as a 360 deg step.
+    const Quat r = tilt(0.05f); const Quat neg{-r.x, -r.y, -r.z, -r.w};
+    Check(ExtrapolateTilt(physNow, r, neg, 10.f, out), "q and -q are one rotation");
+}
+
 int main() {
+    ARidesTiltIsCarriedOn();
     TheRiddenHorseIsFound(); TurnsStayWithTheMountedPair(); VisibilityPreservesOtherFlags();
     SeatedPoseIsASettledSeat(); SeatedBodyStaysUpright(); CameraRidesTheHorseNotTheBounce();
-    PhysicalTurnsFollowTheHead(); SecondEyeDrawsTheRiderWhereTheFirstDid();
-    std::puts("Mounted rider resolution, seat, camera, turning and second-eye checks passed.");
+    DrawnPoseAndCameraRideOneMatrix(); PhysicalTurnsFollowTheHead(); SecondEyeDrawsTheRiderWhereTheFirstDid();
+    std::puts("Mounted rider resolution, seat, ride frame, camera, turning and second-eye checks passed.");
 }

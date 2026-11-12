@@ -266,6 +266,14 @@ int main() {
     Check(SkillHand(true, 0, false) == 0 && SkillHand(true, 1, true) == 1, "two-handed: the two-handed weapon's skill");
     Check(SkillHand(false, 1, false) == 1, "one-handed, a sword (or a seal) in the left: the right weapon's skill");
     Check(SkillHand(false, 1, true) == 0, "one-handed, a shield or bow in the left: its skill");
+    // The art decides (HKS IsShieldArts / IsArrowStanceArts), not the weapon class.
+    Check(LeftArtOwnsSkill(92, true) && LeftArtOwnsSkill(90, true) && LeftArtOwnsSkill(17, false),
+          "Parry, Shield Bash, a torch's Torch Attack: the left's skill");
+    Check(LeftArtOwnsSkill(102, true) && LeftArtOwnsSkill(371, true), "a bow's arrow stance: the left's skill");
+    Check(!LeftArtOwnsSkill(16, true) && !LeftArtOwnsSkill(178, true) && !LeftArtOwnsSkill(0, true),
+          "a shield whose art is on neither list: the right weapon's skill (Reduvia beside a Brass Shield)");
+    Check(LeftArtOwnsSkill(-1, true) && !LeftArtOwnsSkill(-1, false), "art not read yet: the weapon class decides");
+    Check(SkillHand(false, 1, LeftArtOwnsSkill(16, true)) == 1, "Reduvia + a shield with a non-shield art: right hand");
 
     // ---- throw geometry ----
     Check(std::fabs(WrapDeg(190.f) + 170.f) < 1e-3f, "WrapDeg wraps past 180");

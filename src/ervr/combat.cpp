@@ -126,6 +126,10 @@ constexpr size_t   Arts_UseMpL2      = 0x12;   // i16 FP cost of the skill butto
 // R2 6 - an R2 cost alone is no stance, so R1 > 0 is what marks one (97 of 278 rows have some R1/R2 cost).
 constexpr size_t   Arts_UseMpR1      = 0x14;
 constexpr size_t   Arts_UseMpR2      = 0x16;
+// The art's type, what the HKS GetSwordArtID hands the behavior script (IsShieldArts & co. test it): u8
+// swordArtsType at +0x04 and, since 1.07, u16 swordArtsTypeNew at +0x18 (types past 255 exist: 399 Shield Strike).
+constexpr size_t   Arts_Type         = 0x04;
+constexpr size_t   Arts_TypeNew      = 0x18;
 constexpr uint32_t Arts_RowSize      = 0x20;
 // CSGaitemImp (singleton "CSGaitem"): gaitems[5120] OwnedPtr<CSGaitemIns> @+8; CSGaitemIns item_id @0xC;
 // CSWepGaitemIns: gem slot table @0x18 -> slot 0's gaitem handle @0x28 (fromsoftware-rs gaitem.rs).
@@ -424,8 +428,9 @@ struct SkillPlay {
     bool costCharged = false; int fpCost = 0, stamCost = 0;
 } g_play;
 struct SkillSwing { bool armed = false; double until = 0; AttackBehaviorArgs a{}; } g_skillSwing;   // game thread
-struct SkillInfo { int weaponId = 0; int arts = -1, gem = -1; int fpCost = 0, stamCost = 0; int fpR1 = -1, fpR2 = -1; bool logged = false; } g_skillInfo[2];   // per hand, game thread
+struct SkillInfo { int weaponId = 0; int arts = -1, gem = -1; int artType = -1; int fpCost = 0, stamCost = 0; int fpR1 = -1, fpR2 = -1; bool logged = false; } g_skillInfo[2];   // per hand, game thread
 std::atomic<bool> g_skillFollowUps[2]{};   // game thread -> worker: that hand's skill is a stance with follow-ups (SwordArtsParam R1 FP > 0)
+std::atomic<int>  g_artType[2]{-1, -1};    // game thread -> worker: that hand's art type (SkillInfo::artType), -1 unread
 // StanceHoldAnimation=false: the trigger arms a stance's follow-ups without holding the game's skill button (the
 // stance does not play while held); each follow-up press is then the skill button AND the attack (chords 12/13).
 std::atomic<bool> g_stanceArmed{false};    // worker: armed that way right now
@@ -1217,7 +1222,7 @@ uint8_t* GaitemByHandle(uint8_t* imp, uint32_t handle) {
 // then gives the skill button's FP / stamina cost. Re-resolved when the weapon changes.
 void ResolveSkill(uint8_t* player, int h) {
     SkillInfo& si = g_skillInfo[h]; const HandWeapon& w = g_wep[h];
-    if (!w.valid || !w.row) { si = SkillInfo{}; g_skillFollowUps[h].store(false); return; }
+    if (!w.valid || !w.row) { si = SkillInfo{}; g_skillFollowUps[h].store(false); g_artType[h].store(-1); return; }
     if (si.weaponId == w.paramId && si.logged) return;
     si = SkillInfo{}; si.weaponId = w.paramId;
     static uint8_t* s_slot = nullptr; static bool s_tried = false;
@@ -1247,14 +1252,21 @@ void ResolveSkill(uint8_t* player, int h) {
             SafeRead(row + Arts_UseMpL2, &mp, 2); SafeRead(row + Arts_UsePointL2, &sp, 1);
             SafeRead(row + Arts_UseMpR1, &r1, 2); SafeRead(row + Arts_UseMpR2, &r2, 2);
             si.fpCost = mp; si.stamCost = sp; si.fpR1 = r1; si.fpR2 = r2;
+            uint8_t t8 = 0; uint16_t t16 = 0;
+            if (SafeRead(row + Arts_TypeNew, &t16, 2) && SafeRead(row + Arts_Type, &t8, 1)) si.artType = t16 != 0 ? t16 : t8;
         }
         else if (row) LOGW("[combat] SWORD_ARTS_PARAM_ST row size 0x%X != 0x%X: skill costs unknown", sz, Arts_RowSize);
     }
     si.logged = true;
     g_skillFollowUps[h].store(si.fpR1 > 0);
+    g_artType[h].store(si.artType);
     char follow[96]; follow[0] = 0;
     if (si.fpR1 > 0) snprintf(follow, sizeof(follow), "; a stance: follow-ups R1 FP %d / R2 FP %d", si.fpR1, si.fpR2);
-    LOGI("[combat] %s hand skill: SwordArtsParam %d%s (FP %d, stamina %d%s)", HandName(h), si.arts, si.gem >= 0 ? " from the applied Ash of War" : " (the weapon's own)", si.fpCost, si.stamCost, follow);
+    char owns[96]; owns[0] = 0;
+    if (h == HandLeft && si.artType >= 0)
+        snprintf(owns, sizeof(owns), "; one-handed the skill button plays %s", LeftArtOwnsSkill(si.artType, false) ? "this one (a shield's or bow's art)" : "the right weapon's");
+    LOGI("[combat] %s hand skill: SwordArtsParam %d%s, art type %d (FP %d, stamina %d%s%s)", HandName(h), si.arts, si.gem >= 0 ? " from the applied Ash of War" : " (the weapon's own)",
+         si.artType, si.fpCost, si.stamCost, follow, owns);
 }
 
 int FindRecording(int weaponId, int arts) {
@@ -1355,6 +1367,7 @@ void SkillFrame(uint8_t* player, CSChrTaeAnimEvent* ev, double now) {
     const bool two = TwoHandedStyle(g_armStyle);
     const int wh = TwoHandedWeaponHand(g_armStyle);
     ResolveSkill(player, wh);
+    ResolveSkill(player, 1 - wh);   // the other hand too: one-handed, the left weapon's art decides whose skill plays (SkillHand)
     if (g_rec.active) {
         const int fp = ReadFp(player); if (fp >= 0 && fp < g_rec.fpMin) g_rec.fpMin = fp;
         if (now - g_rec.start >= (c.skillRecordSeconds > 0.5f ? c.skillRecordSeconds : 0.5f)) FinishRecording();
@@ -2262,6 +2275,12 @@ bool OneHandSkillAllowed(const Config& c, int hand) {
     return c.oneHandSkill && !(c.castAim && g_wepRanged[hand].load() != 0);
 }
 
+// One-handed, does the skill button play the LEFT weapon's skill? Its art decides (HKS GetSwordArtInfo,
+// LeftArtOwnsSkill); before that is read, a shield or bow in the left does.
+bool LeftOwnsSkill() {
+    return LeftArtOwnsSkill(g_artType[HandLeft].load(), g_wepShield[HandLeft].load() != 0 || g_wepBow[HandLeft].load() != 0);
+}
+
 void PollSkillTrigger(const VRInputState& in, double now) {
     const Config& c = Cfg();
     const uint32_t mask = ParseVRButton(c.twoHandSkillButton);
@@ -2273,7 +2292,7 @@ void PollSkillTrigger(const VRInputState& in, double now) {
     if (in.handTrigger[HandRight]  >= c.gripThreshold)    buttons |= VRB_RGrip;
     const int style = g_armStyleShared.load();
     const bool two = TwoHandedStyle(style);
-    const int owner=SkillHand(two,TwoHandedWeaponHand(style),g_wepShield[HandLeft].load()!=0||g_wepBow[HandLeft].load()!=0);
+    const int owner=SkillHand(two,TwoHandedWeaponHand(style),LeftOwnsSkill());
     const auto preset=AppliedWeaponPreset(owner);
     const auto policy=DecideWeaponAction(preset,WeaponEvent::Skill,{owner,two,GameERRiding()});
     SkillTriggerIn ti;
@@ -2288,7 +2307,8 @@ void PollSkillTrigger(const VRInputState& in, double now) {
     // StanceHoldAnimation=false, a stance (its skill has follow-ups): the hold only arms the follow-ups. The game's
     // skill button stays up - no stance animation while you hold - and each follow-up swing presses it together with
     // the attack (chords 12/13). A held game skill is nothing to record then. Anything else holds as before.
-    const bool deferred = o.hold && !c.stanceHoldAnimation && c.stanceSwings && !GameERRiding() && owner >= 0 && owner <= 1 &&
+    const bool showStanceHold = preset.tuning.Get(WeaponField::StanceHoldAnimation, c.stanceHoldAnimation ? 1.f : 0.f) != 0.f;
+    const bool deferred = o.hold && !showStanceHold && c.stanceSwings && !GameERRiding() && owner >= 0 && owner <= 1 &&
                           g_skillFollowUps[owner].load();
     if (o.request && !(deferred && o.request == 3)) g_skillReq.store(o.request);
     g_skillHeld.store(o.hold && !deferred);
@@ -2296,7 +2316,7 @@ void PollSkillTrigger(const VRInputState& in, double now) {
     if (o.started) g_skillHeldAt = now;
     if (o.hold) g_gameMoveUntil.store(now + kGameMoveGrace);
     if (o.started && deferred)
-        LOGI("[combat] skill: the %s arms the stance's follow-ups (StanceHoldAnimation=false): nothing plays while it is held - each swing presses %s and the attack together",
+        LOGI("[combat] skill: the %s arms the stance's follow-ups (stance hold animation hidden): nothing plays while it is held - each swing presses %s and the attack together",
              c.twoHandSkillButton.c_str(), c.skillButton.c_str());
     else if (o.started)
         LOGI("[combat] skill: holding %s for the game while the %s is held (%s)", c.skillButton.c_str(), c.twoHandSkillButton.c_str(),
@@ -2590,8 +2610,7 @@ void CombatNotifyPad(uint16_t mask, double now) {
     if (rise & skill) {
         // The hand whose weapon's skill plays (the game's GetSwordArtInfo): a staff or seal in the left has none, so
         // one-handed it is the right weapon's skill unless the left holds a shield or a bow.
-        hand = SkillHand(TwoHandedStyle(style), TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : HandRight,
-                         g_wepShield[HandLeft].load() || g_wepBow[HandLeft].load());
+        hand = SkillHand(TwoHandedStyle(style), TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : HandRight, LeftOwnsSkill());
         why = "skill button";
     }
     // A press only REMEMBERS the hand; the game's aim events arm the aim (a press by itself must not - guard
@@ -2661,7 +2680,7 @@ uint16_t CombatBlockedButtons() {
     if (!two && g_wepRanged[HandLeft].load() &&
         DecideWeaponAction(AppliedWeaponPreset(HandLeft),WeaponEvent::Cast,{HandLeft,false,mounted}) == WeaponAction::Suppress)
         m |= ParseXInputButton(c.leftSwingButton);
-    const int skillHand = SkillHand(two,attackHand,g_wepShield[HandLeft].load() || g_wepBow[HandLeft].load());
+    const int skillHand = SkillHand(two,attackHand,LeftOwnsSkill());
     const auto skillPolicy = DecideWeaponAction(AppliedWeaponPreset(skillHand),WeaponEvent::Skill,{skillHand,two,mounted});
     if (skillPolicy != WeaponAction::Default) m |= MappedButtonOf(c.twoHandSkillButton,c);
     if (c.twoHandMode == "grab") {

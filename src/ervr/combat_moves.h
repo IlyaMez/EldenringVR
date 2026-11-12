@@ -270,11 +270,34 @@ inline float SwingAimDirection(float sx, float sy, float sz, float headYaw, floa
 }
 
 // The hand whose weapon's skill the skill button plays - the game's HKS GetSwordArtInfo: two-handed, the two-handed
-// weapon's; one-handed, the left weapon's only for a shield's or a bow's skill (IsShieldArts / IsArrowStanceArts),
-// else the right weapon's (a staff or seal in the left carries no skill).
-inline int SkillHand(bool twoHanded, int twoHandedHand, bool leftShieldOrBow) {
+// weapon's; one-handed, the left weapon's only when the left weapon's SKILL is a shield's or a bow's
+// (IsShieldArts / IsArrowStanceArts on its art type), else the right weapon's. It is the art that decides, not the
+// weapon: a shield whose art is on neither list (2026-11-12, a Brass Shield in the left) leaves the skill button to
+// the right weapon - Reduvia's blood blades fired while ERVR, judging by "a shield in the left", aimed them with the
+// left controller from the shield. A torch's Torch Attack (17) is on the shield list.
+inline int SkillHand(bool twoHanded, int twoHandedHand, bool leftArtOwnsSkill) {
     if (twoHanded) return twoHandedHand;
-    return leftShieldOrBow ? 0 : 1;   // HandLeft = 0, HandRight = 1
+    return leftArtOwnsSkill ? 0 : 1;   // HandLeft = 0, HandRight = 1
+}
+
+// The art types (SwordArtsParam swordArtsTypeNew - what the HKS env GetSwordArtID returns, e.g. Moonveil's row 1178
+// = 178 Transient Moonlight) of c0000.hks IsShieldArts and IsArrowStanceArts (ividyon/EldenRingHKS, game 1.16+).
+inline bool IsShieldArtsType(int t) {
+    static constexpr int k[] = {17, 71, 90, 91, 92, 93, 95, 96, 97, 98, 99, 151, 152, 195, 196, 197, 201, 202, 207, 211,
+                                322, 324, 348, 352, 354, 355, 359, 399, 334};
+    for (int v : k) if (v == t) return true;
+    return false;
+}
+inline bool IsArrowStanceArtsType(int t) {
+    static constexpr int k[] = {100, 101, 102, 103, 104, 105, 106, 107, 108, 169, 337, 357, 371};
+    for (int v : k) if (v == t) return true;
+    return false;
+}
+// One-handed, does the left weapon's art take the skill button? `artType` < 0 = not read yet: then the weapon's
+// class decides, as before (a shield or a bow in the left).
+inline bool LeftArtOwnsSkill(int artType, bool leftShieldOrBow) {
+    if (artType < 0) return leftShieldOrBow;
+    return IsShieldArtsType(artType) || IsArrowStanceArtsType(artType);
 }
 
 // ---- criticals (ThrowParam) ------------------------------------------------------------------------------------

@@ -162,7 +162,12 @@ bool AutoPilotMerge(XINPUT_GAMEPAD& pad) {
                         if (name[0] == 'L') { pad.sThumbLX = x; pad.sThumbLY = y; }
                         else { pad.sThumbRX = x; pad.sThumbRY = y; }
                         const double in = now - at;
-                        if (in >= 0.30 && in < 0.42) pad.wButtons |= ButtonByName(name.substr(bang + 1));
+                        const std::string act = name.substr(bang + 1);
+                        // "LU!SHOT+3": a screenshot 1 s into the held stick (mid-gallop), not a button.
+                        if (act == "SHOT") {
+                            static std::atomic<int> s_shotStep{-1};
+                            if (in >= 1.0 && s_shotStep.exchange(index) != index) ReShadeAddonRequestScreenshot();
+                        } else if (in >= 0.30 && in < 0.42) pad.wButtons |= ButtonByName(act);
                         return true;
                     }
                     // Sticks are held for the whole step (LU/LD/LL/LR walk, RL/RR turn the camera), so the
@@ -179,6 +184,16 @@ bool AutoPilotMerge(XINPUT_GAMEPAD& pad) {
                         else if (name[1] == 'L') x = -full; else x = full;
                         if (name[0] == 'L') { pad.sThumbLX = x; pad.sThumbLY = y; }
                         else { pad.sThumbRX = x; pad.sThumbRY = y; }
+                        return true;
+                    }
+                    // Chord "Y&LEFT": the first button held 0.4 s, the second tapped 0.12 s in - a pouch item
+                    // (Y held, D-pad), the way a player presses it.
+                    if (const size_t amp = name.find('&'); amp != std::string::npos) {
+                        const double in = now - at;
+                        if (in > 0.40) return false;
+                        if (s_step.exchange(index) != index) LOGI("[autopilot] script step %d: chord %s", index + 1, name.c_str());
+                        pad.wButtons |= ButtonByName(name.substr(0, amp));
+                        if (in >= 0.12 && in < 0.27) pad.wButtons |= ButtonByName(name.substr(amp + 1));
                         return true;
                     }
                     if (name == "WAIT" || now - at > 0.12) return false;

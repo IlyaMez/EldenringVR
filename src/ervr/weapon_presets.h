@@ -45,6 +45,7 @@ enum class WeaponField : uint8_t {
     ShieldRelease,
     DeflectSpeed,
     HapticScale,
+    StanceHoldAnimation, // append new fields to preserve existing override bits
     Count
 };
 constexpr size_t kWeaponFieldCount = (size_t)WeaponField::Count;

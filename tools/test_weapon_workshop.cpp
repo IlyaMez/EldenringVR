@@ -30,12 +30,28 @@ int wmain(int argc, wchar_t** argv) {
         p.family = 13;
         p.tuning.Set(WeaponField::ContactOn, .8f);
         p.tuning.Set(WeaponField::ContactOff, .25f);
+        p.tuning.Set(WeaponField::StanceHoldAnimation, 0.f);
         p.rules.push_back(
             {"stance", "Stance", WeaponEvent::Stance, WeaponAction::Heavy, WeaponCondition::TwoHand, 60, -1, true});
         Check(ValidateWeaponPreset(p, why), why.c_str());
         WeaponPreset copy;
         Check(ParseWeaponShare(WeaponShareCode(p), copy, why), why.c_str());
         Check(copy.name == p.name && copy.rules.size() == 1, "share round trip");
+        Check(copy.tuning.Has(WeaponField::StanceHoldAnimation) &&
+                  copy.tuning.Get(WeaponField::StanceHoldAnimation, 1.f) == 0.f,
+              "hidden stance animation lost during share import");
+        auto animationPreset = p;
+        animationPreset.tuning.Set(WeaponField::StanceHoldAnimation, 1.f);
+        Check(ParseWeaponPreset(WeaponPresetJson(animationPreset), copy, why) &&
+                  copy.tuning.Get(WeaponField::StanceHoldAnimation, 0.f) == 1.f,
+              "shown stance animation lost during file import");
+        animationPreset.tuning.Set(WeaponField::StanceHoldAnimation, .5f);
+        Check(!ParseWeaponPreset(WeaponPresetJson(animationPreset), copy, why),
+              "fractional stance animation option accepted");
+        animationPreset.tuning.Reset(WeaponField::StanceHoldAnimation);
+        Check(ParseWeaponPreset(WeaponPresetJson(animationPreset), copy, why) &&
+                  !copy.tuning.Has(WeaponField::StanceHoldAnimation),
+              "existing presets should inherit stance animation");
         auto code = WeaponShareCode(p);
         code[code.size() - 1] = code.back() == '0' ? '1' : '0';
         Check(!ParseWeaponShare(code, copy, why), "corrupt share accepted");
@@ -69,6 +85,7 @@ int wmain(int argc, wchar_t** argv) {
         auto left = p;
         left.id = "left";
         left.tuning.Set(WeaponField::Reach, .9f);
+        left.tuning.Set(WeaponField::StanceHoldAnimation, 1.f);
         store.presets.push_back(family);
         store.presets.push_back(left);
         store.assignments.push_back({0, p.family, -1, family.id});
@@ -77,10 +94,18 @@ int wmain(int argc, wchar_t** argv) {
               "left-hand precedence");
         Check(ResolveWeaponPreset(store, p.weapon, p.family, 1).fingerprint == CompileWeaponPreset(p).fingerprint,
               "wildcard captured left profile");
+        Check(ResolveWeaponPreset(store, p.weapon, p.family, 0).tuning.Get(WeaponField::StanceHoldAnimation, 0.f) == 1.f &&
+                  ResolveWeaponPreset(store, p.weapon, p.family, 1).tuning.Get(WeaponField::StanceHoldAnimation, 1.f) == 0.f,
+              "stance animation did not follow the weapon's hand assignment");
         Check(ResolveWeaponPreset(store, p.weapon + 10000, p.family, 1).fingerprint ==
                   CompileWeaponPreset(family).fingerprint,
               "family fallback");
         Config baseline;
+        Check(WeaponFieldBaseline(WeaponField::StanceHoldAnimation, baseline, p.family) == 1.f,
+              "stance animation show default");
+        baseline.stanceHoldAnimation = false;
+        Check(WeaponFieldBaseline(WeaponField::StanceHoldAnimation, baseline, p.family) == 0.f,
+              "stance animation global hide default");
         Check(WeaponFieldBaseline(WeaponField::Balance, baseline, 23) == .85f, "hammer geometry inheritance");
         baseline.weaponGeometry = "23:1.4:0.7";
         Check(WeaponFieldBaseline(WeaponField::Reach, baseline, 23) == 1.4f, "INI geometry inheritance");
@@ -146,6 +171,7 @@ int wmain(int argc, wchar_t** argv) {
         auto revised = store;
         revised.presets[0].revision++;
         revised.presets[0].tuning.Set(WeaponField::Reach, 1.7f);
+        revised.presets[0].tuning.Set(WeaponField::StanceHoldAnimation, 1.f);
         const auto oldFingerprint = AppliedWeaponPreset(1).fingerprint;
         Check(SaveWeaponPresetStore(runtimeFile, revised, store.revision, why), why.c_str());
         store = revised;
@@ -154,7 +180,10 @@ int wmain(int argc, wchar_t** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         Check(AppliedWeaponPreset(1).fingerprint == oldFingerprint, "revision changed during an action");
-        Check(waitFor([&] { return AppliedWeaponPreset(1).tuning.Get(WeaponField::Reach, 0) == 1.7f; }),
+        Check(AppliedWeaponPreset(1).tuning.Get(WeaponField::StanceHoldAnimation, 1.f) == 0.f,
+              "stance animation changed during a held action");
+        Check(waitFor([&] { return AppliedWeaponPreset(1).tuning.Get(WeaponField::Reach, 0) == 1.7f &&
+                                  AppliedWeaponPreset(1).tuning.Get(WeaponField::StanceHoldAnimation, 0.f) == 1.f; }),
               "neutral revision not applied");
         WeaponPresetEquipment(1, p.weapon + 10000, p.family);
         Check(WeaponPresetApplyPending(false) && AppliedWeaponPreset(1).fingerprint == 0,

@@ -49,7 +49,8 @@ const std::array<WeaponFieldInfo, kWeaponFieldCount>& WeaponFields() {
          {WeaponField::ShieldForward, "shieldForward", "Guard forward distance", "Guard", "m", 0, .6f, .01f},
          {WeaponField::ShieldRelease, "shieldRelease", "Guard release delay", "Guard", "s", .05f, .7f, .01f},
          {WeaponField::DeflectSpeed, "deflectSpeed", "Deflect speed", "Guard", "m/s", .2f, 4, .1f},
-         {WeaponField::HapticScale, "hapticScale", "Controller feedback", "Feedback", "x", 0, 1, .05f}}};
+         {WeaponField::HapticScale, "hapticScale", "Controller feedback", "Feedback", "x", 0, 1, .05f},
+         {WeaponField::StanceHoldAnimation, "stanceHoldAnimation", "Stance hold animation", "Skill", "", 0, 1, 1}}};
     return fields;
 }
 float WeaponFieldBaseline(WeaponField f, const Config& c, uint16_t type) {
@@ -233,6 +234,8 @@ float WeaponFieldBaseline(WeaponField f, const Config& c, uint16_t type) {
         return c.twoHandGrabMax;
     case WeaponField::SkillHold:
         return c.skillHoldSeconds;
+    case WeaponField::StanceHoldAnimation:
+        return c.stanceHoldAnimation ? 1.f : 0.f;
     case WeaponField::StanceSettle:
         return .15f;
     case WeaponField::StanceGap:
@@ -439,6 +442,8 @@ bool ValidateWeaponPreset(const WeaponPreset& p, std::string& why) {
             const float v = p.tuning.values[(size_t)f.field];
             if (!std::isfinite(v) || v < f.min || v > f.max)
                 return Fail(why, std::string(f.label) + " is outside its supported range.");
+            if (f.field == WeaponField::StanceHoldAnimation && v != 0.f && v != 1.f)
+                return Fail(why, "Stance hold animation must be 0 (hide) or 1 (show).");
         }
     auto ordered = [&](WeaponField a, WeaponField b, bool equal) {
         return !p.tuning.Has(a) || !p.tuning.Has(b) ||

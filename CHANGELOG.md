@@ -6,7 +6,8 @@ release workflow and published on GitHub Releases and Nexus Mods.
 ## Unreleased
 
 Dodges roll the way the stick points again; a site of grace's menu moves with the stick; the right trigger holds
-your Ash of War, so stances and charged skills work; a swing behind an enemy backstabs.
+your Ash of War, so stances and charged skills work; a swing behind an enemy backstabs. On Torrent your body stays
+put under you when galloping and jumping, and turning your own body no longer rotates the horse.
 
 ### New
 * The Ash of War on the right trigger, held (Stÿks: a skill you hold was impossible - the left grip could only tap
@@ -50,6 +51,32 @@ your Ash of War, so stances and charged skills work; a swing behind an enemy bac
   skills that fire on the press (Reduvia's) hold as before. The default (`true`) keeps the stance held.
 
 ### Fixes
+* On Torrent your body no longer pops up in front of you when galloping or jumping ("as if fighting with the
+  camera"). Each frame ERVR writes the rider's pose several times, and only the first - the Havok pose hook's - is
+  drawn, hung off the rider's position that the game works out right after it. That write still used the last
+  frame's position: at a gallop the rider moves a stride and Torrent's pitch turns it up to 8 degrees a frame, so
+  the drawn body swung about the saddle while the view, set later, did not. Measured in a flat test with jumps in
+  place and a short trot: the drawn body was up to 15 cm below and 10 cm in front of where ERVR placed it; now
+  within 3 mm. ERVR now works out that position the way the game will (from the rider's physics: exact), and every
+  write of the frame puts the view at the same point of the rider's frame. ERVR's own `[body]` check could not see
+  this - it measured a write that is never drawn.
+* Turning your body on Torrent no longer rotates the horse with you, 1:1. Within `RideFreeLookDeg` (45) you look
+  around freely, as before; turn further and that becomes your new forward, and Torrent turns toward it at its own
+  pace, in an arc, when you push the stick - standing still, it stays put. `RideTurnsWithHead=true` brings back the
+  rigid turn. The right stick still turns you and the horse together.
+* With a shield in the left hand, the skill trigger's projectile aims with the hand that holds the weapon whose skill
+  plays. Reduvia's blood blades beside a Brass Shield flew where the LEFT controller pointed, from the shield: ERVR
+  credited the skill to any shield in the left, while the game decides by the left weapon's skill - only a shield's
+  or bow's own art (Parry, Shield Bash, Barricade Shield, a torch's Torch Attack, the arrow stances...) takes the
+  skill button; any other leaves it to the right weapon. ERVR now reads each hand's art from the game's tables and
+  applies the game's own two lists (ERVR.log: "left hand skill: SwordArtsParam ..., art type ...; one-handed the
+  skill button plays ...").
+* On Torrent, the drawn upper body tipping toward the view at a gallop or in a jump ("I can see my neck and
+  shoulders"). The drawn pose hangs off a rider matrix ERVR predicts a moment before the game builds it; that matrix
+  carries Torrent's pitch, eased in over the rider's physics, and the prediction kept the last frame's tilt - up to
+  3.6 degrees off at a gallop in the headset (12 with a stick turn), the upper body tipping ~4 cm about the saddle
+  for that frame. The prediction now also continues the tilt's last change one frame on, and uses that whenever it
+  has been measuring closer (`[Experimental] RideTiltExtrapolate=false` = the plain carry). Untested in the headset.
 * A sword's skill projectile leaves from your blade, flies where you aimed it, and a Moonveil wave lies in the plane
   of your swing. The game launches it from its own animation - a point on the animated body or sword - so it came
   out of your chest and Reduvia's blood blades along your view ("from my face"), and Moonveil's wave was upright or
@@ -85,6 +112,15 @@ your Ash of War, so stances and charged skills work; a swing behind an enemy bac
   and Proton 10, SteamVR, Quest 3).
 
 ### For testers
+* On Torrent, ERVR.log says every 5 s where the drawn head sat against the camera ("[ride] drawn": about -43 mm
+  vertical and -80 mm forward is right - the eye's calibration and the body parked behind the view), the frame's
+  pose writes in order, and how well the rider's next position was guessed. `[Experimental] RideFrameAnchor=false`
+  restores the old pipeline for an A/B. The autopilot script takes chords (`Y&LEFT`, a pouch item: Y held, the
+  D-pad tapped) and `LU!SHOT` (a screenshot a second into a held stick); `[FirstPerson] ForcePitchDeg` now tilts
+  every camera write of a flat test (positive = down). Since 2026-11-12 "[ride] drawn" gives both extremes per axis
+  (the signed maximum hid a head moving toward the eye) and a second line names the drawn head, neck, clavicle or
+  torso point that came nearest the eye within 60 degrees of the view; the guess line lists all three guesses and
+  their running errors.
 * Each skill projectile ERVR launches logs a line ("[combat] projectile ... moved ... turned ... rolled ...") and,
   a moment later, where it appeared and which way it flew ("projectile in flight: ... deg off the way it was sent").
   `[Experimental] DebugProjectileYawDeg` / `DebugProjectileRollDeg` / `DebugProjectileLift` turn every projectile of

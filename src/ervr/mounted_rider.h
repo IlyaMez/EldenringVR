@@ -116,7 +116,7 @@ uint8_t* MountedTorrent(uint8_t* player, uint8_t* world, Read read) {
 // matrices are rebuilt. Clear it when the mount changes, so dismount/death/load
 // cannot replay a turn on a later horse. Physical turns arrive through RideHeadFollow.
 class MountedTurnQueue {
-    std::mutex mutex;
+    mutable std::mutex mutex;
     const void* mount = nullptr;
     float pending = 0.f;
     uint32_t lastFrame = 0;
@@ -129,6 +129,11 @@ public:
     void Add(float radians) {
         std::lock_guard<std::mutex> guard(mutex);
         if (mount && std::isfinite(radians)) pending = WrapPi(pending + radians);
+    }
+    // What the pair's next rebuild will turn by, without taking it (the drawn pose is solved before that rebuild).
+    float Peek(const void* current) const {
+        std::lock_guard<std::mutex> guard(mutex);
+        return current && mount == current ? pending : 0.f;
     }
     float Take(const void* current, uint32_t frame, bool simulationPass = true) {
         std::lock_guard<std::mutex> guard(mutex);
@@ -216,6 +221,63 @@ struct RideCameraStabilizer {
         if (advance) { local = out; deviation = len; }
         return mountPos + mountYaw.Rotate(out);
     }
+};
+
+// A frame on horseback writes the rider's pose several times - the Havok pose hook, the model-pos pre and post, the
+// camera steps - and the game rebuilds the rider's matrix between the pre and the post. Only the POSE HOOK's write
+// is drawn (2026-11-12 flat test: the rider lifted 40 cm in each kind of write in turn floated only for the pose
+// hook), hung off the matrix the rebuild produces AFTER it. That write used to solve the upright seat in the
+// matrix it replaces: at a gallop the rider's matrix turns up to 7.7 degrees a frame with Torrent's pitch, and the
+// drawn body swung that much about the saddle - up to ~10 cm at the head, forward and back - while the camera, set
+// after the rebuild, did not ("my body pops up in front of me when moving or jumping"). Now the frame's first
+// write solves in the matrix the rebuild is about to produce - the last one carried the way the rider's physics
+// moved since, which is how the game builds it (exact in position) - and every write of the frame places the
+// view at one point of the rider's frame (RideFrameAnchor).
+struct RigidPose { Vec3 pos{}; Quat rot{}; };
+// `p` moved rigidly the way `from` moved to `to`: to * from^-1 * p.
+inline RigidPose CarriedBy(const RigidPose& p, const RigidPose& from, const RigidPose& to) {
+    const Quat d = (to.rot * from.rot.Conj()).Normalized();
+    return {to.pos + d.Rotate(p.pos - from.pos), (d * p.rot).Normalized()};
+}
+// The rider's matrix over its physics: its tilt (`res` = physics^-1 * matrix, the ride's pitch eased in on top of
+// the physics) changes every frame at a gallop and in a jump, and carrying the last matrix by the physics keeps last
+// frame's tilt - up to 3.6 deg off on a 2026-11-12 in-headset gallop, the drawn upper body tipped ~4 cm toward or away
+// from the eye for that frame. This continues the tilt's last per-frame change one more frame: the rotation the
+// rebuild about to run will produce if the tilt keeps turning as it just did. False (nothing written) when that
+// step exceeds `maxStepDeg` - a warp, a mount or a turn, not an eased tilt.
+inline bool ExtrapolateTilt(const Quat& physRot, const Quat& resBefore, const Quat& resLast, float maxStepDeg, Quat& out) {
+    Quat step = (resBefore.Conj() * resLast).Normalized();
+    if (step.w < 0.f) step = Quat{-step.x, -step.y, -step.z, -step.w};
+    const float stepDeg = 2.f * std::acos(std::fmin(1.f, step.w)) * 57.29578f;
+    if (!(stepDeg <= maxStepDeg)) return false;
+    out = (physRot * resLast * step).Normalized();
+    return true;
+}
+// A point expressed in a pose's own frame, and back.
+inline Vec3 IntoFrame(const RigidPose& frame, const Vec3& world) { return frame.rot.Conj().Rotate(world - frame.pos); }
+inline Vec3 OutOfFrame(const RigidPose& frame, const Vec3& local) { return frame.pos + frame.rot.Rotate(local); }
+
+// Per frame on horseback. The frame's first write (the pose hook - or the model-pos pre-write when the pose hook did
+// not run) predicts the rider's new matrix and fixes the view there, in the rider's own frame. Frames are told
+// apart by the rider's rebuild count `gen`: set at gen g, a write still at g comes before that frame's rebuild and
+// uses the same prediction; a write past it comes after and uses the matrix the rebuild produced. Either way the
+// view is the same point of the rider's frame, so the camera and the drawn body ride one matrix.
+struct RideFrameAnchor {
+    bool valid = false;
+    uint32_t gen = 0;   // the rider's rebuild count when it was set (its frame's rebuild still to come)
+    RigidPose rider;    // the predicted matrix it was set in
+    Vec3 local{};       // the smoothed eye anchor in that frame
+    double at = -1.0;
+    void Set(uint32_t generation, const RigidPose& predicted, const Vec3& anchorWorld, double now) {
+        gen = generation; rider = predicted; local = IntoFrame(predicted, anchorWorld); at = now; valid = true;
+    }
+    bool Fresh(double now) const { return valid && now >= at && now - at <= 0.1; }
+    // A write that may start a frame (`opens`) does so once per rebuild, or when the last frame is long gone.
+    bool Opens(uint32_t generation, bool opens, double now) const { return opens && (!Fresh(now) || gen != generation); }
+    // The matrix a write at rebuild count `generation` is built on (`real` = the model matrix as it is now).
+    RigidPose RiderFor(uint32_t generation, const RigidPose& real) const { return gen == generation ? rider : real; }
+    Vec3 Anchor(const RigidPose& rider) const { return OutOfFrame(rider, local); }
+    void Reset() { valid = false; at = -1.0; }
 };
 
 // Physical turns on horseback: the head yaw, followed the way BodyYaw=head follows it on foot (deadzone, then a

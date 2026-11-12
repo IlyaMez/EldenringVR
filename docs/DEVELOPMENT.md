@@ -135,8 +135,27 @@ own OpenXR session.
   against the reference pose's head-over-pelvis height) and keeps it across reloads of the same character. The
   seated body lives in the rider's own model matrix, upright about the pelvis (`UprightSeatRoot`), so camera and
   body share the game's placement on the saddle; the camera rides the seated head (never the gallop/jump
-  animation's), low-passed in Torrent's physics frame (`RideCameraStabilizer`) and advanced only by the frame's
-  final camera write (the model-pos post). Full-frame pass 2 re-places the rider on the horse at dt 0, so the
+  animation's), low-passed in Torrent's physics frame (`RideCameraStabilizer`).
+  Each pass-1 frame on horseback runs, in order: the Havok pose hook (`HkBody`), Torrent's and then the rider's
+  model-pos pre-write and rebuild, the model-pos post, five camera-step calls (pose and/or camera writes), then the
+  finalize replay (`[ride] one frame in order`) - and only the pose hook's write is drawn (2026-11-12 flat test:
+  a body lifted 40 cm in each kind of write in turn floated only for the pose hook), hung off the matrix the
+  rider's rebuild produces *after* it. That write opens the frame (`RideFrameAnchor`, keyed on the rider's rebuild
+  count; the model-pos pre-write opens it when the pose hook did not run): it predicts the matrix the rebuild will
+  produce - the last one carried the way the rider's physics moved since (`RidePredictRider`, `CarriedBy`; exact in
+  position, since the game builds it from that physics, plus any pending pair turn) - advances the view smoothing
+  once, and keeps the smoothed eye in the rider's own frame. Writes before the rebuild reuse the prediction, writes
+  after it the real matrix, and every one places the view at that same point, so the drawn body and the view ride
+  one matrix. Before, every write re-smoothed against Torrent's physics as it stood then, and the drawn write solved
+  the upright seat in the matrix the rebuild replaced - at a gallop that matrix turns up to 7.7 degrees a frame with
+  Torrent's pitch, swinging the drawn body about the saddle. `[ride] drawn` compares the drawn head with the final
+  camera every 5 s (both extremes per axis since 2026-11-12, and the nearest drawn head/neck/clavicle/torso point
+  within 60 deg of the view: the old signed maximum never showed a head moving TOWARD the eye); `[Experimental]
+  RideFrameAnchor=false` brings back the old pipeline for an A/B. The carry keeps the last frame's tilt of the matrix
+  over the physics (the ride's pitch, eased in), which at a gallop missed by up to 3.6 deg (12 with a stick turn) in
+  headset - the drawn upper body tipping ~4 cm toward or away from the eye for that frame; a third guess continues
+  that tilt's last per-frame change (`ExtrapolateTilt`) and is used only while its running error is the lower
+  (`[Experimental] RideTiltExtrapolate=false` = carry only; `[ride] the drawn write's guess` lists all three). Full-frame pass 2 re-places the rider on the horse at dt 0, so the
   second eye solves in the pass-1 placement and rebases into the pass-2 matrix, predicted from the last frame
   before that pass's rebuild (`RiderPassHold`). Controller arm IK and physical leaning remain active, and Torrent's
   own animation is unchanged. Mount/dismount transitions and `PoseMode=game` use the live rider pose. Standing eye

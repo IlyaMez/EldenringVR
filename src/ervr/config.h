@@ -262,7 +262,7 @@ struct Config {
     float bodyYawFollowSeconds = 0.25f;   // time constant of the body chasing the head yaw (0 = instant)
     float bodyYawDeadzoneDeg = 0.f;       // look this far off before the body starts to follow
     float rideFreeLookDeg = 45.f;         // on Torrent: look this far either side without steering or turning the horse (-1 = off: the stick follows the head)
-    bool  rideTurnsWithHead = true;       // on Torrent with BodyYaw=head: turning past the free look turns the horse and rider (BodyYawFollowSeconds)
+    bool  rideTurnsWithHead = false;      // on Torrent with BodyYaw=head: turning past the free look rotates the horse and rider rigidly (BodyYawFollowSeconds). Off: Torrent steers toward the new forward itself (2026-11-12: the rigid 1:1 turn felt bad)
     float rideCameraSmoothing = 0.15f;    // s: Torrent's gallop bounce smoothed out of the view, the rider carried with it (0 = rigid on the rider)
     float rideCameraMaxDeviation = 0.10f; // m: the smoothed view (and the rider with it) never sits further than this from the saddle's own motion
     bool  torsoFaceCamera = true;         // twist the Spine bone so the chest faces the body yaw
@@ -938,6 +938,12 @@ struct Config {
     // animation fires is turned this many degrees about the vertical (yaw) / about its flight axis (roll) and lifted
     // this many metres at spawn; ERVR.log then reports where it actually flew. 0 = off (the default).
     float debugProjectileYawDeg = 0.f, debugProjectileRollDeg = 0.f, debugProjectileLift = 0.f;
+    // On horseback every pose write of a frame is built on one ride frame (RideFrameAnchor, 2026-11-12). false = the
+    // old pipeline (each write smoothed against Torrent as it stood then), kept only to A/B the "[ride] drawn" probe.
+    bool rideFrameAnchor = true;
+    // The frame's prediction of the rider's matrix continues the ride's tilt over its physics one frame further
+    // (ExtrapolateTilt), used only while it measures better than the plain carry. false = always the plain carry.
+    bool rideTiltExtrapolate = true;
 
     void Load(const std::wstring& iniPath);
 };
