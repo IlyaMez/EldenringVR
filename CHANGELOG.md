@@ -3,13 +3,33 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## Unreleased
+## 0.8.0 (2026-11-12)
 
-Dodges roll the way the stick points again; a site of grace's menu moves with the stick; the right trigger holds
-your Ash of War, so stances and charged skills work; a swing behind an enemy backstabs. On Torrent your body stays
-put under you when galloping and jumping, and turning your own body no longer rotates the horse.
+The Weapon Workshop gives any weapon its own VR profile in the launcher; the headset gets a new frame every
+refresh instead of dropping to half rate; the right trigger holds your Ash of War, so stances and charged skills
+work; a swing behind an enemy backstabs; dodges roll the way the stick points again; a site of grace's menu moves
+with the stick. On Torrent your body stays put under you when galloping and jumping, and turning your own body no
+longer rotates the horse.
 
 ### New
+* The Weapon Workshop: the launcher's **Weapons** tab gives any weapon, or a whole weapon type, its own VR profile
+  (a preset). The catalog is read from your own game files - every weapon and shield with its real icon, Shadow
+  of the Erdtree included (487 on the installation it was built against), no game asset shipped. Tick only the
+  settings you change: weapon alignment and grip, weight and handling, the speed a swing needs to strike, stance
+  and swing detection, the two-hand grip, skill hold and stance timing, shield blocking, vibration; the rest stay
+  on your ERVR.ini. Hovering a setting explains it with an example. Action rules turn a detector into a move
+  (a swing two-handed during a stance = the heavy follow-up, a skill control = the recorded effect...), and
+  **Try rules & live VR** shows which rule a situation picks without sending the game anything. **Save & apply**
+  hands the preset to the running game; it takes effect when your controls are released and your hands are still.
+  Share codes (`ERVR1:` with a SHA-256 checksum) and preset files are imported for review and saved unused; nothing
+  is uploaded anywhere. Presets live in `Game\ERVR\Presets\library.json`; `docs/WEAPON_PRESETS.md` (in the zip as
+  `ERVR\WEAPON_PRESETS.md`) has every setting and rule. A preset changing anything in the headset is untested.
+* Full stereo hands the headset a new frame every refresh (`[VR] AsyncSubmit`, default on). The headset's frame
+  loop now runs on its own thread and shows the newest finished stereo pair each refresh; the game no longer
+  waits for the headset. Before, a pair a millisecond over the 11.1 ms of a 90 Hz refresh waited for the next
+  one and the runtime halved the game to 45 Hz ("performance horrible"). Measured in the headset on a 9800X3D in
+  Limgrave, High settings: 45-55 pairs a second before, 75-83 now, the headset locked at 90 Hz; both eyes still
+  come from the same game frame, and no frame mixes two pairs. `AsyncSubmit=false` brings back the old loop.
 * The Ash of War on the right trigger, held (Stÿks: a skill you hold was impossible - the left grip could only tap
   it, since a held grip opens the weapon wheel). The right trigger now holds the game's skill button for exactly as
   long as you hold it, one-handed too: a stance waits for your swing, and that swing is the stance's own follow-up
@@ -110,8 +130,13 @@ put under you when galloping and jumping, and turning your own body no longer ro
   short of the object, so its vtable check failed and the frame pump was never hooked; ERVR now steps to the real
   object when its vtable and task-group list both check out (deadlydavid's fix, PR #1: Ubuntu, Proton Experimental
   and Proton 10, SteamVR, Quest 3).
+* A crash at boot with Seamless Co-op: ERVR's search for the game's objects read memory the game had just freed
+  while it started up, and Seamless's crash handler closed the game. The read is now guarded.
 
 ### For testers
+* `[Experimental] ProfileGroups` logs where each engine pass spends its time, per task group, every ~5 s
+  ("[prof] pass 1 ... | pass 2 ..."); `ProfileSample` samples the game's busy threads (one CPU core while on) and
+  logs the engine functions each pass runs in ("[sample]"). Both read at launch, both off by default.
 * On Torrent, ERVR.log says every 5 s where the drawn head sat against the camera ("[ride] drawn": about -43 mm
   vertical and -80 mm forward is right - the eye's calibration and the body parked behind the view), the frame's
   pose writes in order, and how well the rider's next position was guessed. `[Experimental] RideFrameAnchor=false`

@@ -11,20 +11,22 @@ posted in `#ervr-updates` first.
 ## Weapon presets
 
 Open **Weapons** in the launcher to browse the actual weapon names and icons from your installed game,
-including DLC. Search a weapon, choose **New weapon preset** or **New family preset**, and check the
-settings you want to customize. The **Actions & triggers** tab adds conditional rules for ERVR's contact,
-stance, skill, support-grip, guard and cast controls. **Test & live** previews rule decisions and shows
+including DLC. Search a weapon, then in **Preset options** choose **New for this weapon** or **New for this
+weapon type**, open a group in **Feel & alignment** and check the settings you want to change; hovering a
+setting explains it with an example. **Action rules** adds conditional rules for ERVR's contact, stance,
+skill, support-grip, guard and cast controls. **Try rules & live VR** previews rule decisions and shows
 local VR diagnostics when the updated mod is running.
 
-Use **Save & activate**, then release your controls and hold still between actions to apply the preset
-in VR. Unchecked settings inherit your normal ERVR options. **Save only** also updates an already active
-preset; use **Duplicate** to experiment independently. Clear an assignment to fall back to a less-specific
-family preset or global settings.
+Use **Save & apply**, then release your controls and hold still between actions to apply the preset in
+VR. Unchecked settings inherit your normal ERVR options. **Preset options > Save changes** also updates a
+preset already in use; **Make a copy** to experiment independently. **Remove preset from this target**
+falls back to a broader weapon-type preset or your global settings.
 
-**Copy share code** or **Export file** shares one preset. **Import preset** reviews a code or JSON file
-and saves a new inactive copy; select it on the matching weapon and activate it yourself. Your library is
-`<Game>\ERVR\Presets\library.json`. The catalog is read from your game files; no weapon assets are included
-in exports. See [Weapon Workshop](WEAPON_PRESETS.md) for settings, precedence and supported actions.
+**Preset options > Copy share code** or **Export preset file** shares one preset. **Import preset** reviews
+a code or file, then **Add to my presets** saves a new unused copy; pick it on the matching weapon and apply
+it yourself. Your library is `<Game>\ERVR\Presets\library.json`. The catalog is read from your game files;
+no weapon assets are included in exports. See [Weapon Workshop](WEAPON_PRESETS.md) for settings,
+precedence and supported actions.
 
 ## Before you start
 

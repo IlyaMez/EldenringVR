@@ -21,12 +21,12 @@ are the source of truth; edit them here, then paste.
      haptics below), or the release copy leaves body haptics out.
 2. Tag and push. The release workflow builds, attests and publishes the GitHub release:
    ```powershell
-   git tag v0.7.5
-   git push origin v0.7.5
+   git tag v0.8.0
+   git push origin v0.8.0
    ```
-3. Download `ERVR-v0.7.5.zip` from the GitHub release, or build the identical file locally:
+3. Download `ERVR-v0.8.0.zip` from the GitHub release, or build the identical file locally:
    ```powershell
-   .\tools\package_release.ps1 -Build      # -> build\release\ERVR-v0.7.5.zip + .sha256
+   .\tools\package_release.ps1 -Build      # -> build\release\ERVR-v0.8.0.zip + .sha256
    ```
    Upload the **same zip** to Nexus that is on GitHub, so the SHA256 and the attestation in the
    release notes apply to both downloads.
@@ -76,9 +76,9 @@ are the source of truth; edit them here, then paste.
 
 ## Files tab
 
-* Main file: `ERVR-v0.7.5.zip`, version `0.7.5`, "Main Files" category.
+* Main file: `ERVR-v0.8.0.zip`, version `0.8.0`, "Main Files" category.
 * File description: paste the Install section from `description.bbcode` plus the two verification
-  lines (SHA256 from the `.sha256` file, `gh attestation verify ERVR-v0.7.5.zip --repo IlyaMez/EldenringVR`).
+  lines (SHA256 from the `.sha256` file, `gh attestation verify ERVR-v0.8.0.zip --repo IlyaMez/EldenringVR`).
 * Tick "This file is a new version of an existing file" only for updates.
 * Do not upload a separate ReShade or config file; the zip is complete.
 

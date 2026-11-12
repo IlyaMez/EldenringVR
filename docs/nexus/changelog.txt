@@ -1,3 +1,15 @@
+0.8.0 (2026-11-12)
+
+- Weapon Workshop: the launcher's Weapons tab gives any weapon, or a whole weapon type, its own VR profile - how it sits in your hand, how it swings, what your swings do. Every weapon and shield is read from your own game files with its real icon, DLC included. Share a profile as a code; imports are reviewed before they are saved, and nothing is uploaded anywhere
+- Smoother: the headset gets a new frame every refresh. A pair of eyes a millisecond late used to drop the game to half rate (45-55 pairs a second at 90 Hz); now 75-83, the headset steady at 90
+- Your Ash of War on the right trigger, held, one-handed too: a stance waits for your swing and that swing is its follow-up; a charged skill lets go when you do. A sword's skill projectile leaves from your blade and flies where you swung, Moonveil's wave in the plane of the swing; Reduvia's blood blades fly where your hand points
+- Backstabs: swing at an enemy's back, close and facing it, and the game plays its backstab
+- Dodges roll the way the stick points (every roll went where you looked)
+- Site of grace and NPC menus move with the left stick, and your swings and the right stick stay quiet behind them
+- Torrent: your body stays in the saddle at a gallop and in jumps instead of popping up in front of you; turning your body no longer rotates the horse 1:1 - look around freely, turn past 45 degrees and Torrent turns that way when you push the stick
+- Linux (Proton): full stereo starts (it stayed on the flat screen)
+- A crash at boot with Seamless Co-op is gone
+
 0.7.5 (2026-11-07)
 
 - Interactions fixed at the root: ERVR draws the right eye by running the game's frame a second time, and every interaction bug since 0.6.0 (doors, the stuck item card, lifts, fog walls, graces) was one more part of the game reacting twice in that second run. That run now only draws; talk scripts, characters, game flow, events and menus run once per frame, as in the game without ERVR

@@ -1,7 +1,7 @@
 [center][size=6][b]ERVR: native VR for ELDEN RING[/b][/size]
 [size=3]Your head is the camera, the weapons are in your hands, and your swing is the attack.[/size]
 
-[b]Version 0.7.5. From the maker of [url=https://github.com/IlyaMez/SpidyVR]Spidy[/url], the Spider-Man Remastered VR mod.[/b]
+[b]Version 0.8.0. From the maker of [url=https://github.com/IlyaMez/SpidyVR]Spidy[/url], the Spider-Man Remastered VR mod.[/b]
 
 [url=https://discord.gg/x27ZXDpdNt][b]Join the Discord[/b][/url]: release news first, help in #ervr-help, clips. One server for ERVR and Spidy.[/center]
 
@@ -14,15 +14,18 @@ ERVR writes the game's memory, so it runs with Easy Anti-Cheat off; the included
 [*][b]First person, in the body.[/b] Your head is the camera: look around, lean, duck. Look down and your character is there, the arms following your controllers. Strike a T-pose once and its arms take the length of yours.
 [*][b]Your swing is the attack.[/b] ERVR fires the game's own attack along the blade in your hand: damage, poise, status and stamina come from the game, and a faster swing hits harder. Weapons have weight.
 [*][b]A shield that blocks.[/b] Raise it in front of you to block; move it into a blow to deflect it.
-[*][b]Two-hand by grabbing the hilt.[/b] Squeeze your free hand on the hilt and the game two-hands the weapon. The right trigger then fires its Ash of War, the effect without the animation.
+[*][b]Two-hand by grabbing the hilt.[/b] Squeeze your free hand on the hilt and the game two-hands the weapon.
+[*][b]Your Ash of War on the right trigger, held.[/b] A stance waits for your swing, and that swing is its follow-up; a charged skill lets go when you do. A sword's skill projectile leaves from your blade, in the plane of your swing.
+[*][b]Backstabs[/b]: swing at an enemy's back and the game plays its backstab.
 [*][b]Spells and arrows go where your hand points.[/b]
 [*][b]A weapon wheel in each hand[/b], with the game's own icons.
 [*][b]A belt[/b]: your four pouch shortcut items hang at your waist; grab one and press X to use it.
 [*][b]The HUD on its own panel[/b] at headset resolution, where you want it.
-[*][b]Torrent[/b]: the rider and the view move with the horse.
+[*][b]Torrent[/b]: your body stays in the saddle at a gallop and in jumps; look around freely, and turn past 45 degrees for Torrent to turn that way.
 [*][b]Seamless Co-op[/b] with friends on flat screens: they need neither ERVR nor a headset.
 [*][b]Body haptics[/b] on a bHaptics TactSuit, TactSleeves and TactVisor through the bHaptics Player.
 [*][b]One launcher[/b] that checks the game, the headset and your PC, sets the game up for VR and starts it with one button.
+[*][b]The Weapon Workshop[/b] in the launcher gives any weapon its own VR profile: how it sits in your hand, how it swings, what your swings do. Share it as a code.
 [*][b]Settings in the game's own menu[/b]: System > ERVR Settings changes turning, combat, the HUD, world scale and your body calibration without leaving the headset (patch 1.17.2).
 [/list]
 
@@ -51,8 +54,8 @@ Prefer it by hand? Unpack the zip straight into ELDEN RING\Game, next to eldenri
 [list]
 [*]Your head: look, lean, duck. Left stick: walk where you look. Right stick: turn, smooth or in snaps.
 [*]B: dodge, hold to sprint. A: jump (confirm in menus). Left stick click: crouch; held and tilted: the quick-slot D-pad. Right stick click: lock on.
-[*]Swing a weapon to attack; the left hand attacks with the left weapon. Left trigger: guard. Left grip: skill.
-[*]Free hand on the hilt and a fresh squeeze of its grip: two-hand. Right trigger while two-handing: Ash of War.
+[*]Swing a weapon to attack; the left hand attacks with the left weapon. Left trigger: guard. Right trigger, held: Ash of War (left grip, a quick squeeze: a skill tap).
+[*]Free hand on the hilt and a fresh squeeze of its grip: two-hand.
 [*]A grip held with the hand still: the weapon wheel. Let go over a weapon to switch.
 [*]A staff, seal or bow in a hand: its trigger casts, and the spell or arrow flies where the hand points.
 [*]X: use item. Y: interact. Menu button: tap for the menu, hold for the map. In a menu the left stick moves the cursor.
@@ -65,8 +68,8 @@ Every button is a key in ERVR.ini, and the launcher's Options tab has the settin
 [list]
 [*]Full stereo roughly doubles the game's render work. Lower Resolution in the launcher's Options and the game's graphics settings first.
 [*]Physical melee plays no attack animation, so enemy cues that read the player's animation can differ, and co-op partners see you stand still while the enemy takes the hit.
-[*]Some Ashes of War need one normal use to record their effect. Charged and stance follow-ups are not done yet.
-[*]The belt, the Valve Index controls, the weapon wheel and body haptics are new and have had little headset time. Report what you see.
+[*]Two-handed, a tap of the trigger plays the Ash of War's effect without its animation; some need one normal use to record that effect. Ripostes after a parry or a stance break are not done yet.
+[*]The Weapon Workshop's presets, backstabs, the belt, the Valve Index controls and body haptics are new and have had little headset time. Report what you see.
 [/list]
 
 [size=5][b]Help, bugs and news[/b][/size]
@@ -75,7 +78,7 @@ Ask in [b]#ervr-help[/b] on the [url=https://discord.gg/x27ZXDpdNt]Discord[/url]
 [size=5][b]Antivirus warnings and verifying the download[/b][/size]
 ERVR.dll injects into a running game, and dxgi.dll is ReShade's add-on build, which is unsigned by design. Generic antivirus detections are therefore possible. Every release is built from the public tagged source by GitHub Actions and carries a signed provenance attestation and a SHA256 file; this Nexus file is the same zip as the GitHub release.
 
-[code]gh attestation verify ERVR-v0.7.5.zip --repo IlyaMez/EldenringVR[/code]
+[code]gh attestation verify ERVR-v0.8.0.zip --repo IlyaMez/EldenringVR[/code]
 
 [b]ERVR has no telemetry or analytics, and ERVR.dll never goes online.[/b] The launcher asks GitHub once at start whether a newer ERVR is out (About > Updates turns that off) and downloads it only when you press Update now, checked against the release's SHA-256. For body haptics it loads bHaptics' own library, which talks to the bHaptics Player on your PC; [b][bHaptics] Level=0[/b] keeps it from loading.
 

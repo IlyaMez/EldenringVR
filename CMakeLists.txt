@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EldenRingVR VERSION 0.7.5 LANGUAGES C CXX RC)
+project(EldenRingVR VERSION 0.8.0 LANGUAGES C CXX RC)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "ELDEN RING is 64-bit; configure with a 64-bit toolchain (e.g. -A x64).")
