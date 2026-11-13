@@ -166,6 +166,8 @@ struct Actions {
     // Valve Index only: the trackpads (where the thumb is, how hard it presses) and the grip's
     // squeeze force. No other profile binds them, so they read zero / inactive elsewhere.
     XrAction trackpad[2]{}, trackpadForce[2]{}, squeezeForce[2]{};
+    XrAction dpad[4]{};   // Steam Frame only: up, down, left, right
+    XrAction bumper[2]{}; // Steam Frame only
     XrAction btnA = XR_NULL_HANDLE, btnB = XR_NULL_HANDLE, btnX = XR_NULL_HANDLE,
              btnY = XR_NULL_HANDLE, btnMenu = XR_NULL_HANDLE;
     XrSpace  handSpace[2]{};
@@ -619,6 +621,12 @@ public:
         if (GetBool(actions_.btnX)) b |= VRB_X;
         if (GetBool(actions_.btnY)) b |= VRB_Y;
         if (GetBool(actions_.btnMenu)) b |= VRB_Menu;
+        if (GetBool(actions_.dpad[0])) b |= VRB_DpadUp;
+        if (GetBool(actions_.dpad[1])) b |= VRB_DpadDown;
+        if (GetBool(actions_.dpad[2])) b |= VRB_DpadLeft;
+        if (GetBool(actions_.dpad[3])) b |= VRB_DpadRight;
+        if (GetBool(actions_.bumper[0])) b |= VRB_LBumper;
+        if (GetBool(actions_.bumper[1])) b |= VRB_RBumper;
         if (GetBool(actions_.stickClick[HandLeft]))  b |= VRB_LThumb;
         if (GetBool(actions_.stickClick[HandRight])) b |= VRB_RThumb;
         in.buttons = b;
@@ -779,6 +787,8 @@ private:
         if (haveTimeConv_) exts.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
         haveRefresh_ = has(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         if (haveRefresh_) exts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        haveFrame_ = has("XR_VALVE_frame_controller_interaction");
+        if (haveFrame_) exts.push_back("XR_VALVE_frame_controller_interaction");
         if (Cfg().vrXrDebug && has(XR_EXT_DEBUG_UTILS_EXTENSION_NAME)) exts.push_back(XR_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
         XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
@@ -891,9 +901,16 @@ private:
         if (!MakeAction(actions_.btnX, "btn_x", "X", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
         if (!MakeAction(actions_.btnY, "btn_y", "Y", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
         if (!MakeAction(actions_.btnMenu, "btn_menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
+        {
+            static const char* dn[4] = {"dpad_up", "dpad_down", "dpad_left", "dpad_right"};
+            for (int i = 0; i < 4; ++i) if (!MakeAction(actions_.dpad[i], dn[i], dn[i], XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
+            if (!MakeAction(actions_.bumper[0], "bumper_left", "bumper_left", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
+            if (!MakeAction(actions_.bumper[1], "bumper_right", "bumper_right", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
+        }
 
         SuggestTouch();
         SuggestIndex();
+        SuggestFrame();
         SuggestSimple();
 
         for (int h = 0; h < 2; ++h) {
@@ -963,6 +980,37 @@ private:
             {actions_.trackpadForce[1], Path("/user/hand/right/input/trackpad/force")},
             {actions_.squeezeForce[0], Path("/user/hand/left/input/squeeze/force")},
             {actions_.squeezeForce[1], Path("/user/hand/right/input/squeeze/force")},
+            {actions_.haptic[0], Path("/user/hand/left/output/haptic")},
+            {actions_.haptic[1], Path("/user/hand/right/output/haptic")},
+        });
+    }
+    // Steam Frame controllers (XR_VALVE_frame_controller_interaction). Right hand has a/b/x/y + menu, the left has
+    // a D-pad and view; both menu-type buttons feed the single Menu action.
+    void SuggestFrame() {
+        if (!haveFrame_) return;
+        Suggest("/interaction_profiles/valve/frame_controller_valve", {
+            {actions_.pose[0], Path("/user/hand/left/input/grip/pose")},
+            {actions_.pose[1], Path("/user/hand/right/input/grip/pose")},
+            {actions_.trigger[0], Path("/user/hand/left/input/trigger/value")},
+            {actions_.trigger[1], Path("/user/hand/right/input/trigger/value")},
+            {actions_.squeeze[0], Path("/user/hand/left/input/squeeze/value")},
+            {actions_.squeeze[1], Path("/user/hand/right/input/squeeze/value")},
+            {actions_.stick[0], Path("/user/hand/left/input/thumbstick")},
+            {actions_.stick[1], Path("/user/hand/right/input/thumbstick")},
+            {actions_.stickClick[0], Path("/user/hand/left/input/thumbstick/click")},
+            {actions_.stickClick[1], Path("/user/hand/right/input/thumbstick/click")},
+            {actions_.btnA, Path("/user/hand/right/input/a/click")},
+            {actions_.btnB, Path("/user/hand/right/input/b/click")},
+            {actions_.btnX, Path("/user/hand/right/input/x/click")},
+            {actions_.btnY, Path("/user/hand/right/input/y/click")},
+            {actions_.btnMenu, Path("/user/hand/left/input/view/click")},
+            {actions_.btnMenu, Path("/user/hand/right/input/menu/click")},
+            {actions_.dpad[0], Path("/user/hand/left/input/dpad_up/click")},
+            {actions_.dpad[1], Path("/user/hand/left/input/dpad_down/click")},
+            {actions_.dpad[2], Path("/user/hand/left/input/dpad_left/click")},
+            {actions_.dpad[3], Path("/user/hand/left/input/dpad_right/click")},
+            {actions_.bumper[0], Path("/user/hand/left/input/shoulder/click")},
+            {actions_.bumper[1], Path("/user/hand/right/input/shoulder/click")},
             {actions_.haptic[0], Path("/user/hand/left/output/haptic")},
             {actions_.haptic[1], Path("/user/hand/right/output/haptic")},
         });
@@ -1218,6 +1266,7 @@ private:
     ID3D12CommandQueue* queue_ = nullptr;
     bool bound_ = false, sessionRunning_ = false, frameBegun_ = false, haveTimeConv_ = false;
     bool haveRefresh_ = false;   // XR_FB_display_refresh_rate enabled on the instance
+    bool haveFrame_ = false;     // XR_VALVE_frame_controller_interaction enabled on the instance
     std::atomic<float> refreshHz_{0.f};   // the panel's refresh, 0 = unknown
     uint64_t lastAttach_ = 0;
     double   lastCensus_ = 0;
