@@ -80,6 +80,12 @@ bool GameERWorldDying();
 bool GameERApplySecondEyeCamera();
 // Content-probe experiment: rewrite all camera slots as the last camera pitched by N degrees.
 bool GameERDebugPitchCamera(float pitchDeg);
+// The perspective camera the renderer last read: 4x4 row-major (rows right, up, forward, position; game
+// space) and its Cam_Fov (radians, may be null). False before the world camera exists.
+bool GameERRenderCamera(float out[16], float* fov);
+// Single-frame stereo: the second eye's position minus the rendered eye's, game space (metres, world-scaled).
+// False when this frame stashed no second eye.
+bool GameERSecondEyeDelta(float out[3]);
 // The render camera's matrix+fov range (CSPersCam via FieldArea->GameRend), for the
 // CamWatch guard-page probe. Null until in-game.
 uint8_t* GameERCamWatchTarget(uint32_t* outLen);

@@ -16,7 +16,10 @@
 
 namespace ervr {
 
-enum class StereoMode { Off = 0, Cinema, DebugAlt, Full };
+//   Replay   - single-frame stereo: ONE engine pass per headset frame, drawn for the left eye; its recorded
+//              GPU work is executed again for the right eye with the camera constants patched on the GPU
+//              (replay_stereo.h). Both eyes from the same simulation instant, at one engine pass's CPU cost.
+enum class StereoMode { Off = 0, Cinema, DebugAlt, Full, Replay };
 
 void StereoInit();
 void StereoShutdown();
@@ -89,4 +92,7 @@ struct StereoStats {
     bool  asyncSubmit = false;    // [VR] AsyncSubmit live: xrWaitFrame runs on the XR thread, not the game's
 };
 StereoStats StereoGetStats();
+// StereoMode=replay with its XR thread running and the runtime showing the app (shouldRender): the frames
+// the game draws now will be replayed for the second eye.
+bool StereoReplayVisible();
 }

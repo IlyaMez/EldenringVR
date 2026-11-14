@@ -3,6 +3,16 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## Unreleased
+
+### Fixed
+* A crash about ten seconds after start, at the title screen (0xC0000005 in `dxgi.dll`, reported on 0.8.0 with
+  Virtual Desktop and a Radeon RX 7900 XT). The HUD layer's target search watched draws from every graphics device
+  in the game's process, including the D3D11 device the VR runtime creates, and once took its device from one of
+  them. When it asked that D3D11 device about the game's own D3D12 render targets, the call overwrote a target's
+  first field with zero, and the next search crashed on it. The search now reads only the game's D3D12 device and
+  its command lists. Untested in the headset: the crash has not been reproduced here.
+
 ## 0.8.0 (2026-11-12)
 
 The Weapon Workshop gives any weapon its own VR profile in the launcher; the headset gets a new frame every

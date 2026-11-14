@@ -46,6 +46,10 @@ each choice and the knobs in `ERVR.ini` that steer them. Players want the [READM
   Since 0.7.5 that second pass only draws: its keep sets hold no game state machine, character, damage, AI,
   event or menu group, and the talk scripts inside the world update are held to the first pass at their own
   entry (`pass2_interact.cpp`). See [What the second eye's pass runs](#what-the-second-eyes-pass-runs).
+  `StereoMode=replay` (single-frame stereo, `replay_stereo.cpp`) runs no second pass: every game command list is
+  mirrored into a shadow list as it is recorded, and at the present the frame's shadows are executed again after a
+  compute pass that moves the frame's camera constants to the right eye. The game's fence signals are held until
+  that replay is queued, and the XR session runs on a queue of its own so the runtime only ever takes finished frames.
 * **Input**: `XInputGetState/Ex/SetState/GetCapabilities` are detoured (MinHook) in `xinput9_1_0`, `xinput1_3`
   and `xinput1_4`. The virtual pad is merged with any real gamepad (buttons OR'd, largest stick wins). With no real
   pad, user 0 is reported as connected.
@@ -789,7 +793,9 @@ plug them in and check `[handaim]` lines in the log. Leave it off otherwise: it 
   other eye, so the CPU cost is ~1.8x a flat frame and the GPU cost about double (see "The frame each eye is
   cropped from"). Below the headset's refresh the runtime reprojects the missing frames; game speed is
   unaffected (the simulation consumes the measured frame time). Lower Resolution before blaming the headset;
-  `StereoMode=cinema` is the cheap fallback and always works.
+  `StereoMode=cinema` is the cheap fallback and always works. `StereoMode=replay` drops the second engine pass
+  (one pass's CPU cost) but not the second eye's GPU work: on a 5090 it holds 90 pairs/s at `GameResScale` 0.8
+  and is GPU-bound at 1.0.
 * Visual/comfort options live in `[VR]` (`RenderScale`, `WorldScale`, `FovDeg`, `IpdMm`, snap turn). In the
   headset, eleven of them and the body calibration are the game's System > ERVR Settings tab (exe 2.7.2.0 only); the rest are `ERVR.ini`
   and the launcher's Options tab, which hot-reload.

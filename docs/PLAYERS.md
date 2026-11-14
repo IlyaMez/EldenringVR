@@ -206,7 +206,10 @@ The launcher's Options tab has those and the other settings players change most.
 
 - **View** (`[VR] StereoMode`): *Full stereo* renders each eye; *Big screen* (`cinema`) shows the flat game
   on a screen in the headset, which is cheap and always works. Menus, loading screens and cutscenes use the big
-  screen in either mode.
+  screen in either mode. *Single-frame (beta)* (`replay`) runs the game once per headset frame and has the
+  graphics card draw that frame a second time for the other eye: about half full stereo's processor work, so a
+  steady 90 fps is in reach. The card still draws both eyes, so if new frames fall short of the refresh, lower
+  *Resolution*.
 - **Resolution** (`[VR] GameResScale`, 86% by default): the share of the headset's pixels the game renders.
   Lower it if the log warns about stereo pairs per second. The game renders a frame shaped like your view
   (`[VR] GameResShape=eye`), so 86% is sharper than 100% was in 0.6.5, for less GPU work.

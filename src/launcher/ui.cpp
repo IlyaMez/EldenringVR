@@ -2077,11 +2077,14 @@ void App::options(ImVec2 origin, ImVec2 size) {
     const float pick = S(170), gauge = S(170), flip = S(42);
 
     group(0, "Picture", [&] {
-        option("View", "Full stereo renders each eye; the big screen shows the flat game in the headset (cheap, "
-                       "always works, and what menus and loading screens use).",
+        option("View", "Full stereo runs the game twice a frame, once per eye. Single-frame (beta) runs it once and "
+                       "has the graphics card draw that frame again for the other eye: about half the processor "
+                       "work, so 90 fps is in reach if the card has room. The big screen shows the flat game in the "
+                       "headset (cheap, always works, and what menus and loading screens use).",
                pick, [&] {
                    choice("##stereo", "VR", "StereoMode", "full",
-                          {{"full", "Full stereo"}, {"cinema", "Big screen"}, {"off", "Off (flat)"}});
+                          {{"full", "Full stereo"}, {"replay", "Single-frame (beta)"}, {"cinema", "Big screen"},
+                           {"off", "Off (flat)"}});
                });
         option("Resolution", "The share of the headset's pixels the game renders. ERVR draws every frame twice: "
                              "lower it if the log warns about stereo pairs per second.",

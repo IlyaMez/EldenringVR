@@ -27,13 +27,29 @@ struct __declspec(uuid("6E9A1C40-0E4E-4C2F-9E11-6B4B2A7C51D2")) CmdState {
     rs::resource      rt{};      // resource behind render target 0, as the GAME bound it
     rs::resource_view dsv{};     // whatever depth target came with it, passed through
     bool              ours = false;   // our capture RTV is bound on this list right now
+    bool              foreign = false;   // not a D3D12 list: never watched (see NewState)
 };
+
+// Only D3D12 lists are watched. The VR runtime and overlays make D3D11 devices in the game's
+// process (VDXR and Meta Quest Link as their sessions start), and ReShade raises the same
+// bind and draw events for their contexts. Census entries from one of those are D3D11
+// resources, and a D3D11 list once set the device the census is read with. On 2026-11-12
+// (0.8.0, VDXR, Radeon 7900 XT) RelearnTarget asked the D3D11 device about the game's D3D12
+// targets: D3D11's GetType is vtable slot 7, which on an ID3D12Resource is GetDevice(riid,
+// ppv), and with ppv aliasing the resource the failed QueryInterface wrote null over its
+// vtable pointer. The next relearn crashed in ReShade at dxgi.dll+0x1248cb reading 0x38.
+CmdState* NewState(rs::command_list* cl) {
+    CmdState* st = cl->create_private_data<CmdState>();
+    st->foreign = cl->get_device()->get_api() != rs::device_api::d3d12;
+    return st;
+}
 
 CmdState* StateOf(rs::command_list* cl) {
     CmdState* st = cl->get_private_data<CmdState>();
     // ERVR registers as an add-on after the game is already running, so init_command_list
     // never fires for the lists that already exist; create on first sight instead.
-    return st ? st : cl->create_private_data<CmdState>();
+    if (!st) st = NewState(cl);
+    return st->foreign ? nullptr : st;
 }
 
 // ---- the capture target ----------------------------------------------------------------
@@ -305,7 +321,7 @@ void NoteDraw(rs::command_list* cl, CmdState* st, const DrawCall& dc) {
 
 // ---- ReShade callbacks -----------------------------------------------------------------
 
-void OnInitCmdList(rs::command_list* cl) { cl->create_private_data<CmdState>(); }
+void OnInitCmdList(rs::command_list* cl) { NewState(cl); }
 void OnDestroyCmdList(rs::command_list* cl) { cl->destroy_private_data<CmdState>(); }
 void OnResetCmdList(rs::command_list* cl) {
     CmdState* st = StateOf(cl);
@@ -318,8 +334,9 @@ void OnBindRenderTargets(rs::command_list* cl, uint32_t count, const rs::resourc
     if (!st) return;
     st->ours = false;    // the game just took its own target back
     st->dsv = dsv;
+    // g_dev is NOT taken from here: it is the swapchain's device, set where the back buffers
+    // are learned. Any list's device used to land in it, a foreign one included (NewState).
     rs::device* dev = cl->get_device();
-    g_dev.store(dev, std::memory_order_relaxed);
     st->rt = (count && rtvs && rtvs[0].handle) ? dev->get_resource_from_view(rtvs[0])
                                                : rs::resource{};
 }
@@ -458,7 +475,8 @@ void ProbeLog() {
 // than one draw and is in a format a UI can be on (HudPickUiTarget). A back buffer is
 // accepted as readily as an offscreen one, so this can walk back as well as forward.
 void RelearnTarget(rs::device* dev) {
-    if (!dev) return;
+    // The census holds D3D12 handles only; another API's get_resource_desc on one corrupts it.
+    if (!dev || dev->get_api() != rs::device_api::d3d12) return;
     const int want = FirstDrawCfg() + 1 > 2 ? FirstDrawCfg() + 1 : 2;
     HudRun runs[kMaxRuns];
     for (int i = 0; i < g_runCount; ++i) {

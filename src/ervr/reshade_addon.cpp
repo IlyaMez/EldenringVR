@@ -4,6 +4,7 @@
 #include "frame_probe.h"
 #include "hud.h"
 #include "patches_er.h"
+#include "replay_stereo.h"
 #include "stereo.h"
 #include "vr_backend.h"
 #include "log.h"
@@ -11,6 +12,9 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <atomic>
+#include <cstdio>
+#include <mutex>
+#include <unordered_set>
 #include <reshade.hpp>
 
 namespace ervr {
@@ -80,6 +84,7 @@ void OnReShadePresent(reshade::api::effect_runtime* runtime) {
 }
 
 void OnFinishPresent(reshade::api::command_queue*, reshade::api::swapchain* sc) {
+    ReplayStereoPresentScope(false);   // opened in OnPresent: ReShade's work and the real Present are over
     if (!t_presentEnd || sc->get_device()->get_api() != reshade::api::device_api::d3d12) return;
     const long long us = QpcToUs(QpcNow() - t_presentEnd);
     const int pass = t_presentPass;
@@ -102,6 +107,7 @@ void OnInitDevice(reshade::api::device* dev) {
     auto* native = reinterpret_cast<ID3D12Device*>(dev->get_native());
     g_device.store(native);
     LOGI("[reshade] D3D12 device %p", (void*)native);
+    ReplayStereoOnInitDevice(native);
 }
 
 void OnDestroyDevice(reshade::api::device* dev) {
@@ -153,6 +159,18 @@ bool FirstSwapchainSizeImpl(uint32_t& w, uint32_t& h) {
     w = g_firstW.load(std::memory_order_relaxed);
     h = fh;
     return true;
+}
+
+void OnInitResource(reshade::api::device* dev, const reshade::api::resource_desc& desc,
+                    const reshade::api::subresource_data*, reshade::api::resource_usage, reshade::api::resource res) {
+    if (dev->get_api() != reshade::api::device_api::d3d12) return;
+    ReplayStereoOnInitResource(reinterpret_cast<ID3D12Resource*>(res.handle), (int)desc.heap,
+                               desc.type == reshade::api::resource_type::buffer);
+}
+
+void OnDestroyResource(reshade::api::device* dev, reshade::api::resource res) {
+    if (dev->get_api() != reshade::api::device_api::d3d12) return;
+    ReplayStereoOnDestroyResource(reinterpret_cast<ID3D12Resource*>(res.handle));
 }
 
 void OnDestroySwapchain(reshade::api::swapchain* sc, bool resize) {
@@ -232,6 +250,10 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* sc,
                      f.width, f.height, (unsigned)f.format);
         }
     }
+    // The present scope opens first: lists ERVR creates or records from here on (the replay's own, at the bench
+    // levels inside ReplayStereoOnPresent) are ERVR's, never shadowed as the game's.
+    ReplayStereoPresentScope(true);
+    ReplayStereoOnPresent(f);
     // Before the stereo path consumes the capture: optionally paint the panel onto the
     // game's own frame, so the monitor shows what the headset gets ([HUD] MirrorPanel).
     HudMirrorPanel(f);
@@ -240,6 +262,101 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* sc,
     // next one, so a pass that draws no UI reports "no HUD" instead of re-submitting a
     // stale image. Cheap no-op when the HUD layer is off.
     HudOnPresent(sc);
+    ReplayStereoPresentEnd(f);   // single-frame stereo: a frame the stereo layer did not replay is released
+    // The present scope stays open until finish_present: ReShade's own work and the real Present follow.
+}
+
+// ---- shader dump (bench: ERVR_SHADER_DUMP set in the environment) ------------------------------------------------------
+// Every pixel and compute shader the game creates, written once by the FNV-1a 64 hash of its bytecode to shaderdump\ next
+// to the ini, and shaderdump\pipelines.csv: pipeline, layout, vertex/pixel/compute shader hashes. Offline: dxc -dumpbin.
+std::mutex g_sdMtx;
+std::unordered_set<uint64_t> g_sdSeen;
+FILE* g_sdCsv = nullptr;
+std::wstring g_sdDir;
+bool g_sdOn = false;
+
+uint64_t Fnv64(const void* p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    const auto* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+void OnInitPipeline(reshade::api::device*, reshade::api::pipeline_layout layout, uint32_t n,
+                    const reshade::api::pipeline_subobject* so, reshade::api::pipeline pipe) {
+    using T = reshade::api::pipeline_subobject_type;
+    uint64_t hs[3] = {};   // vertex, pixel, compute
+    for (uint32_t i = 0; i < n && so; ++i) {
+        const int k = so[i].type == T::vertex_shader ? 0 : so[i].type == T::pixel_shader ? 1 : so[i].type == T::compute_shader ? 2 : -1;
+        if (k < 0 || !so[i].data || !so[i].count) continue;
+        const auto* sd = static_cast<const reshade::api::shader_desc*>(so[i].data);
+        if (!sd->code || !sd->code_size) continue;
+        hs[k] = Fnv64(sd->code, sd->code_size);
+        if (k == 0) continue;   // vertex shaders: hash only
+        std::lock_guard<std::mutex> g(g_sdMtx);
+        if (!g_sdSeen.insert(hs[k]).second) continue;
+        wchar_t name[64];
+        swprintf(name, 64, L"%016llx.%s", (unsigned long long)hs[k], k == 1 ? L"ps" : L"cs");
+        if (FILE* f = _wfopen((g_sdDir + name).c_str(), L"wb")) { fwrite(sd->code, 1, sd->code_size, f); fclose(f); }
+    }
+    std::lock_guard<std::mutex> g(g_sdMtx);
+    if (g_sdCsv) {
+        fprintf(g_sdCsv, "%llx,%llx,%016llx,%016llx,%016llx\n", (unsigned long long)pipe.handle,
+                (unsigned long long)layout.handle, (unsigned long long)hs[0], (unsigned long long)hs[1], (unsigned long long)hs[2]);
+        fflush(g_sdCsv);
+    }
+}
+
+// Root signatures, for the pass log's tables: layouts.csv - layout, parameter, kind (0 table, 1 constants, 2+ root
+// view), then per range: offset in the table, register, space, count, descriptor type (ReShade's numbering).
+FILE* g_sdLayouts = nullptr;
+void OnInitPipelineLayout(reshade::api::device*, uint32_t n, const reshade::api::pipeline_layout_param* params,
+                          reshade::api::pipeline_layout layout) {
+    using P = reshade::api::pipeline_layout_param_type;
+    std::lock_guard<std::mutex> g(g_sdMtx);
+    if (!g_sdLayouts || !params) return;
+    for (uint32_t i = 0; i < n; ++i) {
+        const auto& p = params[i];
+        fprintf(g_sdLayouts, "%llx,%u,%u", (unsigned long long)layout.handle, i, (unsigned)p.type);
+        if (p.type == P::push_constants) {
+            fprintf(g_sdLayouts, ",b%u space %u x%u", p.push_constants.dx_register_index, p.push_constants.dx_register_space,
+                    p.push_constants.count);
+        } else if (p.type == P::push_descriptors) {
+            fprintf(g_sdLayouts, ",reg %u space %u type %u", p.push_descriptors.dx_register_index,
+                    p.push_descriptors.dx_register_space, (unsigned)p.push_descriptors.type);
+        } else if (p.type == P::descriptor_table || p.type == P::descriptor_table_with_flags ||
+                   p.type == P::push_descriptors_with_ranges || p.type == P::push_descriptors_with_ranges_and_flags) {
+            const bool flags = p.type == P::descriptor_table_with_flags || p.type == P::push_descriptors_with_ranges_and_flags;
+            const uint32_t cnt = flags ? p.descriptor_table_with_flags.count : p.descriptor_table.count;
+            for (uint32_t r = 0; r < cnt; ++r) {
+                const reshade::api::descriptor_range& d =
+                    flags ? p.descriptor_table_with_flags.ranges[r] : p.descriptor_table.ranges[r];
+                fprintf(g_sdLayouts, ",[at %u reg %u space %u x%u type %u]", d.binding, d.dx_register_index, d.dx_register_space,
+                        d.count, (unsigned)d.type);
+            }
+        }
+        fputc('\n', g_sdLayouts);
+    }
+    fflush(g_sdLayouts);
+}
+
+bool g_sdLayoutsOnly = false;   // ERVR_SHADER_DUMP=layouts: root signatures only (shader events slow the boot down a lot)
+
+void ShaderDumpStart() {
+    wchar_t mode[16] = {};
+    if (GetEnvironmentVariableW(L"ERVR_SHADER_DUMP", mode, 16) == 0) return;
+    g_sdLayoutsOnly = _wcsicmp(mode, L"layouts") == 0;
+    std::wstring dir = Cfg().iniPath;
+    const size_t sl = dir.find_last_of(L"\\/");
+    dir = (sl == std::wstring::npos ? std::wstring() : dir.substr(0, sl + 1)) + L"shaderdump\\";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    g_sdDir = dir;
+    g_sdCsv = _wfopen((dir + L"pipelines.csv").c_str(), L"a");
+    g_sdLayouts = _wfopen((dir + L"layouts.csv").c_str(), L"a");
+    if (!g_sdLayoutsOnly) reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
+    reshade::register_event<reshade::addon_event::init_pipeline_layout>(&OnInitPipelineLayout);
+    g_sdOn = true;
+    LOGI("[reshade] shader dump on: pixel and compute shaders -> shaderdump\\");
 }
 
 } // namespace
@@ -258,7 +375,12 @@ bool ReShadeAddonInstall(void* selfModule) {
     reshade::register_event<reshade::addon_event::present>(&OnPresent);
     reshade::register_event<reshade::addon_event::finish_present>(&OnFinishPresent);
     reshade::register_event<reshade::addon_event::reshade_present>(&OnReShadePresent);
+    if (Cfg().replayCensus || ReplayStereoLevel() >= 2) {   // single-frame stereo groundwork: CPU-visible buffers by GPU address
+        reshade::register_event<reshade::addon_event::init_resource>(&OnInitResource);
+        reshade::register_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
+    }
     HudRegisterEvents();
+    ShaderDumpStart();
     g_eventsUp.store(true);
     return true;
 }
@@ -277,7 +399,15 @@ void ReShadeAddonShutdown() {
         reshade::unregister_event<reshade::addon_event::present>(&OnPresent);
         reshade::unregister_event<reshade::addon_event::finish_present>(&OnFinishPresent);
         reshade::unregister_event<reshade::addon_event::reshade_present>(&OnReShadePresent);
+        if (Cfg().replayCensus || ReplayStereoLevel() >= 2) {
+            reshade::unregister_event<reshade::addon_event::init_resource>(&OnInitResource);
+            reshade::unregister_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
+        }
         HudUnregisterEvents();
+        if (g_sdOn) {
+            if (!g_sdLayoutsOnly) reshade::unregister_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
+            reshade::unregister_event<reshade::addon_event::init_pipeline_layout>(&OnInitPipelineLayout);
+        }
     }
     reshade::unregister_addon(g_self);
     LOGI("[reshade] add-on unregistered");

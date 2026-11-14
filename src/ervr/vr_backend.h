@@ -111,6 +111,12 @@ struct VRSubmitLayer {
     bool  hudRecenter = false;      // one-shot: drop the anchor where the head is looking now
 
     VROverlayQuad overlays[OverlayCount];
+
+    // Every image this layer references has already FINISHED on the GPU (its producer saw the fence). Only
+    // meaningful for a session bound with its own submit queue (BindGraphics ownSubmitQueue): the runtime syncs
+    // its compositor to the bound queue, so a finished layer is submitted with nothing to wait on; an unfinished
+    // one first has the submit queue wait for everything the game's queue holds - the plain binding's behaviour.
+    bool gpuComplete = false;
 };
 
 class IVRBackend {
@@ -125,8 +131,13 @@ public:
 
     // -- graphics binding (render thread, once the D3D12 device is known) --
     // Creates the session and swapchains. Safe to call repeatedly; a no-op once bound.
-    virtual bool BindGraphics(ID3D12Device* device, ID3D12CommandQueue* queue) = 0;
+    // ownSubmitQueue: bind the session to a queue of our own on `device` rather than to `queue`. At every
+    // xrEndFrame the runtime fences the BOUND queue and makes its compositor wait for that fence (VDXR, 2026-11-12)
+    // - on the game's queue that is all the work the game has queued by then, the next frame's included, so the
+    // headset waits on frames it is not even showing. `queue` stays the game's: unfinished layers bridge to it.
+    virtual bool BindGraphics(ID3D12Device* device, ID3D12CommandQueue* queue, bool ownSubmitQueue = false) = 0;
     virtual bool GraphicsBound() const = 0;
+    virtual bool HasOwnSubmitQueue() const { return false; }
     // The game is about to destroy this D3D12 device. A session bound to it must end now,
     // while the device and its queue still exist; BindGraphics re-creates it on the next one.
     virtual void UnbindGraphics(ID3D12Device* device) { (void)device; }
@@ -173,6 +184,12 @@ public:
     virtual void ReleaseHudImage() = 0;
     virtual ID3D12Resource* AcquireOverlayImage(int which) = 0;
     virtual void ReleaseOverlayImage(int which) = 0;
+    // While on, Release*Image keeps the image acquired and queues the release; FlushDeferredReleases performs
+    // them. A producer whose images are written on a queue the session is not bound to releases them only once
+    // its own fence says they are finished - a released image is what the next xrEndFrame shows. An image
+    // still held makes the next Acquire* of that swapchain fail rather than break the runtime's call order.
+    virtual void SetDeferredRelease(bool on) { (void)on; }
+    virtual void FlushDeferredReleases() {}
     virtual bool EndFrame(const VRSubmitLayer& layer) = 0;
 
     // -- pose/input plane (worker thread; unchanged, consumers untouched) --

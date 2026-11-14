@@ -24,6 +24,7 @@
 #include "stereo.h"
 #include "rtti.h"
 #include "reshade_addon.h"
+#include "replay_stereo.h"
 #include "sample_profiler.h"
 #include "config.h"
 #include "log.h"
@@ -1809,6 +1810,7 @@ uint64_t __fastcall Hook_QueueTasks(void* self, void* a, void* b) {
     // report with the camera the renderer really used. Must precede DoSecondPass, which
     // stashes pass 2's own pending report.
     GameERFinalizePassReport();
+    ReplayStereoFrameEnd();   // single-frame stereo: the camera this frame was drawn from
     GameERAfterPass1();   // on horseback: the rider as drawn vs the final camera ([ride] drawn)
     if (g_winTrace.load(std::memory_order_relaxed)) {
         LARGE_INTEGER tm; QueryPerformanceCounter(&tm);
@@ -2357,7 +2359,8 @@ void FrameProbeTick() {
     // Alternate-eye stereo needs the same frame hook - each eye's report is pushed with the
     // camera the renderer really used, at the end of queue_tasks - but never a second pass.
     // Without it no report ever reached the queue and the mode stayed flat (2026-11-03).
-    const bool altStereo = Cfg().vrStereoMode == "debugalt";
+    const bool altStereo = Cfg().vrStereoMode == "debugalt" ||
+                           Cfg().vrStereoMode == "replay";   // single-frame stereo: the same frame hook, no pump
     if (!Cfg().m2TaskProbe && !fullStereo && !altStereo && !Cfg().m2ForcePass2) return;
     if (g_started.exchange(true)) return;
     // Its OWN thread, deliberately. This can scan a lot; the worker thread it used to run on

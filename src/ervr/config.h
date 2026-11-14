@@ -21,7 +21,9 @@ struct Config {
     int  pollHz = 250;
 
     // [VR]  ERVR's own OpenXR session + stereo rendering (ReShade add-on supplies D3D12).
-    std::string vrStereoMode = "full";     // off | cinema (flat game on a head-locked quad) | debugalt | full
+    // off | cinema (flat game on a head-locked quad) | debugalt | full | replay (single-frame stereo: one engine
+    // pass per headset frame, the right eye re-drawn on the GPU from the left eye's recorded commands)
+    std::string vrStereoMode = "full";
     // Full stereo: the OpenXR frame loop (xrWaitFrame/BeginFrame/EndFrame) runs on its own thread and submits
     // the newest finished stereo pair every headset frame; the game's presents only blit and publish. Without
     // it the game thread waits in xrWaitFrame, so a pair 1 ms over the frame waits for the NEXT slot and the
@@ -292,6 +294,8 @@ struct Config {
     // rotation turns a landmark's on-screen displacement into a direct px/deg measurement.
     // 0 = off. Hot-reloads.
     float fpForcePitchDeg = 0.f;
+    // Flat harness: roll the written camera by this many degrees (a tilted head, without one). 0 = off.
+    float fpForceRollDeg = 0.f;
 
     // [Combat]  physical melee: swings invoke the game's AttackBehavior event instead of pressing R1/R2
     bool  combatEnabled = true;
@@ -911,6 +915,43 @@ struct Config {
     bool  profileGroups = false;
     // Sampling profiler (sample_profiler.h): the engine functions each pass spends its time in. One core.
     bool  profileSample = false;
+    // Single-frame stereo by replay, stage 1 (replay_stereo.h): hook the native D3D12 queue and log one window
+    // of the game's submissions (command lists, fence signals/waits, CPU fence waits, list/allocator resets)
+    // against its presents, 25 s after the player is in the world. Read at launch.
+    bool  replayCensus = false;
+    // Single-frame stereo by replay (replay_stereo.h), in development: 1 = every game command list is recorded
+    // again into a shadow list and the frame's shadows are executed a second time before the present, camera
+    // unchanged (the mechanism test: the second run must reproduce the frame). Read at launch.
+    int   replayStereo = 0;
+    float replayEyeOffset = 0.064f;   // ReplayStereo=2 experiment: metres the replay's camera moves along its right axis
+    // Seconds after the player is in the world at which one frame's constants are searched for every 4x4 matrix
+    // built from the camera (inverse view, inverse view-projection, either storage order) - what the replay's
+    // camera patch must also move. One-shot, ~0.1-0.3 s of CPU reads. 0 = off. Read at launch.
+    float replayMatrixCensus = 0.f;
+    // Bench levels (ReplayStereo=3, flat): seconds per phase of a repeating plan from the moment the player is in the
+    // world - 0: replay without an eye offset, the game's own frame on screen; 1: with ReplayEyeOffset, the game's own
+    // frame on screen (the replay still runs, so anything it leaves behind for the next frame shows); 2: with the
+    // offset, the replay's frame on screen. 0 = off (offset always, replay shown). Read at launch.
+    float replayBenchPlan = 0.f;
+    // Seconds after the player is in the world at which 120 frames of depth-target writes are counted: which depth
+    // buffers (shadow cascades among them) the game draws every frame and which it keeps from an earlier frame.
+    // 0 = off. Read at launch.
+    float replayDepthCensus = 0.f;
+    // Bench levels: seconds after the player is in the world at which three back buffers are saved next to the ini -
+    // cap-1-game.ppm (the game's frame), cap-2-replay.ppm (its replay moved by ReplayEyeOffset), cap-3-game-moved.ppm
+    // (a few frames later, the game's own frame with its camera moved by the same offset). 2 and 3 show one view: what
+    // differs is what the camera patch misses. 0 = off. Read at launch.
+    float replayBenchCapture = 0.f;
+    // Bench levels: the replay leaves the sun's shadow map as the game drew it (its draws and clears are not recorded
+    // again) - the shadow map is camera-independent. Read at launch.
+    bool  replaySkipShadowMap = false;
+    // Bench capture: the capture frame is replayed twice (see ReplayAtPresent) - read-before-write state shows up. Read at launch.
+    bool  replayTwice = false;
+    // Bench: camera-patch rules switched off, a bit each (1 view rows, 2 inverse-view rows, 4 positions, 8 column-stored view
+    // translations, 16 inverse view-projections, 32 view-space twins, 64 view-space bases frame-wide). Read at launch.
+    int   replayRulesOff = 0;
+    int   replayPosSizesOff = 0;   // bench bisection: block-size classes whose camera positions stay (see kPatchHLSL SizeClass)
+    float replayFoldGain = 1.f;   // bench probe: the view-space folds moved this many times over (1 = the right amount)
     bool  taskQueueProbe = false;     // hook CSTask::queue_tasks: caller stack, thread, synchronicity
     bool  taskDumpLists = false;      // dump every group's registered tasks with RTTI names (needs TaskQueueProbe)
     bool  taskDoublePumpTest = false; // A/B: run a draw-only second engine frame per frame (needs TaskQueueProbe)

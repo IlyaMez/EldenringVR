@@ -139,12 +139,21 @@ struct Swap {
     uint32_t w = 0, h = 0;
     int64_t  format = 0;
     uint32_t acquired = UINT32_MAX;
+    bool     releasePending = false;   // released while releases are deferred: still acquired until the flush
+    // An image has been released since the swapchain was (re)created. A layer naming a swapchain with none fails
+    // the whole xrEndFrame; with deferred releases a rebuilt swapchain can sit a frame or two without one.
+    bool     everReleased = false;
 
     void Destroy() {
         if (handle != XR_NULL_HANDLE) xrDestroySwapchain(handle);
         handle = XR_NULL_HANDLE; images.clear(); acquired = UINT32_MAX; w = h = 0;
+        releasePending = false;
+        everReleased = false;
     }
+    bool Showable() const { return handle != XR_NULL_HANDLE && everReleased; }
 };
+
+std::atomic<long> g_bridgedFrames{0};   // xrEndFrames that had the own submit queue wait on the game's queue
 
 // A quad's lazy world anchor. World-locked content is what the compositor can reproject
 // perfectly at any submit rate; view-locked content has to move WITH the head between
@@ -198,7 +207,7 @@ public:
     }
 
     // ---- graphics binding: creates the session, spaces, actions, eye swapchains ----
-    bool BindGraphics(ID3D12Device* device, ID3D12CommandQueue* queue) override {
+    bool BindGraphics(ID3D12Device* device, ID3D12CommandQueue* queue, bool ownSubmitQueue) override {
         std::lock_guard<std::recursive_mutex> g(g_mtx);
         if (bound_) return true;
         if (!IsReady() || !device || !queue) return false;
@@ -215,14 +224,37 @@ public:
             LOGW("[xr] runtime prefers adapter LUID %08lx:%08lx but the game renders on %08lx:%08lx; "
                  "submission may be cross-adapter (slow)", want.HighPart, want.LowPart, have.HighPart, have.LowPart);
 
+        // The runtime syncs its compositor to the bound queue at every xrEndFrame. Our own queue (high priority, so
+        // its small copies are not stuck behind the game's frame) carries nothing the headset has to wait for.
+        ID3D12CommandQueue* bindQueue = queue;
+        if (ownSubmitQueue && !submitQueue_) {
+            D3D12_COMMAND_QUEUE_DESC qd{};
+            qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            qd.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+            ID3D12CommandQueue* q = nullptr;
+            ID3D12Fence* fe = nullptr;
+            if (SUCCEEDED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) &&
+                SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fe)))) {
+                q->SetName(L"ERVR XR submit");
+                submitQueue_ = q;
+                bridgeFence_ = fe;
+                bridgeVal_ = 0;
+            } else {
+                if (q) q->Release();
+                if (fe) fe->Release();
+                LOGW("[xr] could not create a submit queue of our own - binding the game's queue");
+            }
+        }
+        if (submitQueue_) bindQueue = submitQueue_;
         XrGraphicsBindingD3D12KHR bind{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
         bind.device = device;
-        bind.queue = queue;
+        bind.queue = bindQueue;
         XrSessionCreateInfo sci{XR_TYPE_SESSION_CREATE_INFO};
         sci.next = &bind;
         sci.systemId = systemId_;
         XRC(xrCreateSession(instance_, &sci, &session_), "xrCreateSession");
-        LOGI("[xr] session created on device %p queue %p", (void*)device, (void*)queue);
+        LOGI("[xr] session created on device %p queue %p%s", (void*)device, (void*)bindQueue,
+             submitQueue_ ? " (our own submit queue: the runtime syncs to it, never to the game's queue)" : "");
 
         if (!CreateSpaces()) return false;
         if (!CreateActions()) return false;
@@ -231,6 +263,7 @@ public:
         return true;
     }
     bool GraphicsBound() const override { return bound_; }
+    bool HasOwnSubmitQueue() const override { return submitQueue_ != nullptr; }
 
     void UnbindGraphics(ID3D12Device* device) override {
         std::lock_guard<std::recursive_mutex> g(g_mtx);
@@ -403,6 +436,27 @@ public:
     }
     void ReleaseOverlayImage(int which) override { if (which >= 0 && which < OverlayCount) ReleaseTo(overlays_[which]); }
 
+    void SetDeferredRelease(bool on) override {
+        std::lock_guard<std::recursive_mutex> g(g_mtx);
+        deferRelease_ = on;
+        if (!on) FlushDeferredReleases();
+    }
+    void FlushDeferredReleases() override {
+        std::lock_guard<std::recursive_mutex> g(g_mtx);
+        auto flush = [](Swap& s) {
+            if (!s.releasePending) return;
+            s.releasePending = false;
+            if (s.handle == XR_NULL_HANDLE || s.acquired == UINT32_MAX) return;
+            XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+            if (XR_SUCCEEDED(xrReleaseSwapchainImage(s.handle, &ri))) s.everReleased = true;
+            s.acquired = UINT32_MAX;
+        };
+        for (auto& e : eyes_) flush(e);
+        flush(quad_);
+        flush(hud_);
+        for (auto& o : overlays_) flush(o);
+    }
+
     // Places a quad layer in space.
     //
     // Body/World locks put the quad in the app (stage) space and re-place it only when the
@@ -485,7 +539,7 @@ public:
         const XrCompositionLayerBaseHeader* layers[3 + OverlayCount]{};
         uint32_t count = 0;
 
-        if (layer.projectionValid && eyes_[0].handle != XR_NULL_HANDLE) {
+        if (layer.projectionValid && eyes_[0].Showable() && eyes_[1].Showable()) {
             for (int i = 0; i < 2; ++i) {
                 pv[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
                 pv[i].pose = FromPose(layer.views[i].pose);
@@ -500,7 +554,7 @@ public:
             proj.views = pv;
             layers[count++] = (const XrCompositionLayerBaseHeader*)&proj;
         }
-        if (layer.quadValid && quad_.handle != XR_NULL_HANDLE) {
+        if (layer.quadValid && quad_.Showable()) {
             const float aspect = quad_.h ? (float)quad_.w / (float)quad_.h : 1.777f;
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = quad_.handle;
@@ -513,7 +567,7 @@ public:
                       41.f, 0.5f, 0.f, 0.f, 0.f, false);
             layers[count++] = (const XrCompositionLayerBaseHeader*)&quad;
         }
-        if (layer.hudValid && hud_.handle != XR_NULL_HANDLE) {
+        if (layer.hudValid && hud_.Showable()) {
             const float aspect = hud_.h ? (float)hud_.w / (float)hud_.h : 1.f;
             hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             hudQuad.subImage.swapchain = hud_.handle;
@@ -534,7 +588,7 @@ public:
         // The overlays carry their own stage-space pose: they belong to the hands, not the view.
         for (int i = 0; i < OverlayCount; ++i) {
             const VROverlayQuad& o = layer.overlays[i];
-            if (!o.valid || overlays_[i].handle == XR_NULL_HANDLE || o.widthM <= 0.f || o.heightM <= 0.f) continue;
+            if (!o.valid || !overlays_[i].Showable() || o.widthM <= 0.f || o.heightM <= 0.f) continue;
             if (maxLayers_ && count >= maxLayers_) break;   // over the runtime's limit xrEndFrame would refuse the whole frame
             XrCompositionLayerQuad& q = overlayQuad[i];
             q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -549,6 +603,15 @@ public:
             layers[count++] = (const XrCompositionLayerBaseHeader*)&q;
         }
 
+        // On our own submit queue the runtime only syncs to work we put there. A layer not known to be finished
+        // (written on the game's queue moments ago) makes that queue wait for everything the game's queue holds
+        // first - exactly what binding the game's queue did.
+        if (submitQueue_ && queue_ && count && !layer.gpuComplete &&
+            SUCCEEDED(queue_->Signal(bridgeFence_, ++bridgeVal_))) {
+            submitQueue_->Wait(bridgeFence_, bridgeVal_);
+            g_bridgedFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+
         XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};
         ei.displayTime = displayTime_.load();
         ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -560,11 +623,16 @@ public:
         g_clkEnd.Add(e1 - e0);
         static double s_clkLog = 0;
         if (e1 - s_clkLog > 5000.0) {
-            if (s_clkLog > 0)
+            if (s_clkLog > 0) {
+                char own[96] = "";
+                if (submitQueue_)
+                    snprintf(own, sizeof own, " | own submit queue, %ld frames bridged to the game's queue",
+                             g_bridgedFrames.exchange(0));
                 LOGD("[xr] 5s runtime waits ms avg/max: xrBeginFrame %.2f/%.2f, xrEndFrame %.2f/%.2f, "
-                     "swapchain image %.2f/%.2f (%ld frames, %ld images)",
+                     "swapchain image %.2f/%.2f (%ld frames, %ld images)%s",
                      g_clkBegin.Avg(), g_clkBegin.maxMs, g_clkEnd.Avg(), g_clkEnd.maxMs,
-                     g_clkImage.Avg(), g_clkImage.maxMs, g_clkEnd.n, g_clkImage.n);
+                     g_clkImage.Avg(), g_clkImage.maxMs, g_clkEnd.n, g_clkImage.n, own);
+            }
             s_clkLog = e1;
             g_clkBegin = g_clkEnd = g_clkImage = XrCallClock{};
         }
@@ -1029,9 +1097,11 @@ private:
     void ReleaseTo(Swap& s) {
         std::lock_guard<std::recursive_mutex> g(g_mtx);
         if (s.handle == XR_NULL_HANDLE || s.acquired == UINT32_MAX) return;
+        if (deferRelease_) { s.releasePending = true; return; }
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xrReleaseSwapchainImage(s.handle, &ri);
+        if (XR_SUCCEEDED(xrReleaseSwapchainImage(s.handle, &ri))) s.everReleased = true;
         s.acquired = UINT32_MAX;
+        s.releasePending = false;
     }
 
     XrTime SampleTime() {
@@ -1193,6 +1263,10 @@ private:
         if (appSpace_ != XR_NULL_HANDLE)  { xrDestroySpace(appSpace_);  appSpace_ = XR_NULL_HANDLE; }
         if (viewSpace_ != XR_NULL_HANDLE) { xrDestroySpace(viewSpace_); viewSpace_ = XR_NULL_HANDLE; }
         if (session_ != XR_NULL_HANDLE)   { xrDestroySession(session_); session_ = XR_NULL_HANDLE; }
+        // The runtime held the submit queue for the session's lifetime: only now can it go.
+        if (submitQueue_) { submitQueue_->Release(); submitQueue_ = nullptr; }
+        if (bridgeFence_) { bridgeFence_->Release(); bridgeFence_ = nullptr; }
+        deferRelease_ = false;
         sessionRunning_ = false;
         frameBegun_ = false;
         bound_ = false;
@@ -1215,7 +1289,11 @@ private:
     int64_t     eyeFormat_ = 0;
     Actions     actions_;
     ID3D12Device* device_ = nullptr;
-    ID3D12CommandQueue* queue_ = nullptr;
+    ID3D12CommandQueue* queue_ = nullptr;          // the game's queue
+    ID3D12CommandQueue* submitQueue_ = nullptr;    // BindGraphics ownSubmitQueue: the queue the session is bound to
+    ID3D12Fence* bridgeFence_ = nullptr;           // game queue -> submit queue, for layers not known finished
+    uint64_t bridgeVal_ = 0;
+    bool deferRelease_ = false;                    // SetDeferredRelease
     bool bound_ = false, sessionRunning_ = false, frameBegun_ = false, haveTimeConv_ = false;
     bool haveRefresh_ = false;   // XR_FB_display_refresh_rate enabled on the instance
     std::atomic<float> refreshHz_{0.f};   // the panel's refresh, 0 = unknown

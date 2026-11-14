@@ -28,6 +28,7 @@
 #include "params_er.h"
 #include "frame_probe.h"
 #include "stereo.h"
+#include "replay_stereo.h"
 #include "belt.h"
 #include "body_calibration.h"
 #include "body_calibration_logic.h"
@@ -1807,6 +1808,7 @@ struct SecondEyeStash {
     Vec3  r, u, fw;              // fallback basis when !haveHeadBasis
     Vec3  posBase;               // the head-centre eye position before any eye offset
     Vec3  offset;                // other eye, head-frame, game convention
+    Vec3  firstOffset;           // the eye this frame renders (eye 0), head-frame - single-frame stereo's baseline
     Quat  rot;                   // other eye's cant
     int   eye = 1;
     uint64_t pair = 0;
@@ -1892,6 +1894,7 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
         // Flat harness (no headset): ForcePitchDeg tilts every write of the view, positive = down - a look at your
         // own body and Torrent's neck from the saddle.
         if (!f.headValid && c.fpForcePitchDeg != 0.f) qHead = (qHead * Quat::AxisAngle({1.f, 0.f, 0.f}, Deg2Rad(c.fpForcePitchDeg))).Normalized();
+        if (!f.headValid && c.fpForceRollDeg != 0.f) qHead = (qHead * Quat::AxisAngle({0.f, 0.f, 1.f}, Deg2Rad(c.fpForceRollDeg))).Normalized();
         haveHeadBasis = true;
         Quat q = stereo ? qHead * el.req.rot : qHead;   // per-eye cant; identity on most headsets
         fw = q.Rotate({0, 0, 1}); r = q.Rotate({1, 0, 0}); u = q.Rotate({0, 1, 0});
@@ -1915,6 +1918,10 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
         const Vec3& o = el.req.offset;
         pos = pos + (haveHeadBasis ? qHead.Rotate(o) : (r * o.x + u * o.y + fw * o.z));
     }
+    // Replay bench capture ([Experimental] ReplayBenchCapture): the game's own frame drawn from where the replay put
+    // the second eye, to compare the two.
+    if (const float shift = ReplayStereoBenchCameraShift())
+        pos = pos + (ReplayStereoBenchShiftSkew() ? (r * 0.8f + u * 0.36f + fw * 0.48f) : r) * shift;
 
     uint8_t* pcs[4]; int npc = AllPersCams(pcs);
     for (int i = 0; i < npc; ++i) WriteCamMatrix(pcs[i] + off::Cam_Matrix, r, u, fw, pos);
@@ -2036,6 +2043,7 @@ void UpdateCamera(uint8_t* player, const FrameInfo& f) {
             g_secondEye.r = r; g_secondEye.u = u; g_secondEye.fw = fw;
             g_secondEye.posBase = f.eye;
             g_secondEye.offset = el.req.otherOffset;
+            g_secondEye.firstOffset = el.req.offset;
             g_secondEye.rot = el.req.otherRot;
             g_secondEye.eye = el.req.otherEye;
             g_secondEye.pair = el.req.pair;
@@ -4025,6 +4033,28 @@ void GameERFinalizePassReport() {
         s_corr = s_skipped = 0; s_sumYawDeg = s_sumPosCm = 0.f; s_win = nw;
     }
     StereoReportEye(pr.rep);
+}
+
+// Single-frame stereo: where the second eye sits relative to the eye this frame was rendered for, in game
+// space (the head's rotation applied to the difference of the two head-frame eye offsets). False when the
+// frame stashed no second eye (menus, cutscenes, no VR request).
+bool GameERSecondEyeDelta(float out[3]) {
+    std::lock_guard<std::mutex> g(g_secondEye.mtx);
+    if (!g_secondEye.valid) return false;
+    const Vec3 d = g_secondEye.offset - g_secondEye.firstOffset;
+    const Vec3 w = g_secondEye.haveHeadBasis ? g_secondEye.qHead.Rotate(d)
+                                             : g_secondEye.r * d.x + g_secondEye.u * d.y + g_secondEye.fw * d.z;
+    out[0] = w.x; out[1] = w.y; out[2] = w.z;
+    return true;
+}
+
+// The perspective camera as the renderer last read it (after the game's own smoothing): rows right, up,
+// forward, position (game space, 4x4 row-major as stored at Cam_Matrix), and its Cam_Fov in radians.
+bool GameERRenderCamera(float out[16], float* fov) {
+    uint8_t* pc = PersCam1();
+    if (!pc || !SafeRead(pc + off::Cam_Matrix, out, 16 * sizeof(float))) return false;
+    if (fov && !SafeRead(pc + off::Cam_Fov, fov, sizeof(float))) *fov = 0.f;
+    return true;
 }
 
 // Content-probe experiment: rewrite every camera slot as the LAST written camera pitched by

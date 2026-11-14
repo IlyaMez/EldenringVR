@@ -496,6 +496,7 @@ void Config::Load(const std::wstring& path) {
     fpDebug = GetB(ini, L"FirstPerson", L"Debug", fpDebug);
     fpForceFovDeg = GetF(ini, L"FirstPerson", L"ForceFovDeg", fpForceFovDeg);
     fpForcePitchDeg = GetF(ini, L"FirstPerson", L"ForcePitchDeg", fpForcePitchDeg);
+    fpForceRollDeg  = GetF(ini, L"FirstPerson", L"ForceRollDeg", fpForceRollDeg);
 
     menuNavEnabled = GetB(ini, L"MenuNav", L"Enabled", menuNavEnabled);
     menuNavThreshold = GetF(ini, L"MenuNav", L"Threshold", menuNavThreshold);
@@ -538,7 +539,19 @@ void Config::Load(const std::wstring& path) {
     taskRegisterTest  = GetB(ini, L"Experimental", L"TaskRegisterTest", taskRegisterTest);
     profileGroups     = GetB(ini, L"Experimental", L"ProfileGroups", profileGroups);
     profileSample     = GetB(ini, L"Experimental", L"ProfileSample", profileSample);
-    taskQueueProbe    = GetB(ini, L"Experimental", L"TaskQueueProbe", taskQueueProbe);
+    replayCensus      = GetB(ini, L"Experimental", L"ReplayCensus", replayCensus);
+    replayStereo      = GetI(ini, L"Experimental", L"ReplayStereo", replayStereo);
+    replayEyeOffset   = GetF(ini, L"Experimental", L"ReplayEyeOffset", replayEyeOffset);
+    replayMatrixCensus = GetF(ini, L"Experimental", L"ReplayMatrixCensus", replayMatrixCensus);
+    replayBenchPlan   = GetF(ini, L"Experimental", L"ReplayBenchPlan", replayBenchPlan);
+    replayDepthCensus = GetF(ini, L"Experimental", L"ReplayDepthCensus", replayDepthCensus);
+    replayBenchCapture = GetF(ini, L"Experimental", L"ReplayBenchCapture", replayBenchCapture);
+    replaySkipShadowMap = GetB(ini, L"Experimental", L"ReplaySkipShadowMap", replaySkipShadowMap);
+    replayTwice = GetB(ini, L"Experimental", L"ReplayTwice", replayTwice);
+    replayRulesOff = GetI(ini, L"Experimental", L"ReplayRulesOff", replayRulesOff);
+    replayFoldGain = GetF(ini, L"Experimental", L"ReplayFoldGain", replayFoldGain);
+    replayPosSizesOff = GetI(ini, L"Experimental", L"ReplayPosSizesOff", replayPosSizesOff);
+    taskQueueProbe   = GetB(ini, L"Experimental", L"TaskQueueProbe", taskQueueProbe);
     taskDumpLists     = GetB(ini, L"Experimental", L"TaskDumpLists", taskDumpLists);
     taskDoublePumpTest = GetB(ini, L"Experimental", L"TaskDoublePumpTest", taskDoublePumpTest);
     taskContentProbe   = GetB(ini, L"Experimental", L"TaskContentProbe", taskContentProbe);
