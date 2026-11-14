@@ -42,6 +42,7 @@ struct VRInputState {
     float pad[2][2]{};
     float padForce[2]{};
     bool  controllerConnected[2]{};
+    bool  frameController = false;   // the runtime picked the Steam Frame controller profile
 };
 
 struct VRTracking {

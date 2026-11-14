@@ -343,10 +343,14 @@ void VirtualPadUpdate(double now) {
         g_lthumbHold.down = false;
     }
 
-    // Title screen / loading / character creation: the game ignores the stick here with some controllers (Steam Frame),
-    // so a tilt of either stick becomes repeated D-pad presses.
-    if (c.menuNavEnabled && !GameERPlayerActive()) {
-        static int s_titleDir = 0; static double s_titleNext = 0;
+    // Title screen / loading / character creation, Steam Frame only: the contributor's Frame did not move the cursor
+    // there with the analog stick (PR #2), so a tilt of either stick becomes repeated D-pad presses. Every other
+    // controller keeps the analog stick these screens navigate with (a held D-pad stopped the selection, 2026-08-21),
+    // and the right stick that turns the character in character creation.
+    static int s_titleDir = 0; static double s_titleNext = 0;
+    if (!in.frameController || !c.menuNavEnabled || GameERPlayerActive()) {
+        s_titleDir = 0;
+    } else {
         float tx = std::fabs(lx) > std::fabs(rx) ? lx : rx, ty = std::fabs(ly) > std::fabs(ry) ? ly : ry;
         int dir = 0;
         if (std::fabs(tx) > 0.5f || std::fabs(ty) > 0.5f) {
