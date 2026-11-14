@@ -138,7 +138,7 @@ and put this page's link in its description so players find the real download.
 
 - **ELDEN RING on Steam**, patch 1.16.2, 1.17.1 or 1.17.2.
 - **A PC VR headset with an OpenXR runtime:** Meta Quest through Quest Link or Air Link, Virtual Desktop, or
-  SteamVR (Index, Vive, Pico, Steam Link and others). Played on Quest 3 and Quest Pro.
+  SteamVR (Index, Steam Frame, Vive, Pico, Steam Link and others). Played on Quest 3 and Quest Pro.
 - **A gaming PC.** Each eye is its own render, so VR costs about twice the GPU of playing flat.
 - **Windows.**
 - Optional: bHaptics devices and the [bHaptics Player](https://www.bhaptics.com/software/player/).

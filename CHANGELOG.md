@@ -3,6 +3,15 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## Unreleased
+
+### New
+* Steam Frame controllers get their own bindings (contributed by nlz242, tested on a Steam Frame through
+  SteamVR). Until now the Frame's D-pad and bumpers never reached the game. The left View button and the right
+  Menu button are the menu button, the left D-pad is the game's D-pad, the bumpers are LB / RB, and all four face
+  buttons are on the right controller. On the title screen, loading screens and character creation either stick
+  moves the cursor one step at a time; other controllers keep the analog stick there.
+
 ## 0.9.0 (2026-11-14)
 
 Single-frame stereo is the new default: the game runs once per headset frame and the graphics card draws that

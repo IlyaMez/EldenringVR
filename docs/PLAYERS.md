@@ -39,7 +39,7 @@ You need:
 - **ELDEN RING on Steam**, patch 1.16.2, 1.17.1 or 1.17.2 (game exe 2.6.2.0, 2.7.1.0 or 2.7.2.0). A new
   patch needs an ERVR update; the launcher tells you when yours has no address map yet.
 - **A PC VR headset with an OpenXR runtime**: Meta Quest through Quest Link or Air Link, Virtual Desktop
-  (VDXR), or SteamVR (Index, Vive, Pico, Steam Link and others). Played by the author on Quest 3 and Quest
+  (VDXR), or SteamVR (Index, Steam Frame, Vive, Pico, Steam Link and others). Played by the author on Quest 3 and Quest
   Pro; other headsets should work and reports are welcome.
 - **A gaming PC.** ERVR renders the game twice per frame, once for each eye, so it costs about twice the GPU
   of playing flat.
@@ -191,6 +191,18 @@ Everything above, with these differences:
 
 How hard a grip squeeze must be is Options > Body > *Index grip squeeze* (`[Buttons] IndexGripForce`). What
 each trackpad does is `[Buttons] LeftPad` / `RightPad` (`MENU`, `DPAD`, a button name or `none`).
+
+### Steam Frame
+
+Everything above, with these differences (contributed and tested by a Frame owner):
+
+| Control | What it does |
+|---|---|
+| View button (left) or Menu button (right) | The menu button: tap for the menu, hold for the map |
+| D-pad (left controller) | The D-pad: switch spells, items and weapons |
+| Bumpers | LB / RB, as on a gamepad |
+| X / Y on the right controller | X / Y (a Quest has them on the left controller) |
+| Either stick, on the title screen, loading screens and character creation | Moves the cursor one step at a time; keep it tilted to repeat |
 
 ## Settings
 
