@@ -197,6 +197,13 @@ void VirtualPadUpdate(double now) {
         else mapHeld(g_map.padButton[h], true);
     }
 
+    if (in.buttons & VRB_DpadUp)    held |= XINPUT_GAMEPAD_DPAD_UP;
+    if (in.buttons & VRB_DpadDown)  held |= XINPUT_GAMEPAD_DPAD_DOWN;
+    if (in.buttons & VRB_DpadLeft)  held |= XINPUT_GAMEPAD_DPAD_LEFT;
+    if (in.buttons & VRB_DpadRight) held |= XINPUT_GAMEPAD_DPAD_RIGHT;
+    if (in.buttons & VRB_LBumper)   held |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+    if (in.buttons & VRB_RBumper)   held |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+
     // ---- Menu: tap = START, hold = BACK (map) ---------------------------------
     // Both stick clicks together are the menu button too ([Buttons] MenuStickChord): SteamVR keeps a Quest's left
     // menu button for its own dashboard (Link, Air Link, Steam Link, Virtual Desktop's SteamVR mode), so there
@@ -334,6 +341,28 @@ void VirtualPadUpdate(double now) {
     if (!lThumbDown && g_lthumbHold.down) {
         if ((c.leftGripPlusStickIsDpad || g_menuMode) && !g_lthumbHold.consumed && now - g_lthumbHold.since < 0.4) AddPulse(g_map.lthumb, now, c.gesturePressDuration);
         g_lthumbHold.down = false;
+    }
+
+    // Title screen / loading / character creation, Steam Frame only: the contributor's Frame did not move the cursor
+    // there with the analog stick (PR #2), so a tilt of either stick becomes repeated D-pad presses. Every other
+    // controller keeps the analog stick these screens navigate with (a held D-pad stopped the selection, 2026-08-21),
+    // and the right stick that turns the character in character creation.
+    static int s_titleDir = 0; static double s_titleNext = 0;
+    if (!in.frameController || !c.menuNavEnabled || GameERPlayerActive()) {
+        s_titleDir = 0;
+    } else {
+        float tx = std::fabs(lx) > std::fabs(rx) ? lx : rx, ty = std::fabs(ly) > std::fabs(ry) ? ly : ry;
+        int dir = 0;
+        if (std::fabs(tx) > 0.5f || std::fabs(ty) > 0.5f) {
+            if (std::fabs(tx) > std::fabs(ty)) dir = tx > 0 ? 4 : 3; else dir = ty > 0 ? 1 : 2;
+        }
+        if (dir && (dir != s_titleDir || now >= s_titleNext)) {
+            static const uint16_t kTitleDpad[] = {0, XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT};
+            AddPulse(kTitleDpad[dir], now, 0.08);
+            s_titleNext = now + (dir != s_titleDir ? 0.45 : 0.18);
+        }
+        s_titleDir = dir;
+        lx = ly = rx = ry = 0.f;
     }
 
     // ---- movement basis --------------------------------------------------------

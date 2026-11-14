@@ -175,6 +175,8 @@ struct Actions {
     // Valve Index only: the trackpads (where the thumb is, how hard it presses) and the grip's
     // squeeze force. No other profile binds them, so they read zero / inactive elsewhere.
     XrAction trackpad[2]{}, trackpadForce[2]{}, squeezeForce[2]{};
+    XrAction dpad[4]{};   // Steam Frame only: up, down, left, right
+    XrAction bumper[2]{}; // Steam Frame only
     XrAction btnA = XR_NULL_HANDLE, btnB = XR_NULL_HANDLE, btnX = XR_NULL_HANDLE,
              btnY = XR_NULL_HANDLE, btnMenu = XR_NULL_HANDLE;
     XrSpace  handSpace[2]{};
@@ -687,9 +689,16 @@ public:
         if (GetBool(actions_.btnX)) b |= VRB_X;
         if (GetBool(actions_.btnY)) b |= VRB_Y;
         if (GetBool(actions_.btnMenu)) b |= VRB_Menu;
+        if (GetBool(actions_.dpad[0])) b |= VRB_DpadUp;
+        if (GetBool(actions_.dpad[1])) b |= VRB_DpadDown;
+        if (GetBool(actions_.dpad[2])) b |= VRB_DpadLeft;
+        if (GetBool(actions_.dpad[3])) b |= VRB_DpadRight;
+        if (GetBool(actions_.bumper[0])) b |= VRB_LBumper;
+        if (GetBool(actions_.bumper[1])) b |= VRB_RBumper;
         if (GetBool(actions_.stickClick[HandLeft]))  b |= VRB_LThumb;
         if (GetBool(actions_.stickClick[HandRight])) b |= VRB_RThumb;
         in.buttons = b;
+        in.frameController = frameActive_;
 
         LogInputCensus(tr.time);
 
@@ -745,6 +754,15 @@ private:
             return "<none>";
         return PathStr(ips.interactionProfile);
     }
+    // Which controller family the runtime picked, for the few places that behave differently per controller.
+    // Re-read whenever the runtime says the profile changed, and whenever the census sees the bound inputs change.
+    void RefreshProfileKind() {
+        if (session_ == XR_NULL_HANDLE || !haveFrame_) { frameActive_ = false; return; }
+        static const char* kFrame = "/interaction_profiles/valve/frame_controller_valve";
+        const bool frame = ProfileFor("/user/hand/left") == kFrame || ProfileFor("/user/hand/right") == kFrame;
+        if (frame != frameActive_) LOGI("[xr] Steam Frame controllers %s", frame ? "active" : "gone");
+        frameActive_ = frame;
+    }
 
     // isActive is the runtime telling us whether an action has a bound source AT ALL, as
     // opposed to "bound but the user is not touching it". Without it, a control that never
@@ -779,16 +797,19 @@ private:
         const bool bx = boolAct(actions_.btnX), by = boolAct(actions_.btnY), bm = boolAct(actions_.btnMenu);
         const bool lp = floatAct(actions_.trackpadForce[0]), rp = floatAct(actions_.trackpadForce[1]);
         const bool lf = floatAct(actions_.squeezeForce[0]), rf = floatAct(actions_.squeezeForce[1]);
+        const bool dp = boolAct(actions_.dpad[0]);   // Steam Frame only
+        const bool lb = boolAct(actions_.bumper[0]), rb = boolAct(actions_.bumper[1]);
         const uint32_t mask = (uint32_t)ls | (rs << 1) | (lt << 2) | (rt << 3) | (lg << 4) |
                               (rg << 5) | (lc << 6) | (rc << 7) | (ba << 8) | (bb << 9) |
                               (bx << 10) | (by << 11) | (bm << 12) | (lp << 13) | (rp << 14) |
-                              (lf << 15) | (rf << 16);
+                              (lf << 15) | (rf << 16) | (dp << 17) | (lb << 18) | (rb << 19);
         if (mask == lastCensusMask_) return;
         lastCensusMask_ = mask;
+        RefreshProfileKind();
         LOGI("[xr] input sources bound: L(stick %d trig %d grip %d click %d) "
              "R(stick %d trig %d grip %d click %d) A %d B %d X %d Y %d menu %d | "
-             "trackpad L %d R %d, grip force L %d R %d | profile L=\"%s\" R=\"%s\"%s",
-             ls, lt, lg, lc, rs, rt, rg, rc, ba, bb, bx, by, bm, lp, rp, lf, rf,
+             "trackpad L %d R %d, grip force L %d R %d | D-pad %d bumper L %d R %d | profile L=\"%s\" R=\"%s\"%s",
+             ls, lt, lg, lc, rs, rt, rg, rc, ba, bb, bx, by, bm, lp, rp, lf, rf, dp, lb, rb,
              ProfileFor("/user/hand/left").c_str(), ProfileFor("/user/hand/right").c_str(),
              (!ls || !rs) ? "  <-- A THUMBSTICK HAS NO BOUND SOURCE (menu/movement will be dead)" : "");
         if (lf || rf)
@@ -847,6 +868,8 @@ private:
         if (haveTimeConv_) exts.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
         haveRefresh_ = has(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         if (haveRefresh_) exts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        haveFrame_ = has("XR_VALVE_frame_controller_interaction");
+        if (haveFrame_) exts.push_back("XR_VALVE_frame_controller_interaction");
         if (Cfg().vrXrDebug && has(XR_EXT_DEBUG_UTILS_EXTENSION_NAME)) exts.push_back(XR_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
         XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
@@ -959,9 +982,16 @@ private:
         if (!MakeAction(actions_.btnX, "btn_x", "X", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
         if (!MakeAction(actions_.btnY, "btn_y", "Y", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
         if (!MakeAction(actions_.btnMenu, "btn_menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
+        {
+            static const char* dn[4] = {"dpad_up", "dpad_down", "dpad_left", "dpad_right"};
+            for (int i = 0; i < 4; ++i) if (!MakeAction(actions_.dpad[i], dn[i], dn[i], XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
+            if (!MakeAction(actions_.bumper[0], "bumper_left", "bumper_left", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
+            if (!MakeAction(actions_.bumper[1], "bumper_right", "bumper_right", XR_ACTION_TYPE_BOOLEAN_INPUT)) return false;
+        }
 
         SuggestTouch();
         SuggestIndex();
+        SuggestFrame();
         SuggestSimple();
 
         for (int h = 0; h < 2; ++h) {
@@ -977,13 +1007,14 @@ private:
         return true;
     }
 
-    void Suggest(const char* profile, std::vector<XrActionSuggestedBinding> b) {
+    bool Suggest(const char* profile, std::vector<XrActionSuggestedBinding> b) {
         XrInteractionProfileSuggestedBinding s{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         s.interactionProfile = Path(profile);
         s.countSuggestedBindings = (uint32_t)b.size();
         s.suggestedBindings = b.data();
         XrResult r = xrSuggestInteractionProfileBindings(instance_, &s);
         if (XR_FAILED(r)) LOGW("[xr] bindings for %s rejected: %s", profile, XrStr(r));
+        return XR_SUCCEEDED(r);
     }
     void SuggestTouch() {
         Suggest("/interaction_profiles/oculus/touch_controller", {
@@ -1034,6 +1065,53 @@ private:
             {actions_.haptic[0], Path("/user/hand/left/output/haptic")},
             {actions_.haptic[1], Path("/user/hand/right/output/haptic")},
         });
+    }
+    // Steam Frame controllers (XR_VALVE_frame_controller_interaction). Right hand has a/b/x/y + menu, the left has
+    // a D-pad and view; both menu-type buttons feed the single Menu action.
+    void SuggestFrame() {
+        if (!haveFrame_) return;
+        const char* kProfile = "/interaction_profiles/valve/frame_controller_valve";
+        const std::vector<XrActionSuggestedBinding> base = {
+            {actions_.pose[0], Path("/user/hand/left/input/grip/pose")},
+            {actions_.pose[1], Path("/user/hand/right/input/grip/pose")},
+            {actions_.trigger[0], Path("/user/hand/left/input/trigger/value")},
+            {actions_.trigger[1], Path("/user/hand/right/input/trigger/value")},
+            {actions_.squeeze[0], Path("/user/hand/left/input/squeeze/value")},
+            {actions_.squeeze[1], Path("/user/hand/right/input/squeeze/value")},
+            {actions_.stick[0], Path("/user/hand/left/input/thumbstick")},
+            {actions_.stick[1], Path("/user/hand/right/input/thumbstick")},
+            {actions_.stickClick[0], Path("/user/hand/left/input/thumbstick/click")},
+            {actions_.stickClick[1], Path("/user/hand/right/input/thumbstick/click")},
+            {actions_.btnA, Path("/user/hand/right/input/a/click")},
+            {actions_.btnB, Path("/user/hand/right/input/b/click")},
+            {actions_.btnX, Path("/user/hand/right/input/x/click")},
+            {actions_.btnY, Path("/user/hand/right/input/y/click")},
+            {actions_.btnMenu, Path("/user/hand/left/input/view/click")},
+            {actions_.btnMenu, Path("/user/hand/right/input/menu/click")},
+            {actions_.dpad[0], Path("/user/hand/left/input/dpad_up/click")},
+            {actions_.dpad[1], Path("/user/hand/left/input/dpad_down/click")},
+            {actions_.dpad[2], Path("/user/hand/left/input/dpad_left/click")},
+            {actions_.dpad[3], Path("/user/hand/left/input/dpad_right/click")},
+            {actions_.haptic[0], Path("/user/hand/left/output/haptic")},
+            {actions_.haptic[1], Path("/user/hand/right/output/haptic")},
+        };
+        // One unknown path makes the runtime reject the WHOLE profile (XR_ERROR_PATH_UNSUPPORTED), and then
+        // SteamVR falls back to remapping the Touch bindings. Valve documents the bumpers as .../input/bumper
+        // (partner.steamgames.com, steamhardware/steamframe/input); the first contributed build used .../shoulder.
+        // Try both, then no bumpers at all, so a runtime that knows neither still gets the rest of the controller.
+        for (const char* comp : {"bumper", "shoulder", (const char*)nullptr}) {
+            std::vector<XrActionSuggestedBinding> b = base;
+            if (comp) {
+                const std::string l = std::string("/user/hand/left/input/") + comp + "/click";
+                const std::string r = std::string("/user/hand/right/input/") + comp + "/click";
+                b.push_back({actions_.bumper[0], Path(l.c_str())});
+                b.push_back({actions_.bumper[1], Path(r.c_str())});
+            }
+            if (Suggest(kProfile, std::move(b))) {
+                LOGI("[xr] Steam Frame bindings accepted (bumpers: %s)", comp ? comp : "not bound");
+                return;
+            }
+        }
     }
     void SuggestSimple() {
         Suggest("/interaction_profiles/khr/simple_controller", {
@@ -1193,6 +1271,7 @@ private:
                 return;
             case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
                 LOGD("[xr] interaction profile changed");
+                RefreshProfileKind();
                 break;
             case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
                 auto* e = (XrEventDataDisplayRefreshRateChangedFB*)&ev;
@@ -1296,6 +1375,8 @@ private:
     bool deferRelease_ = false;                    // SetDeferredRelease
     bool bound_ = false, sessionRunning_ = false, frameBegun_ = false, haveTimeConv_ = false;
     bool haveRefresh_ = false;   // XR_FB_display_refresh_rate enabled on the instance
+    bool haveFrame_ = false;     // XR_VALVE_frame_controller_interaction enabled on the instance
+    bool frameActive_ = false;   // ...and the runtime picked the Frame profile for a hand (RefreshProfileKind)
     std::atomic<float> refreshHz_{0.f};   // the panel's refresh, 0 = unknown
     uint64_t lastAttach_ = 0;
     double   lastCensus_ = 0;

@@ -24,6 +24,12 @@ enum VRButton : uint32_t {
     VRB_RTrigger   = 1u << 8,
     VRB_LGrip      = 1u << 9,
     VRB_RGrip      = 1u << 10,
+    VRB_DpadUp     = 1u << 11,  // Steam Frame left controller D-pad
+    VRB_DpadDown   = 1u << 12,
+    VRB_DpadLeft   = 1u << 13,
+    VRB_DpadRight  = 1u << 14,
+    VRB_LBumper    = 1u << 15,  // Steam Frame bumpers (shoulder buttons)
+    VRB_RBumper    = 1u << 16,
 };
 
 struct VRInputState {
@@ -36,6 +42,7 @@ struct VRInputState {
     float pad[2][2]{};
     float padForce[2]{};
     bool  controllerConnected[2]{};
+    bool  frameController = false;   // the runtime picked the Steam Frame controller profile
 };
 
 struct VRTracking {
