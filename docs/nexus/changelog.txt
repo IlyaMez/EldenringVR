@@ -1,3 +1,7 @@
+0.9.1 (2026-11-14)
+
+- Steam Frame controllers get their own bindings (contributed by nlz242): the left View and right Menu buttons are the menu button, the left D-pad is the game's D-pad, the bumpers are LB / RB, and all four face buttons are on the right controller. On the title screen, loading screens and character creation either stick moves the cursor one step at a time (Frame only)
+
 0.9.0 (2026-11-14)
 
 - Single-frame stereo is the new default: the game runs once per headset frame and the graphics card draws that frame again for your other eye, about half the processor work of full stereo. On a 9800X3D + RTX 5090 with a Quest 3 over Virtual Desktop that is a new pair every refresh at 90 Hz with Resolution at 80%. Shadows, fog and lighting match between the eyes. Updating moves a full stereo setting to single-frame once; Options > View > Full stereo goes back, and stays

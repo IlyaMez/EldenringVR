@@ -3,7 +3,9 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## Unreleased
+## 0.9.1 (2026-11-14)
+
+Steam Frame controllers work: the D-pad, bumpers and both menu buttons reach the game.
 
 ### New
 * Steam Frame controllers get their own bindings (contributed by nlz242, tested on a Steam Frame through
