@@ -22,8 +22,9 @@ struct Config {
 
     // [VR]  ERVR's own OpenXR session + stereo rendering (ReShade add-on supplies D3D12).
     // off | cinema (flat game on a head-locked quad) | debugalt | full | replay (single-frame stereo: one engine
-    // pass per headset frame, the right eye re-drawn on the GPU from the left eye's recorded commands)
-    std::string vrStereoMode = "full";
+    // pass per headset frame, the right eye re-drawn on the GPU from the left eye's recorded commands; the default
+    // since 0.9.0 - an earlier install's StereoMode=full moves to it once, see Config::Load)
+    std::string vrStereoMode = "replay";
     // Full stereo: the OpenXR frame loop (xrWaitFrame/BeginFrame/EndFrame) runs on its own thread and submits
     // the newest finished stereo pair every headset frame; the game's presents only blit and publish. Without
     // it the game thread waits in xrWaitFrame, so a pair 1 ms over the frame waits for the NEXT slot and the
@@ -703,6 +704,8 @@ struct Config {
     std::string vrPass2SafeKeep = "0-7,11,20,37-38,45,48-53,88,95,98,106-107,109,115,142,144-160,164,168";
     // Set by Load when the ini still carried a retired keep set it replaced (logged by ConfigLogNotes).
     std::string pass2KeepNote;
+    // Set by Load when an earlier install's StereoMode=full was moved to the 0.9.0 default, replay (logged).
+    bool stereoModeMoved = false;
     // false = the second eye's pass skips the whole character pipeline (54-63, 65-79, 81, 83-84,
     // 113-114, 117, 127-129) and renders pass 1's poses, ~1 ms cheaper per stereo pair (2026-11-03,
     // depth intact). The draw-only keep sets (2026-11-07) hold none of those groups, so this only

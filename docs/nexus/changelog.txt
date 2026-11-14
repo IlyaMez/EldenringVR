@@ -1,3 +1,8 @@
+0.9.0 (2026-11-14)
+
+- Single-frame stereo is the new default: the game runs once per headset frame and the graphics card draws that frame again for your other eye, about half the processor work of full stereo. On a 9800X3D + RTX 5090 with a Quest 3 over Virtual Desktop that is a new pair every refresh at 90 Hz with Resolution at 80%. Shadows, fog and lighting match between the eyes. Updating moves a full stereo setting to single-frame once; Options > View > Full stereo goes back, and stays
+- A crash about ten seconds after start, at the title screen (seen with Virtual Desktop and a Radeon card), is fixed
+
 0.8.0 (2026-11-12)
 
 - Weapon Workshop: the launcher's Weapons tab gives any weapon, or a whole weapon type, its own VR profile - how it sits in your hand, how it swings, what your swings do. Every weapon and shield is read from your own game files with its real icon, DLC included. Share a profile as a code; imports are reviewed before they are saved, and nothing is uploaded anywhere

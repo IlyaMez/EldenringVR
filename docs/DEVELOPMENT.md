@@ -300,6 +300,35 @@ pass 1 (the game's own frame) 5.5-5.7 ms, pass 2 ~4.6 ms of work plus `xrWaitFra
 silhouettes (115-116, 119-122, 130-132) cost nothing measurable; gating 48-53 crashed at once (Geom 48-49 is a
 known landmine). A locked 120 Hz in full stereo would need ~8.3 ms per pair.
 
+### Single-frame stereo: what the right eye's replay needs (`StereoMode=replay`, the default since 0.9.0)
+
+The replay re-executes the frame's recorded command lists after a compute pass (`kPatchHLSL` in
+`replay_stereo.cpp`) has moved the frame's camera constants to the right eye, in the game's constants ring (a
+160 MB upload buffer ERVR re-creates as a custom heap the shader can write). An undo log puts every patched value
+back after the replay, so the next left eye never reads the right eye's. What it took to make the right eye match
+the game's own frame drawn from there (bench: `[Experimental] ReplayBenchCapture`, flat, 1 m eye offset):
+
+* **Read the shaders, not the constants.** ELDEN RING's DXIL keeps debug names and full constant-buffer
+  reflection. `ERVR_SHADER_DUMP=1` dumps every pixel/compute shader and root signature; `ERVR_PASS_LOG=<s>` logs one
+  frame's lists with the constant views each table binds (`[Experimental] ReplayCensus=1`). The sun's shadow is a
+  screen-space mask (`GXScreenSpaceCascadedShadow_PCF4/PCF9/Soft`, by shadow quality) reading view-space cascade
+  matrices from `cbPerScene` (b0, 560 B, `g_ProjSpaceToShadowMatrix[4]` at +64); the 2048 B `cbSceneParam` (b8:
+  `SC_CameraPos` +48 is the camera-relative geometry origin) holds copies the visible shadow never reads.
+* **Constants copied out of the ring.** `cbPerScene`, the light pass's `cbLightAccParam` and a few others are
+  staged in the ring and `CopyBufferRegion`'d into GPU-only buffers right before their draws, so they are no
+  views. Every 64-4096 B copy out of the ring in a replayed list joins the patch's views (`NoteCopySource`); the
+  replayed copy then carries the right eye's values. No such buffer is read before its copy in a frame.
+* **What must not move.** Identity-like transforms (rows along the unit axes: the cur-to-cull and occlusion
+  matrices, world boxes) are never a light's basis and never folded (`AxisAligned`); rows holding the game's
+  +-3.4e38 "no limit" sentinels skip the row rules (their lengths overflowed and `inf <= inf` passed), and the
+  patch never writes or overwrites a non-finite value. A frame census (`ReplayMatrixCensus`) of what changed
+  should show only camera rows, position copies and cascade translations.
+* **History.** The volumetric fog reprojects ping-pong 3D volumes (`g_PrevDirLightShadowTex`,
+  `g_PrevInjectingDensity`), so after a replay the left eye read the right eye's fog. Every 3D UAV texture the game
+  creates gets right-eye and spare copies (`EyeVolume`), swapped in before the replay and back after it, from the
+  resting state the game's own barriers leave (the fog's: UAV). Still shared: the bloom's temporal bright pass and
+  the eye adaptation (2D).
+
 ### What the second eye's pass runs
 
 The second pass re-runs the engine's task queue at a near-zero time step with a keep set of task groups.

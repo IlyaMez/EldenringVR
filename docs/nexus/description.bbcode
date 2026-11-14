@@ -1,7 +1,7 @@
 [center][size=6][b]ERVR: native VR for ELDEN RING[/b][/size]
 [size=3]Your head is the camera, the weapons are in your hands, and your swing is the attack.[/size]
 
-[b]Version 0.8.0. From the maker of [url=https://github.com/IlyaMez/SpidyVR]Spidy[/url], the Spider-Man Remastered VR mod.[/b]
+[b]Version 0.9.0. From the maker of [url=https://github.com/IlyaMez/SpidyVR]Spidy[/url], the Spider-Man Remastered VR mod.[/b]
 
 [url=https://discord.gg/x27ZXDpdNt][b]Join the Discord[/b][/url]: release news first, help in #ervr-help, clips. One server for ERVR and Spidy.[/center]
 
@@ -10,7 +10,7 @@ ERVR writes the game's memory, so it runs with Easy Anti-Cheat off; the included
 
 [size=5][b]What you get[/b][/size]
 [list]
-[*][b]Full stereo at your headset's resolution.[/b] An image for each eye from that eye's own camera, both at the same instant. Menus, loading screens and cutscenes go on a big screen in the headset.
+[*][b]Stereo at your headset's resolution.[/b] An image for each eye from that eye's own camera, both at the same instant. The game runs once per frame and the graphics card draws that frame again for the other eye (single-frame stereo), about half the processor work of running it twice; full stereo is one click away. Menus, loading screens and cutscenes go on a big screen in the headset.
 [*][b]First person, in the body.[/b] Your head is the camera: look around, lean, duck. Look down and your character is there, the arms following your controllers. Strike a T-pose once and its arms take the length of yours.
 [*][b]Your swing is the attack.[/b] ERVR fires the game's own attack along the blade in your hand: damage, poise, status and stamina come from the game, and a faster swing hits harder. Weapons have weight.
 [*][b]A shield that blocks.[/b] Raise it in front of you to block; move it into a blow to deflect it.
@@ -33,7 +33,7 @@ ERVR writes the game's memory, so it runs with Easy Anti-Cheat off; the included
 [list]
 [*]ELDEN RING on Steam, patch [b]1.16.2, 1.17.1 or 1.17.2[/b] (exe 2.6.2.0, 2.7.1.0 or 2.7.2.0). A new patch needs an ERVR update.
 [*]A PC VR headset with an OpenXR runtime: Meta Quest over Quest Link or Air Link, Virtual Desktop, or SteamVR (Index, Vive, Pico, Steam Link and others). Played by the author on Quest 3 and Quest Pro.
-[*]A GPU that can render ELDEN RING about twice per frame, one render for each eye. The big screen view is the cheap fallback.
+[*]A GPU that can draw ELDEN RING about twice per frame, once for each eye. The big screen view is the cheap fallback.
 [*]No other mod. ERVR bundles ReShade's add-on build and does not use R.E.A.L. VR.
 [/list]
 
@@ -66,7 +66,8 @@ Every button is a key in ERVR.ini, and the launcher's Options tab has the settin
 
 [size=5][b]Known limitations[/b][/size]
 [list]
-[*]Full stereo roughly doubles the game's render work. Lower Resolution in the launcher's Options and the game's graphics settings first.
+[*]Both eyes are drawn every frame, which roughly doubles the graphics card's work. Lower Resolution in the launcher's Options and the game's graphics settings first.
+[*]Single-frame stereo is new as the default (0.9.0). If an eye looks wrong, compare with Full stereo in Options > View and tell us in #ervr-help.
 [*]Physical melee plays no attack animation, so enemy cues that read the player's animation can differ, and co-op partners see you stand still while the enemy takes the hit.
 [*]Two-handed, a tap of the trigger plays the Ash of War's effect without its animation; some need one normal use to record that effect. Ripostes after a parry or a stance break are not done yet.
 [*]The Weapon Workshop's presets, backstabs, the belt, the Valve Index controls and body haptics are new and have had little headset time. Report what you see.
@@ -78,7 +79,7 @@ Ask in [b]#ervr-help[/b] on the [url=https://discord.gg/x27ZXDpdNt]Discord[/url]
 [size=5][b]Antivirus warnings and verifying the download[/b][/size]
 ERVR.dll injects into a running game, and dxgi.dll is ReShade's add-on build, which is unsigned by design. Generic antivirus detections are therefore possible. Every release is built from the public tagged source by GitHub Actions and carries a signed provenance attestation and a SHA256 file; this Nexus file is the same zip as the GitHub release.
 
-[code]gh attestation verify ERVR-v0.8.0.zip --repo IlyaMez/EldenringVR[/code]
+[code]gh attestation verify ERVR-v0.9.0.zip --repo IlyaMez/EldenringVR[/code]
 
 [b]ERVR has no telemetry or analytics, and ERVR.dll never goes online.[/b] The launcher asks GitHub once at start whether a newer ERVR is out (About > Updates turns that off) and downloads it only when you press Update now, checked against the release's SHA-256. For body haptics it loads bHaptics' own library, which talks to the bHaptics Player on your PC; [b][bHaptics] Level=0[/b] keeps it from loading.
 

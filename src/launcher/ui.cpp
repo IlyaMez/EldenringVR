@@ -2077,14 +2077,19 @@ void App::options(ImVec2 origin, ImVec2 size) {
     const float pick = S(170), gauge = S(170), flip = S(42);
 
     group(0, "Picture", [&] {
-        option("View", "Full stereo runs the game twice a frame, once per eye. Single-frame (beta) runs it once and "
-                       "has the graphics card draw that frame again for the other eye: about half the processor "
-                       "work, so 90 fps is in reach if the card has room. The big screen shows the flat game in the "
-                       "headset (cheap, always works, and what menus and loading screens use).",
+        option("View", "Single-frame (the default) runs the game once a frame and has the graphics card draw that "
+                       "frame again for the other eye: about half the processor work of full stereo, so 90 fps is in "
+                       "reach if the card has room. Full stereo runs the game twice a frame, once per eye. The big "
+                       "screen shows the flat game in the headset (cheap, always works, and what menus and loading "
+                       "screens use).",
                pick, [&] {
-                   choice("##stereo", "VR", "StereoMode", "full",
-                          {{"full", "Full stereo"}, {"replay", "Single-frame (beta)"}, {"cinema", "Big screen"},
+                   const std::string before = iniValue("VR", "StereoMode", "replay");
+                   choice("##stereo", "VR", "StereoMode", "replay",
+                          {{"replay", "Single-frame"}, {"full", "Full stereo"}, {"cinema", "Big screen"},
                            {"off", "Off (flat)"}});
+                   // A view picked here is the player's: ERVR's one-time move of an earlier install's full stereo to
+                   // single-frame (0.9.0, see the DLL's Config::Load) must not undo it.
+                   if (iniValue("VR", "StereoMode", "replay") != before) setIni("VR", "StereoModeDefault", "replay");
                });
         option("Resolution", "The share of the headset's pixels the game renders. ERVR draws every frame twice: "
                              "lower it if the log warns about stereo pairs per second.",

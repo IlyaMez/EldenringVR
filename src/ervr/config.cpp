@@ -84,6 +84,17 @@ void Config::Load(const std::wstring& path) {
     pollHz     = GetI(ini, L"General", L"PollHz", pollHz);
 
     vrStereoMode     = GetS(ini, L"VR", L"StereoMode", vrStereoMode);
+    // Single-frame stereo is the default from 0.9.0. An installed ERVR.ini outlives updates and every earlier one
+    // shipped StereoMode=full, so an ini without the marker moves to replay once - written back, so the launcher
+    // shows it - and gets the marker: Full stereo chosen after that stays (the shipped ini carries the marker).
+    if (GetS(ini, L"VR", L"StereoModeDefault", "").empty() && GetFileAttributesW(ini) != INVALID_FILE_ATTRIBUTES) {
+        if (vrStereoMode == "full") {
+            vrStereoMode = "replay";
+            WritePrivateProfileStringW(L"VR", L"StereoMode", L"replay", ini);
+            stereoModeMoved = true;
+        }
+        WritePrivateProfileStringW(L"VR", L"StereoModeDefault", L"replay", ini);
+    }
     vrAsyncSubmit    = GetB(ini, L"VR", L"AsyncSubmit", vrAsyncSubmit);
     vrRenderScale    = GetF(ini, L"VR", L"RenderScale", vrRenderScale);
     vrWorldScale     = GetF(ini, L"VR", L"WorldScale", vrWorldScale);
@@ -580,6 +591,9 @@ void Config::Load(const std::wstring& path) {
 Config& Cfg() { return g_cfg; }
 
 void ConfigLogNotes() {
+    if (g_cfg.stereoModeMoved)
+        LOGI("[config] [VR] StereoMode: full -> replay, once (single-frame stereo is the default from 0.9.0; ERVR.ini "
+             "updated). The launcher's Options > View brings full stereo back, and it then stays.");
     if (!g_cfg.pass2KeepNote.empty())
         LOGI("[config] %s in ERVR.ini is an earlier ERVR's built-in value (game logic in the second eye's pass: doors, "
              "graces, co-op crashes): using ERVR's own. Delete the line to stop this note.",

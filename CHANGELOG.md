@@ -3,15 +3,49 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## Unreleased
+## 0.9.0 (2026-11-14)
 
-### Fixed
+Single-frame stereo is the new default: the game runs once per headset frame and the graphics card draws that
+frame again for your other eye, about half the processor work of full stereo, so a steady 90 fps is in reach on a
+fast PC. A crash at the title screen on Radeon cards is fixed.
+
+### New
+* Single-frame stereo (`[VR] StereoMode=replay`, the launcher's Options > View > *Single-frame*), now the default.
+  ERVR records every command the game gives the graphics card for a frame, lets the game draw the frame for the
+  left eye, then has the card run the same commands a second time for the right eye with the camera moved between
+  your eyes: both eyes from one game frame, at one frame's processor cost (full stereo runs the game twice).
+  Measured on a 9800X3D + RTX 5090, Quest 3 over Virtual Desktop at 90 Hz: a new stereo pair every refresh at
+  Resolution 80%; at 100% the card is the limit (about 73 pairs a second). The card still draws both eyes, so lower
+  Resolution if pairs fall short of the refresh. Menus, loading screens and cutscenes use the big screen as before.
+  The right eye's camera move reaches everything that depends on where the eye is: the scene and its lighting, the
+  sun's shadows (also the shadow matrices the game copies into buffers of its own right before drawing), decals
+  and light volumes; values that only look like camera data (identity transforms such as the occlusion-culling
+  matrix, the game's "no limit" markers) are left alone, and the volumetric fog keeps a history of its own for
+  each eye. Checked against the game's own frame drawn from the right eye's position: the same image, pixel for
+  pixel apart from wind and particles. Played on a Quest 3 over Virtual Desktop only so far.
+* Updating from 0.8.x or earlier moves a full stereo setting to single-frame once (`ERVR.ini` is rewritten and
+  gets `[VR] StereoModeDefault=replay`, which marks the move done). Pick *Full stereo* in Options > View to go
+  back; it stays.
+
+### Fixes
 * A crash about ten seconds after start, at the title screen (0xC0000005 in `dxgi.dll`, reported on 0.8.0 with
   Virtual Desktop and a Radeon RX 7900 XT). The HUD layer's target search watched draws from every graphics device
   in the game's process, including the D3D11 device the VR runtime creates, and once took its device from one of
   them. When it asked that D3D11 device about the game's own D3D12 render targets, the call overwrote a target's
   first field with zero, and the next search crashed on it. The search now reads only the game's D3D12 device and
   its command lists. Untested in the headset: the crash has not been reproduced here.
+
+### Known limitations
+* In single-frame stereo the bloom's bright pass and the eye's light adaptation still share one history between the
+  eyes (both eyes see nearly the same light, so this has not shown). Motion blur, which the launcher turns off,
+  would smear the right eye.
+
+### For developers
+* `ERVR_SHADER_DUMP=1` in the game's environment writes every pixel and compute shader the game creates (DXIL, with
+  their debug names and constant-buffer layouts) and every root signature to `Game\ERVR\shaderdump\`
+  (`=layouts`: root signatures only; the full dump makes the boot much slower). `ERVR_PASS_LOG=<seconds>` writes one
+  frame's command lists - pipelines, draws, targets, the constant views each table binds, barriers, copies - to
+  `passlog.csv`, with `[Experimental] ReplayCensus=1` for the table contents. See DEVELOPMENT.md.
 
 ## 0.8.0 (2026-11-12)
 

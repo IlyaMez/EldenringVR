@@ -101,11 +101,36 @@ int main() {
         const ervr::Config own = LoadFrom("[Combat]\r\nTwoHandPinSideOffset=-0.02\r\n");
         Check(own.twoHandPinSideOffset == -0.02f && !own.retiredPinSideOffset, "any other side offset is used as written");
     }
+    {   // 0.9.0: single-frame stereo is the default; an earlier install's full stereo moves to it once, then stays chosen.
+        Check(defaults.vrStereoMode == "replay", "single-frame stereo is the default");
+        const std::wstring path = TempIni("[VR]\r\nStereoMode=full\r\n");
+        auto read = [&](const wchar_t* key) {
+            wchar_t b[64]{};
+            GetPrivateProfileStringW(L"VR", key, L"", b, 64, path.c_str());
+            return std::wstring(b);
+        };
+        ervr::Config first;
+        first.Load(path);
+        Check(first.vrStereoMode == "replay" && first.stereoModeMoved, "an earlier install's full stereo moves to replay");
+        Check(read(L"StereoMode") == L"replay" && read(L"StereoModeDefault") == L"replay",
+              "the move is written back with its marker");
+        ervr::Config second;
+        second.Load(path);
+        Check(second.vrStereoMode == "replay" && !second.stereoModeMoved, "the move happens once");
+        WritePrivateProfileStringW(L"VR", L"StereoMode", L"full", path.c_str());   // the player picks full stereo
+        ervr::Config chosen;
+        chosen.Load(path);
+        Check(chosen.vrStereoMode == "full" && !chosen.stereoModeMoved, "full stereo chosen after the move stays");
+        DeleteFileW(path.c_str());
+        const ervr::Config cinema = LoadFrom("[VR]\r\nStereoMode=cinema\r\n");
+        Check(cinema.vrStereoMode == "cinema" && !cinema.stereoModeMoved, "any other view is left as it is");
+    }
 #ifdef ERVR_TEST_INI
     {
         const std::string path = ERVR_TEST_INI;
         ervr::Config c;
         c.Load(std::wstring(path.begin(), path.end()));
+        Check(c.vrStereoMode == "replay" && !c.stereoModeMoved, "the shipped ini is single-frame stereo, marker included");
         Check(c.vrPass2FullFrameKeep == defaults.vrPass2FullFrameKeep && c.vrPass2SafeKeep == defaults.vrPass2SafeKeep &&
               c.pass2KeepNote.empty(), "the shipped ini leaves the keep sets to ERVR's own");
         Check(c.btnLeftPad == "MENU" && c.btnRightPad == "DPAD" && c.padForce == 0.5f && c.indexGripForce == 0.5f,
