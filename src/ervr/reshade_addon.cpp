@@ -21,7 +21,8 @@ namespace ervr {
 namespace {
 
 std::atomic<bool> g_registered{false};
-std::atomic<bool> g_eventsUp{false};
+std::atomic<bool> g_deviceEventsUp{false};   // init_device, init/destroy_resource (ReShadeAddonInstallDeviceEvents)
+std::atomic<bool> g_eventsUp{false};         // the rest (ReShadeAddonInstall)
 HMODULE g_self = nullptr;
 
 // Written on the render thread inside ReShade callbacks, read for logging elsewhere.
@@ -361,24 +362,35 @@ void ShaderDumpStart() {
 
 } // namespace
 
-bool ReShadeAddonInstall(void* selfModule) {
-    if (g_registered.load()) return true;
+// ReShade replays no init_device for a device made before the add-on registered. Registered from the worker
+// loop (after every game hook was in, 2-4 s), a fast PC's game had already made its device and its constants
+// ring: single-frame stereo then never found the ring and every headset frame stayed flat (2026-11-15 report,
+// 0.9.1 on a Quest 3: "single frame opens the game in a big window"). eldenring.exe imports dxgi.dll (ReShade)
+// and dinput8.dll (our loader) statically, so ReShade is already loaded when the worker starts.
+bool ReShadeAddonInstallDeviceEvents(void* selfModule) {
+    if (g_deviceEventsUp.load()) return true;
     g_self = (HMODULE)selfModule;
     if (!reshade::register_addon(g_self)) return false;   // ReShade not loaded (yet)
     g_registered.store(true);
     LOGI("[reshade] registered as add-on (API version %d)", RESHADE_API_VERSION);
-
     reshade::register_event<reshade::addon_event::init_device>(&OnInitDevice);
+    if (Cfg().replayCensus || ReplayStereoLevel() >= 2) {   // single-frame stereo groundwork: CPU-visible buffers by GPU address
+        reshade::register_event<reshade::addon_event::init_resource>(&OnInitResource);
+        reshade::register_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
+    }
+    g_deviceEventsUp.store(true);
+    return true;
+}
+
+bool ReShadeAddonInstall(void* selfModule) {
+    if (g_eventsUp.load()) return true;
+    if (!ReShadeAddonInstallDeviceEvents(selfModule)) return false;
     reshade::register_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
     reshade::register_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
     reshade::register_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
     reshade::register_event<reshade::addon_event::present>(&OnPresent);
     reshade::register_event<reshade::addon_event::finish_present>(&OnFinishPresent);
     reshade::register_event<reshade::addon_event::reshade_present>(&OnReShadePresent);
-    if (Cfg().replayCensus || ReplayStereoLevel() >= 2) {   // single-frame stereo groundwork: CPU-visible buffers by GPU address
-        reshade::register_event<reshade::addon_event::init_resource>(&OnInitResource);
-        reshade::register_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
-    }
     HudRegisterEvents();
     ShaderDumpStart();
     g_eventsUp.store(true);
@@ -391,18 +403,20 @@ bool ReShadeFirstSwapchainSize(uint32_t& w, uint32_t& h) { return FirstSwapchain
 
 void ReShadeAddonShutdown() {
     if (!g_registered.exchange(false)) return;
-    if (g_eventsUp.exchange(false)) {
+    if (g_deviceEventsUp.exchange(false)) {
         reshade::unregister_event<reshade::addon_event::init_device>(&OnInitDevice);
+        if (Cfg().replayCensus || ReplayStereoLevel() >= 2) {
+            reshade::unregister_event<reshade::addon_event::init_resource>(&OnInitResource);
+            reshade::unregister_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
+        }
+    }
+    if (g_eventsUp.exchange(false)) {
         reshade::unregister_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
         reshade::unregister_event<reshade::addon_event::init_swapchain>(&OnInitSwapchain);
         reshade::unregister_event<reshade::addon_event::destroy_swapchain>(&OnDestroySwapchain);
         reshade::unregister_event<reshade::addon_event::present>(&OnPresent);
         reshade::unregister_event<reshade::addon_event::finish_present>(&OnFinishPresent);
         reshade::unregister_event<reshade::addon_event::reshade_present>(&OnReShadePresent);
-        if (Cfg().replayCensus || ReplayStereoLevel() >= 2) {
-            reshade::unregister_event<reshade::addon_event::init_resource>(&OnInitResource);
-            reshade::unregister_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
-        }
         HudUnregisterEvents();
         if (g_sdOn) {
             if (!g_sdLayoutsOnly) reshade::unregister_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);

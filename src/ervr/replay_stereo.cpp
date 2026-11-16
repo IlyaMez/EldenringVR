@@ -3775,6 +3775,15 @@ void ReplayStats() {
     if (ReplayLevel() >= 2)
         LOGI("[replay] 5 s camera patch: %ld buffers, %ld matrix rows, %ld positions", g_patchedBuffers.exchange(0),
              g_patchedRows.exchange(0), g_patchedPos.exchange(0));
+    // The ring is made at boot, before the first present; five seconds of presents without it means its creation
+    // went by before our hooks: no camera patch, so no second eye for the whole session. Say so once, plainly.
+    static bool s_ringMissedSaid = false;
+    if (ReplayIsStereoMode() && !g_ring.res && !s_ringMissedSaid) {
+        s_ringMissedSaid = true;
+        LOGW("[replay] single-frame stereo cannot run this session: the game made its constants ring before ERVR's "
+             "device hooks were in, so there is no camera patch and the headset shows the flat frame. Restart the "
+             "game; if it happens again, pick View: Full stereo in the launcher and send this log.");
+    }
     {
         // What kept frames from being replayed, and where the unshadowed lists came from.
         std::string why;

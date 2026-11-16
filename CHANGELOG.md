@@ -3,6 +3,24 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## 0.9.2 (2026-11-16)
+
+Single-frame stereo starts on fast PCs too, and a locked-on enemy stays in front of you.
+
+### Fixed
+* Single-frame stereo showed only the big screen on some PCs (a 0.9.1 report, Quest 3 over Virtual Desktop).
+  ReShade tells an add-on about the game's graphics device only if the add-on is registered when the device is
+  made, and ERVR registered after setting up its game hooks, 2 to 4 seconds into the start. A PC that made its
+  device sooner left single-frame stereo without the game's constants buffer, the one it moves to the right eye,
+  so every frame reached the headset flat. ERVR now registers for the device before anything else, and if the
+  buffer is still missed, `ERVR.log` says so in plain words.
+* Locked on, the enemy was held along the play area's forward direction, the one set when the play area was
+  drawn: a player facing elsewhere in the room had it pinned off to the side (a PSVR2 report: 90 degrees to the
+  left, at a wall). The enemy now stays where you were looking when you locked on, and your body turns to it as
+  before.
+* With single-frame stereo, `ERVR.log` warns when new stereo pairs fall short of the headset's refresh, as it
+  does with full stereo. A 0.9.1 log ran at 12 to 15 pairs a second against 72 Hz without a word.
+
 ## 0.9.1 (2026-11-14)
 
 Steam Frame controllers work: the D-pad, bumpers and both menu buttons reach the game.

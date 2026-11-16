@@ -24,7 +24,12 @@ struct Dx12Frame {
     DXGI_FORMAT         format = DXGI_FORMAT_UNKNOWN;
 };
 
-// Worker thread; idempotent, returns true once registered.
+// Worker thread, first thing after MinHook is up: the add-on itself and the device and resource events
+// (init_device, init_resource), nothing else. Single-frame stereo has to see the game's device and its
+// constants ring being created; on a fast boot the game makes both while the rest of ERVR's start-up is
+// still hooking the game. Idempotent, returns true once registered.
+bool ReShadeAddonInstallDeviceEvents(void* selfModule);
+// Worker thread; idempotent, returns true once every event is registered (present, swapchain, HUD).
 bool ReShadeAddonInstall(void* selfModule);
 bool ReShadeAddonInstalled();
 void ReShadeAddonShutdown();

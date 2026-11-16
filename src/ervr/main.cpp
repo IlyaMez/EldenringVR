@@ -143,6 +143,10 @@ DWORD WINAPI Worker(LPVOID) {
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
         LOGE("MinHook init failed"); return 0;
     }
+    // Before the slow part (the game hooks below take 2-4 s): the game makes its D3D12 device and the constants
+    // ring single-frame stereo patches within a few seconds of starting, and a device ReShade saw before we
+    // registered never reaches us. The present and HUD events wait for the worker loop as before.
+    if (ReShadeAddonInstallDeviceEvents(g_self)) LOGI("[reshade] device events live ahead of start-up");
     WeaponPresetRuntimeStart(dir);
     // GraphicsConfig.xml is a RACE against the game's own boot-time read of it, and this
     // write must run before anything slow. Measured 2026-08-22 evening: at +718 ms after

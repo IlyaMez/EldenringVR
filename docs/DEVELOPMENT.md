@@ -33,7 +33,10 @@ each choice and the knobs in `ERVR.ini` that steer them. Players want the [READM
 
 * **Loading**: `dinput8.dll` is a tiny proxy (forwards `DirectInput8Create` to System32) that `LoadLibrary`s
   `ERVR\ERVR.dll`. Standard ELDEN RING mod-loader route; if you already use a `dinput8.dll` loader, drop `ERVR.dll`
-  into its mods folder instead.
+  into its mods folder instead. The worker's first act after MinHook is to register ReShade's device events
+  (`ReShadeAddonInstallDeviceEvents`): ReShade replays no `init_device` for a device made earlier, and single-frame
+  stereo has to hook the device before the game creates its constants ring (0.9.2; a fast boot beat the old
+  registration, made after the game hooks).
 * **VR runtime**: ERVR creates and owns its own OpenXR session (`vr_openxr.cpp`), bound to the game's D3D12 device
   and the queue ReShade presents on. Poses, buttons and haptics are polled on a worker thread at `PollHz`; the
   frame loop (`xrWaitFrame` / `xrLocateViews` / `xrEndFrame`) runs on the render thread. Whatever is the system's
@@ -239,7 +242,9 @@ own OpenXR session.
   write we hook (follow-cam function, chr-cam update, camera step), and the debug dump counts any foreign yaw
   still found before a write. The view yaw is integrated from the right stick
   (smooth or snap), the chr-cam matrix is anchor + that yaw, the game moves the character relative to it, and the
-  game's own camera step still runs on top. Locked on, the yaw follows the target. `Forward=head|hand|body`
+  game's own camera step still runs on top. Locked on, the yaw follows the target, held where the head pointed
+  when the lock engaged (`lock_on_facing.h`), not along the play area's forward: that put the target off to the
+  side for anyone not facing the play area's forward (0.9.2). `Forward=head|hand|body`
   rotate the move stick if you want forward to be something other than the view yaw. `CameraYawSource=game`
   is the old read-it-back mode. The character itself is still driven through the game (stick, strafe flags,
   its own animation/collision/root motion); nothing of the locomotion is re-implemented.

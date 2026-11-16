@@ -1,3 +1,9 @@
+0.9.2 (2026-11-16)
+
+- Single-frame stereo starts on fast PCs too: on some PCs it showed only the big screen, because the game made its graphics device before ERVR had registered for it. ERVR now registers first, and ERVR.log says so in plain words if it is still missed
+- Locked on, the enemy stays where you were looking when you locked on. It used to be held along the play area's forward direction, off to the side for anyone facing elsewhere in the room
+- With single-frame stereo, ERVR.log warns when new stereo pairs fall short of the headset's refresh
+
 0.9.1 (2026-11-14)
 
 - Steam Frame controllers get their own bindings (contributed by nlz242): the left View and right Menu buttons are the menu button, the left D-pad is the game's D-pad, the bumpers are LB / RB, and all four face buttons are on the right controller. On the title screen, loading screens and character creation either stick moves the cursor one step at a time (Frame only)

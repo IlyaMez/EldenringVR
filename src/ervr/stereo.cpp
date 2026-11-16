@@ -844,7 +844,8 @@ void AsyncXrLoop(IVRBackend* vr) {
     LOGI("[stereo] AsyncSubmit: the XR frame loop runs on its own thread - the headset gets a frame every "
          "refresh with the newest finished stereo pair, the game is never held by the runtime");
     uint64_t lastSeq = 0;
-    double lastLog = NowMs();
+    double lastLog = NowMs(), lastRateWarn = 0.0;
+    long stereoShown = 0;   // headset frames this window that showed a stereo pair (the world, not the big screen)
     while (g_async.running.load(std::memory_order_acquire)) {
         VRFrameInfo fi;
         if (!WaitBegin(vr, fi)) { Sleep(2); continue; }   // session not running / not visible yet
@@ -878,7 +879,7 @@ void AsyncXrLoop(IVRBackend* vr) {
         if (!ok) g_submitFails.fetch_add(1, std::memory_order_relaxed);
         else {
             g_frames.fetch_add(1, std::memory_order_relaxed);
-            if (stereo) g_stereoFrames.fetch_add(1, std::memory_order_relaxed);
+            if (stereo) { g_stereoFrames.fetch_add(1, std::memory_order_relaxed); ++stereoShown; }
         }
         SetEvent(g_async.shownEvent);   // replay mode paces the game to these
         const double now = NowMs();
@@ -898,7 +899,19 @@ void AsyncXrLoop(IVRBackend* vr) {
                 LOGI("[stereo] replay 5 s: %ld headset frames with a new pair, %ld repeating the last, %ld engine frames "
                      "dropped (no whole replay), %ld switches to the big screen%s", fr, rp, g_replayDropped.exchange(0),
                      g_replayFlatSwitches.exchange(0), def);
+                // The pairs/s warning in the heartbeat follows the full-stereo frame pump, which single-frame stereo
+                // does not run: a 2026-11-15 log (Quest 3 on Link, 72 Hz) showed 12-15 new pairs a second for twenty
+                // minutes and never said so. Only while the world shows (stereo), not menus or loading.
+                const double secs = (now - lastLog) / 1000.0;
+                const double hz = secs > 0.0 ? (fr + rp) / secs : 0.0, pairs = secs > 0.0 ? fr / secs : 0.0;
+                if (hz > 30.0 && pairs < hz * 0.92 && stereoShown * 10 >= (fr + rp) * 9 && now - lastRateWarn > 30000.0) {
+                    lastRateWarn = now;
+                    LOGW("[stereo] %.0f new stereo pairs/s against a %.0f Hz headset: the runtime reprojects the "
+                         "missing frames (judder, added latency). Lower Resolution in the launcher or the game's "
+                         "graphics settings; the [replay] GPU ms lines say which eye's work is the bulk.", pairs, hz);
+                }
             }
+            stereoShown = 0;
             lastLog = now;
         }
     }

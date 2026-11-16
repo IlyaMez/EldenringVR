@@ -35,6 +35,7 @@
 #include "weapon_wheel.h"
 #include "body_haptics_er.h"
 #include "transition_stale.h"
+#include "lock_on_facing.h"
 #include <windows.h>
 #include <MinHook.h>
 #include "virtual_pad.h"
@@ -1194,6 +1195,7 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now,
 struct FrameInfo {
     bool valid = false;
     bool lockedOn = false; // a real enemy is locked on
+    float lockFacing = 0;  // locked on: the play-space yaw the target is held at (LockOnFacing), else 0
     bool riding = false;  // mounting/riding/dismounting: native seated body and physics
     bool seated = false;  // riding proper: the mount animation is over, the dismount has not begun
     bool seatPose = false;// seated and the rider is the captured seated pose (PoseMode=vr), upright in its own frame
@@ -1363,6 +1365,8 @@ float UpdateBodyYaw(float target, double now, bool instant) {
 }
 std::atomic<bool>  g_moveActive{false}, g_moveLocked{false}, g_moveRiding{false};
 bool g_camYawInit = false;
+std::mutex   g_lockFacingMtx;   // BuildFrame runs from several hooks
+LockOnFacing g_lockFacing;      // where in the room a locked target is held (BuildFrame)
 
 float GameCamYaw() {
     uint8_t* cc = ChrCam();
@@ -1545,12 +1549,19 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false, int write 
         // loading it is an identity matrix (yaw 0), and initialising from it snapped the view to world north and
         // then FaceCamera turned the whole character to match ("body starts rotated").
         if (!g_camYawInit) { g_camYaw.store(f.chrYaw); g_camYawInit = true; }
-        // Locked on: the game picked the direction, follow the point it makes the character face.
+        // Locked on: the game picked the direction, follow the point it makes the character face - held where you
+        // looked when the lock engaged, not at the play area's forward (LockOnFacing; the head yaw is the last
+        // frame's, this frame's is read below).
+        {
+            std::lock_guard<std::mutex> g(g_lockFacingMtx);
+            f.lockFacing = g_lockFacing.Update(f.lockedOn, g_headYaw.load(), g_headYawValid.load(),
+                                               c.fpCameraRotation == "hmd");
+        }
         if (f.lockedOn) {
             float t[4];
             if (SafeRead(player + off::Chr_LockOnTarget, t, 16)) {
                 float dx = t[0] - root.x, dz = t[2] - root.z;
-                if (dx * dx + dz * dz > 0.01f) g_camYaw.store(std::atan2(dx, dz));
+                if (dx * dx + dz * dz > 0.01f) g_camYaw.store(LockOnPlaySpaceYaw(std::atan2(dx, dz), f.lockFacing));
             }
         }
         f.baseYaw = g_camYaw.load();
@@ -1562,7 +1573,9 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false, int write 
 
     VRTracking tr; VRInputState in; bool vr;
     LatchVRForCycle(tr, in, vr);
-    f.bodyYaw = f.riding ? f.chrYaw : f.baseYaw;
+    // Locked on, the target's own direction (the play space's yaw plus where in the room it is held).
+    const float lockYaw = WrapPi(f.baseYaw + f.lockFacing);
+    f.bodyYaw = f.riding ? f.chrYaw : f.lockedOn ? lockYaw : f.baseYaw;
     if (vr && tr.head.valid) {
         Quat hq = ToGame(tr.head.rot); Vec3 hp = ToGame(tr.head.pos);
         // Pivot stick turns about the head: baseYaw already contains the new yaw, so shift the play-space origin
@@ -1623,6 +1636,7 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false, int write 
         float want; bool instant = f.riding || f.lockedOn || c.bodyYawSource == "camera";
         if (!g_bodyYawInit) g_bodyStickYaw.store(f.baseYaw);   // start facing the view, not world yaw 0
         if (f.riding) want = f.chrYaw;
+        else if (f.lockedOn) want = lockYaw;                     // the game aims the body at the target
         else if (instant) want = f.baseYaw;
         else if (c.bodyYawSource == "head") want = WrapPi(f.baseYaw + f.headYaw);
         else want = g_bodyStickYaw.load();                       // stick: absolute, right stick turns it
