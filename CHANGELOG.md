@@ -3,7 +3,7 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
-## Unreleased
+## v0.9.3 (2026-11-26)
 
 Swings land their full hit even when the blade starts on the enemy or the ground, co-op partners' hits no longer use
 up yours, Moonveil's wave leaves from your blade during your swing (no lunge, no wait), a hit you land is something
