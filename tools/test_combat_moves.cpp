@@ -379,6 +379,44 @@ int main() {
         Check(nearV(o.fwd, {1, 0, 0}) && std::fabs(o.up.y) < 1e-3f && std::fabs(o.up.Dot(o.fwd)) < 1e-3f && std::fabs(o.right.Dot(o.up)) < 1e-3f,
               "turned to the aim, then stood up about it: still a frame");
     }
+    {   // aim snap: the enemy nearest the swing's line, within the cone and the range
+        const SnapCandidate c[3] = {{3.f, 1.f, 10.f}, {-1.f, 1.f, 10.f}, {0.f, 1.f, -5.f}};   // 17 deg right, 6 deg left, behind
+        float deg = 0.f, dist = 0.f;
+        Check(PickSnapTarget(0.f, 0.f, 0.f, 1.f, c, 3, 30.f, 20.f, &deg, &dist) == 1 && deg < 6.f && dist > 10.f,
+              "the swing straight ahead turns to the enemy nearest its line");
+        Check(PickSnapTarget(0.f, 0.f, 0.f, 1.f, c, 3, 5.f, 20.f) == -1, "nobody within the cone: no snap");
+        Check(PickSnapTarget(0.f, 0.f, 0.f, 1.f, c, 3, 30.f, 8.f) == -1, "nobody within the range: no snap");
+        Check(PickSnapTarget(0.f, 0.f, 0.3f, 1.f, c, 3, 30.f, 20.f) == 0, "a swing aimed right turns to the enemy on the right");
+        Check(PickSnapTarget(0.f, 0.f, 0.f, -1.f, c, 3, 30.f, 20.f) == 2, "a swing aimed behind finds the enemy behind");
+        Check(PickSnapTarget(0.f, 0.f, 0.f, 1.f, c, 3, 0.f, 20.f) == -1, "SwingAimSnapDeg=0 turns the snap off");
+        const SnapCandidate near2[2] = {{0.5f, 1.f, 3.f}, {2.f, 1.f, 12.f}};   // 9.5 deg at 3 m vs 9.5 deg at 12 m
+        Check(PickSnapTarget(0.f, 0.f, 0.f, 1.f, near2, 2, 30.f, 20.f) == 0, "on a tie the nearer enemy wins");
+    }
+    {   // the wave leaves at the swing's fastest point
+        Check(!WaveReleaseDue(8.f, 8.f, 0.01, 0.25f, false), "still speeding up: wait");
+        Check(!WaveReleaseDue(7.5f, 8.f, 0.05, 0.25f, false), "just past the peak: wait for a real slowdown");
+        Check(WaveReleaseDue(6.5f, 8.f, 0.08, 0.25f, false), "slowed under 85% of the peak: release");
+        Check(WaveReleaseDue(9.f, 9.f, 0.25, 0.25f, false), "never later than maxDelay after the press");
+        Check(WaveReleaseDue(9.f, 9.f, 0.02, 0.25f, true), "the swing ended: release at once");
+        Check(!WaveReleaseDue(0.f, 8.f, 0.0, 0.25f, false), "not on the press frame itself");
+    }
+    {   // a follow-up recording keeps the wave's volley and the art's FP effect, nothing else
+        const RecSpanIn ev[6] = {{1, 0.00f, 0.30f},     // the follow-up's own attack
+                                 {331, 0.00f, 0.90f},   // AddSpEffect_WeaponArts live through the bullet
+                                 {2, 0.48f, 0.52f},     // the wave
+                                 {2, 0.53f, 0.55f},     // a second bullet of the same volley
+                                 {2, 1.40f, 1.45f},     // the NEXT follow-up's wave (pressed while recording)
+                                 {96, 0.10f, 0.20f}};   // a sound
+        bool keep[6]; float t0 = -1.f;
+        Check(FollowUpVolley(ev, 6, 0.15f, keep, &t0) == 2, "both bullets of the first volley are kept");
+        Check(std::fabs(t0 - 0.48f) < 1e-5f, "the replay's zero is the first bullet");
+        Check(!keep[0] && keep[1] && keep[2] && keep[3] && !keep[4] && !keep[5],
+              "the attack, the sound and the next follow-up's wave are dropped; the live 331 is kept");
+        const RecSpanIn none[2] = {{1, 0.f, 0.3f}, {331, 0.f, 0.9f}};
+        Check(FollowUpVolley(none, 2, 0.15f, keep, &t0) == 0 && !keep[0] && !keep[1], "no bullet: nothing to replay");
+        const RecSpanIn late331[2] = {{2, 0.5f, 0.55f}, {331, 0.6f, 0.9f}};
+        Check(FollowUpVolley(late331, 2, 0.15f, keep, &t0) == 1 && keep[0] && !keep[1], "a 331 that starts after the wave is not its");
+    }
     std::puts("combat moves: ok");
     return 0;
 }

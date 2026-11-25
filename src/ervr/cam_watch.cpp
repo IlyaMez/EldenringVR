@@ -198,7 +198,15 @@ DWORD WINAPI WatchThread(LPVOID) {
 
     uint32_t len = 0;
     uint8_t* tgt = nullptr;
-    if (Cfg().camWatchAbm) {
+    if (Cfg().camWatchRider) {
+        // Watch the mounted rider's location matrix: the game re-places it after the rider's rebuild, and the
+        // draw reads it somewhere between - who, and in which task group.
+        for (int w = 0; w < 6000 && !(tgt = GameERRiderWatchTarget(&len)); ++w) Sleep(100);
+        if (!tgt) { LOGW("[camwatch] never saw the rider on Torrent"); return 0; }
+        Sleep((DWORD)(Cfg().camWatchDelay * 1000.f));
+        tgt = GameERRiderWatchTarget(&len);
+        if (!tgt) { LOGW("[camwatch] the rider left Torrent before the watch armed"); return 0; }
+    } else if (Cfg().camWatchAbm) {
         // Watch the action-button manager's flag bytes: which code sets and clears them, in which pass.
         for (int w = 0; w < 600 && !(tgt = Pass2InteractAbmTarget(&len)); ++w) Sleep(1000);
         if (!tgt) { LOGW("[camwatch] action-button manager never found"); return 0; }
@@ -272,7 +280,8 @@ DWORD WINAPI WatchThread(LPVOID) {
 } // namespace
 
 void CamWatchTick() {
-    if (!Cfg().camWatch && !Cfg().camWatchDt && !Cfg().camWatchIgt && !Cfg().camWatchDst && !Cfg().camWatchAbm) return;
+    if (!Cfg().camWatch && !Cfg().camWatchDt && !Cfg().camWatchIgt && !Cfg().camWatchDst && !Cfg().camWatchAbm &&
+        !Cfg().camWatchRider) return;
     if (g_started.exchange(true)) return;
     if (HANDLE h = CreateThread(nullptr, 0, WatchThread, nullptr, 0, nullptr)) CloseHandle(h);
 }

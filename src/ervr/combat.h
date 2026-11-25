@@ -75,6 +75,11 @@ int CombatCastAimHand(bool* casting);
 // with no swing before it), 1 = where a stance follow-up's swing aimed (SkillAim=swing; *swingTracking = the middle of
 // its arc, a horizontal unit vector in the runtime's tracking space, OpenXR axes).
 int CombatCastAimKind(Vec3* swingTracking);
+// SkillAim=swing with SwingAimSnapDeg: turn a swing-aimed projectile's direction (game world, from `origin`) to the
+// live enemy nearest its line (combat_moves.h PickSnapTarget) from the characters the game thread saw this frame
+// within SwingAimSnapRange; players and phantoms are never picked. False (dir untouched) when none qualifies. `note`
+// (optional) receives a short description for the log. Any thread (a snapshot under a mutex).
+bool CombatSnapSwingAim(const Vec3& origin, Vec3* dir, char* note, size_t noteLen);
 // Game thread, from CSBulletManager::SpawnBullet: is the projectile being spawned right now one of the player's own
 // animation's (its BulletBehavior event, or a replayed one) from a melee weapon - Moonveil's wave, Reduvia's blood
 // blades - which SkillProjectileFromBlade moves to the VR blade? *hand = that weapon's hand; *swingAt = when the
@@ -86,6 +91,10 @@ bool CombatPlayerProjectileNow(int* hand, double* swingAt, bool* debugOnly);
 // Returns a bitmask: bit0 = left hand, bit1 = right hand, bit2/3 = "fail" flavour for left/right,
 // bit4 = blocked hit (left), bit5 = deflect (left).
 uint32_t CombatTakeHapticRequests();
+// Landed hits since the last call, per hand (worker thread, every pad update): how hard (hit_feedback.h HitStrength,
+// 0 = none; two-handed, the other hand gets a share) and the weapon's weight - the impact virtual_pad plays.
+struct HitFeel { float strength = 0.f; float weight = 0.f; };
+void CombatTakeHitFeel(HitFeel out[2]);
 
 // Game thread, once per rendered frame with the main player ChrIns.
 void CombatGameFrame(uint8_t* player, uint32_t frame);

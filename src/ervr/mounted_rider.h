@@ -262,23 +262,50 @@ inline Vec3 OutOfFrame(const RigidPose& frame, const Vec3& local) { return frame
 // apart by the rider's rebuild count `gen`: set at gen g, a write still at g comes before that frame's rebuild and
 // uses the same prediction; a write past it comes after and uses the matrix the rebuild produced. Either way the
 // view is the same point of the rider's frame, so the camera and the drawn body ride one matrix.
+//
+// The rider is not DRAWN with the model matrix, though: its model is placed with its location entity's matrix
+// (ChrCtrl+0x2F8 -> +0x70), and on horseback the game's copy there is not the model matrix - 2026-11-14 flat
+// probe: 6 deg apart standing still, 19 on a slope, up to 192 mm and 20 deg in a jump; the drawn head, placed
+// with it, swung -215..+147 mm vertically against the camera while the model-matrix probe read -47..-40 ("the
+// body goes up and down with the horse, the camera stays, the body pops into view"). So when `drawn` is set
+// (the frame was opened by the drawn pose write, seated) the frame's matrix is written over the location matrix
+// after the rebuild, and the writes after the rebuild stay on it too: the drawn body and the camera on one matrix.
 struct RideFrameAnchor {
     bool valid = false;
+    bool drawn = false; // the frame's matrix is also the one its rider is drawn with (written after its rebuild)
     uint32_t gen = 0;   // the rider's rebuild count when it was set (its frame's rebuild still to come)
     RigidPose rider;    // the predicted matrix it was set in
     Vec3 local{};       // the smoothed eye anchor in that frame
     double at = -1.0;
-    void Set(uint32_t generation, const RigidPose& predicted, const Vec3& anchorWorld, double now) {
-        gen = generation; rider = predicted; local = IntoFrame(predicted, anchorWorld); at = now; valid = true;
+    void Set(uint32_t generation, const RigidPose& predicted, const Vec3& anchorWorld, double now, bool drawnToo = false) {
+        gen = generation; rider = predicted; local = IntoFrame(predicted, anchorWorld); at = now; valid = true; drawn = drawnToo;
     }
     bool Fresh(double now) const { return valid && now >= at && now - at <= 0.1; }
     // A write that may start a frame (`opens`) does so once per rebuild, or when the last frame is long gone.
     bool Opens(uint32_t generation, bool opens, double now) const { return opens && (!Fresh(now) || gen != generation); }
-    // The matrix a write at rebuild count `generation` is built on (`real` = the model matrix as it is now).
-    RigidPose RiderFor(uint32_t generation, const RigidPose& real) const { return gen == generation ? rider : real; }
+    // The rebuild just counted (`generationAfter` = the count after it) is this frame's own, and the frame places
+    // the drawn rider: its matrix goes over the location matrix.
+    bool OwnsRebuild(uint32_t generationAfter) const { return valid && drawn && generationAfter == gen + 1; }
+    // The matrix a write at rebuild count `generation` is built on (`real` = the model matrix as it is now): before
+    // the frame's rebuild its prediction; after it the matrix the rebuild produced - or, when the frame places the
+    // drawn rider, still its own matrix, which is what the rider is drawn with.
+    RigidPose RiderFor(uint32_t generation, const RigidPose& real) const {
+        return gen == generation || (drawn && generation == gen + 1) ? rider : real;
+    }
     Vec3 Anchor(const RigidPose& rider) const { return OutOfFrame(rider, local); }
-    void Reset() { valid = false; at = -1.0; }
+    void Reset() { valid = false; drawn = false; at = -1.0; }
 };
+// The location matrix (16 floats, rows X Y Z position) rebuilt from a rigid pose, keeping `current`'s row scales
+// and its fourth column.
+inline void LocationMatrixFrom(const RigidPose& p, const float current[16], float out[16]) {
+    const Vec3 axes[3] = {p.rot.Rotate({1.f, 0.f, 0.f}), p.rot.Rotate({0.f, 1.f, 0.f}), p.rot.Rotate({0.f, 0.f, 1.f})};
+    for (int r = 0; r < 3; ++r) {
+        const float s = Vec3{current[r * 4], current[r * 4 + 1], current[r * 4 + 2]}.Length();
+        const float k = std::isfinite(s) && s > 0.5f && s < 2.f ? s : 1.f;
+        out[r * 4] = axes[r].x * k; out[r * 4 + 1] = axes[r].y * k; out[r * 4 + 2] = axes[r].z * k; out[r * 4 + 3] = current[r * 4 + 3];
+    }
+    out[12] = p.pos.x; out[13] = p.pos.y; out[14] = p.pos.z; out[15] = current[15];
+}
 
 // Physical turns on horseback: the head yaw, followed the way BodyYaw=head follows it on foot (deadzone, then a
 // time constant), turns Torrent and the rider by the followed amount - the same pair turn the right stick

@@ -52,6 +52,7 @@ void CombatPollHands(const VRTracking&, const VRInputState&, double) {}
 void CombatNotifyButton(uint16_t, double) {}
 void CombatNotifyPad(uint16_t, double) {}
 uint32_t CombatTakeHapticRequests() { return 0; }
+void CombatTakeHitFeel(HitFeel out[2]) { out[0] = HitFeel{}; out[1] = HitFeel{}; }
 uint16_t CombatBlockedButtons() { return combatMenu ? 0 : VP_RT; }
 uint16_t CombatHeldButtons() { return 0; }
 uint16_t CombatForcedButtons(double) { return 0; }

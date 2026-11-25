@@ -89,12 +89,17 @@ bool GameERSecondEyeDelta(float out[3]);
 // The render camera's matrix+fov range (CSPersCam via FieldArea->GameRend), for the
 // CamWatch guard-page probe. Null until in-game.
 uint8_t* GameERCamWatchTarget(uint32_t* outLen);
+// The mounted rider's location matrix (CamWatchRider). Null unless riding with Torrent found.
+uint8_t* GameERRiderWatchTarget(uint32_t* outLen);
 
 // ---- inertial arm -------------------------------------------------------------------
 // Motion of the weapon pose, with the grip tracked directly and weight resisting bending.
 // tipSpeed/handSpeed in m/s, arc = tip path since the tip
 // last came to rest. False when the arm is not being driven or the sample is stale.
 bool GameERWeaponMotion(int hand, float* tipSpeed, float* handSpeed, float* arc);
+// A landed hit of `strength` (0..1, hit_feedback.h): the hand's drawn blade bites - it stays where it struck and
+// rejoins the hand ([Combat] HitBiteSeconds / HitBiteHold). Any thread. The swing speeds above keep the hand's.
+void GameERWeaponBite(int hand, float strength);
 // The save's character level (PlayerGameData +0x68), -1 if unavailable. Logged with combat so an
 // over-levelled test character is not mistaken for a broken damage model.
 int GameERPlayerLevel();

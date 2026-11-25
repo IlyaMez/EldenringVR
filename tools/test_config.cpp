@@ -101,6 +101,26 @@ int main() {
         const ervr::Config own = LoadFrom("[Combat]\r\nTwoHandPinSideOffset=-0.02\r\n");
         Check(own.twoHandPinSideOffset == -0.02f && !own.retiredPinSideOffset, "any other side offset is used as written");
     }
+    {   // 2026-11-14: the swing-aim limit 45 -> 20 (an ini still carrying 45 reads 20, noted), snap + replayed follow-ups.
+        Check(defaults.swingAimMaxDeg == 20.f && !defaults.retiredSwingAimMaxDeg && defaults.swingAimSnapDeg == 30.f &&
+              defaults.stanceFollowUps == "replay" && defaults.contactWeakTouch == 0.5f,
+              "the swing aim is limited to 20 deg and snaps; follow-ups replay their wave; weak touches keep the swing");
+        const ervr::Config old = LoadFrom("[Combat]\r\nSwingAimMaxDeg=45\r\n");
+        Check(old.swingAimMaxDeg == 20.f && old.retiredSwingAimMaxDeg, "an ini still saying 45 reads 20, noted");
+        const ervr::Config own = LoadFrom("[Combat]\r\nSwingAimMaxDeg=30\r\nStanceFollowUps=game\r\nContactWeakTouch=0\r\n");
+        Check(own.swingAimMaxDeg == 30.f && !own.retiredSwingAimMaxDeg && own.stanceFollowUps == "game" && own.contactWeakTouch == 0.f,
+              "a player's own limit, the game's follow-ups and touches off are used as written");
+        const ervr::Config bad = LoadFrom("[Combat]\r\nStanceFollowUps=bogus\r\n");
+        Check(bad.stanceFollowUps == "replay", "an unknown follow-up mode falls back to replay");
+    }
+    {   // 2026-11-21: swings live from half a hit, guard ticks, a skill per trigger.
+        Check(defaults.contactLiveMult == 0.5f && defaults.guardHaptics && defaults.skillPerHand && !defaults.debugHideLeftArt,
+              "swings are live from x0.5, the guard ticks, each trigger plays its own hand's skill, the flat test knob is off");
+        const ervr::Config own = LoadFrom("[Combat]\r\nContactLiveMult=0\r\nGuardHaptics=false\r\nSkillPerHand=false\r\n");
+        Check(own.contactLiveMult == 0.f && !own.guardHaptics && !own.skillPerHand, "the old behaviour of each is one key away");
+        const ervr::Config wild = LoadFrom("[Combat]\r\nContactLiveMult=5\r\n");
+        Check(wild.contactLiveMult == 1.2f, "a live line past the strongest hit is clamped to it");
+    }
     {   // 0.9.0: single-frame stereo is the default; an earlier install's full stereo moves to it once, then stays chosen.
         Check(defaults.vrStereoMode == "replay", "single-frame stereo is the default");
         const std::wstring path = TempIni("[VR]\r\nStereoMode=full\r\n");
@@ -139,6 +159,14 @@ int main() {
               c.vrPass2KeepScriptPrompts && c.vrPass2RegionBank && c.vrPass2EventsOnce,
               "the shipped ini leaves the two-hand side offset, the region table, the script prompts and the "
               "once-per-frame event manager to ERVR's own");
+        Check(c.swingAimMaxDeg == 20.f && !c.retiredSwingAimMaxDeg && c.swingAimSnapDeg == 30.f && c.stanceFollowUps == "replay" &&
+              c.contactWeakTouch == 0.5f, "the shipped ini carries the new swing-aim limit, snap, follow-ups and weak touch");
+        Check(c.replaySimulateOnce == defaults.replaySimulateOnce && c.hitHaptics == defaults.hitHaptics &&
+              c.hitBiteSeconds == defaults.hitBiteSeconds && c.hitBiteHold == defaults.hitBiteHold,
+              "the shipped ini carries the particle simulation once a frame and the hit's impact and bite at their defaults");
+        Check(c.contactLiveMult == defaults.contactLiveMult && c.guardHaptics == defaults.guardHaptics &&
+              c.skillPerHand == defaults.skillPerHand && !c.debugHideLeftArt,
+              "the shipped ini carries the live line, the guard ticks and the per-hand skill at their defaults");
     }
 #endif
     std::puts("ERVR.ini loading checks passed.");

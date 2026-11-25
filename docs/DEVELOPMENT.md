@@ -333,6 +333,15 @@ the game's own frame drawn from there (bench: `[Experimental] ReplayBenchCapture
   creates gets right-eye and spare copies (`EyeVolume`), swapped in before the replay and back after it, from the
   resting state the game's own barriers leave (the fog's: UAV). Still shared: the bloom's temporal bright pass and
   the eye adaptation (2D).
+* **World steps run once.** GPU particles (blood, sparks, embers) are simulated in compute: `Vfx\CS_VFX_*` emits
+  and steps them (consume last frame's buffer, append this frame's, collide with the depth buffer through the
+  camera matrices), `Vfx\CS_Gpu*` resets their counters and seeds. Run again in the replay they collided against
+  the right eye's view, and the next frame carried on from that version. `InstallPipelineHooks` reads each compute
+  pipeline's shader debug name (the DXIL `ILDN` part) when the game makes or loads it; dispatches made while one
+  matching `[VR] ReplaySimulateOnce` is bound stay out of the shadow, so the right eye draws the particles the left
+  eye's frame simulated. Their depth sort (`PrepareSort128`, `BitonicSortSinglePass128`) depends on the camera and
+  is replayed. Log: `[replay] GPU effect shader ...` per shader, `[replay] 5 s GPU particle simulation dispatches
+  left out of the replay` (Church of Elleh, flat: ~2 a frame).
 
 ### What the second eye's pass runs
 

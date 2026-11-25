@@ -36,6 +36,7 @@
 #include "body_haptics_er.h"
 #include "transition_stale.h"
 #include "lock_on_facing.h"
+#include "hit_feedback.h"
 #include <windows.h>
 #include <MinHook.h>
 #include "virtual_pad.h"
@@ -46,6 +47,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <cmath>
 #include <cstring>
@@ -82,6 +84,11 @@ namespace off {
     constexpr size_t Hka_NameLayout   = 0x30;      // char** ; name = [i*2]
     constexpr size_t Hka_RefPose      = 0x40;
     constexpr size_t Ctrl_ModelMatrix = 0x230;     // ChrCtrl model matrix (row 3 = position)
+    // ChrCtrl location_mtx44_chr_entity (fromsoftware-rs ChrCtrl): the location entity the model matrix is copied
+    // into at the model-pos rebuild; its matrix at +0x70 (erfps2 location_entity_matrix_mut) is what the character's
+    // model is placed with.
+    constexpr size_t Ctrl_LocationEntity = 0x2F8;
+    constexpr size_t Loc_Matrix       = 0x70;
     constexpr size_t PI_AsmModelRes   = 0x640;
     constexpr size_t PI_AsmModelIns   = 0x648;
     constexpr size_t Asm_Parts        = 0x28;      // CSModelIns*[27]
@@ -186,6 +193,12 @@ using FnCamFinalize = uint64_t (__fastcall*)(void*, void*, void*, void*);
 FnCamFinalize g_origCamFinalize = nullptr;
 using FnUsesDithering = bool (__fastcall*)(void* mgr, void* out, uint32_t id);
 FnUsesDithering g_origUsesDithering = nullptr;
+// The attached location entity's update (exe+0xb43fc0 on 2.7.2.0, found by its bytes): a location placed by a
+// source - the mounted rider's, by the saddle - takes the source's world matrix, turns it by a fixed rotation and
+// stores it at +0x70; the location tree's later reads (the draw's included) take it from there. RideDrawnMatrix
+// puts the frame's matrix there right after it.
+using FnAttachedLocUpdate = void (__fastcall*)(void* entity);
+FnAttachedLocUpdate g_origAttachedLocUpdate = nullptr;
 std::atomic<bool>  g_ditherFp{false};     // first person is running: apply NearDither (refreshed once per camera step)
 std::atomic<float> g_ditherScale{0.f};    // Cfg().fpNearDither, cached for the render thread
 // The ChrExFollowCam instance, captured from its hooks. Its *own* embedded camera (matrix at +0x10) is the
@@ -431,6 +444,19 @@ bool ModelMatrixPos(uint8_t* chr, Vec3& pos) {
 bool ModelMatrixRoot(uint8_t* chr, Vec3& pos, Quat& q) {
     uint8_t* ctrl = Deref(chr + off::Chr_ChrCtrl); if (!ctrl) return false;
     float m[16]; if (!SafeRead(ctrl + off::Ctrl_ModelMatrix, m, sizeof(m))) return false;
+    Vec3 X{m[0], m[1], m[2]}, Y{m[4], m[5], m[6]}, Z{m[8], m[9], m[10]};
+    float lx = X.Length(), ly = Y.Length(), lz = Z.Length();
+    if (std::fabs(lx - 1.f) > 0.05f || std::fabs(ly - 1.f) > 0.05f || std::fabs(lz - 1.f) > 0.05f) return false;
+    pos = {m[12], m[13], m[14]};
+    q = Quat::FromBasis(X * (1.f / lx), Y * (1.f / ly), Z * (1.f / lz));
+    return true;
+}
+// The matrix the character's model is placed with: the location entity's copy of the model matrix (Loc_Matrix).
+bool LocationMatrixRoot(uint8_t* chr, Vec3& pos, Quat& q) {
+    uint8_t* ctrl = chr ? Deref(chr + off::Chr_ChrCtrl) : nullptr;
+    uint8_t* loc = ctrl ? Deref(ctrl + off::Ctrl_LocationEntity) : nullptr;
+    float m[16]; if (!loc || !SafeRead(loc + off::Loc_Matrix, m, sizeof(m))) return false;
+    for (float v : m) if (!std::isfinite(v)) return false;
     Vec3 X{m[0], m[1], m[2]}, Y{m[4], m[5], m[6]}, Z{m[8], m[9], m[10]};
     float lx = X.Length(), ly = Y.Length(), lz = Z.Length();
     if (std::fabs(lx - 1.f) > 0.05f || std::fabs(ly - 1.f) > 0.05f || std::fabs(lz - 1.f) > 0.05f) return false;
@@ -713,7 +739,7 @@ enum RideProbeKind : uint8_t { RP_Pose, RP_RiderPre, RP_RiderRebuilt, RP_MountPr
                                RP_CamWrite, RP_Finalize, RP_Rewrite };
 struct RideProbe {
     std::mutex mtx;
-    struct Ev { uint8_t kind; int16_t tag; int16_t movedMm; };
+    struct Ev { uint8_t kind; int16_t tag; int16_t movedMm; uint8_t locOff; };   // locOff: the drawn rider re-placed before it
     Ev ev[24]; int n = 0;                  // this pass-1 frame, in order
     Vec3 lastRider{}; bool haveLast = false;
     bool havePre = false, haveRebuilt = false, havePost = false, haveMount = false;
@@ -732,6 +758,17 @@ struct RideProbe {
     // The nearest drawn upper-body point within 60 deg of the camera's forward: how close the body came into view.
     float nearestM = 1e9f, nearestDeg = 0.f; int nearestPt = -1; Vec3 nearestAxes{};
     float drawnPostSum = 0.f, matLate = 0.f, mountLate = 0.f, camLate = 0.f;
+    // The matrix the model is placed with (the location entity's, LocationMatrixRoot) against the ChrCtrl model matrix
+    // ERVR solves in: at the pose hook, at the end of pass 1, and against the model matrix of the frame before; the
+    // drawn head placed with it against the final camera; and Torrent's location matrix against its model matrix.
+    bool haveLocPose = false; float locPoseMm = 0.f, locPoseDeg = 0.f;
+    float locEndMm = 0.f, locEndDeg = 0.f, locPrevMm = 0.f, mountLocMm = 0.f; int locN = 0, locMissing = 0;
+    Vec3 prevModel{}; bool havePrevModel = false;
+    Vec3 drawnLocMin{}, drawnLocMax{}; bool haveLocRange = false;
+    // RideDrawnMatrix: the frame's matrix written over the location matrix after the rider's rebuild - how far the
+    // game's own was from it (the correction), and whether it was still there at the end of pass 1.
+    RigidPose wrote{}; bool haveWrote = false;
+    float fixMm = 0.f, fixDeg = 0.f, keptMm = 0.f, keptDeg = 0.f; int writes = 0, refused = 0;
 } g_rideProbe;
 void RideProbeEvent(RideProbeKind k);   // below, with the ride summary
 bool SeatTemplateReady() { return g_skel.boneCount > 0 && (int)g_seatedTemplate.size() == g_skel.boneCount; }
@@ -1138,6 +1175,12 @@ struct InertiaState {
     TwoHandAimState twoHandAim;
     float arc = 0.f, tipSpeed = 0.f, handSpeed = 0.f;
     double stamp = 0;
+    // A landed hit's bite (GameERWeaponBite): the DRAWN blade is held toward where it struck, letting go over biteSec
+    // (hit_feedback.h BiteHold). q above stays the unbitten one - the spring, the swing speeds and the arc never see
+    // the bite, so a blade rejoining the hand opens no strike. drawnQ = what this frame drew (repeat calls get it).
+    double biteAt = -1.0;
+    float biteSec = 0.f, biteHold = 0.f;
+    Quat biteQ, drawnQ;
 };
 InertiaState g_inertia[2];
 std::mutex g_inertiaMtx;
@@ -1157,7 +1200,7 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now,
     InertiaState& s = g_inertia[h];
     if (s.presetFingerprint != preset.fingerprint) { s = InertiaState{}; s.presetFingerprint = preset.fingerprint; }
     const uint32_t fr = g_frame;
-    if (s.init && s.frame == fr) { p = s.pos; q = s.q; return; }
+    if (s.init && s.frame == fr) { p = s.pos; q = s.drawnQ; return; }
     s.frame = fr;
     const float dt = s.init ? (float)(now - s.t) : 0.f;
     // A controller that moved faster than any hand can (20 m/s) jumped: a tracking loss coming back, a runtime
@@ -1190,7 +1233,29 @@ void InertiaStep(int h, Vec3& p, Quat& q, double now,
     if (goodDt && s.tipSpeed >= offSpeed) s.arc += s.tipSpeed * dt;
     else s.arc = 0.f;
     s.pos = p; s.q = q; s.init = true; s.stamp = now;
+    if (s.biteAt >= 0.0) {
+        const float hold = BiteHold((float)(now - s.biteAt), s.biteSec, s.biteHold);
+        if (hold > 0.f) q = QuatSlerp(q, s.biteQ, hold);
+        else s.biteAt = -1.0;
+    }
+    s.drawnQ = q;
 }
+
+}  // namespace
+
+void GameERWeaponBite(int hand, float strength) {
+    if (hand != HandLeft && hand != HandRight) return;
+    const Config& c = Cfg();
+    float sec = 0.f, hold = 0.f;
+    BiteFor(strength, c.hitBiteSeconds, c.hitBiteHold, &sec, &hold);
+    if (sec <= 0.f || hold <= 0.f) return;
+    std::lock_guard<std::mutex> lock(g_inertiaMtx);
+    InertiaState& s = g_inertia[hand];
+    if (!s.init) return;
+    s.biteAt = NowSec(); s.biteSec = sec; s.biteHold = hold; s.biteQ = s.drawnQ;   // where the blade is drawn now
+}
+
+namespace {
 
 struct FrameInfo {
     bool valid = false;
@@ -1204,6 +1269,7 @@ struct FrameInfo {
     bool haveRider = false; RigidPose rider; // riding: the rider's model matrix this write is built on - before the
                           // frame's rebuild the one that rebuild will produce, predicted (RidePredictRider)
     bool rideOpens = false; uint32_t rideGen = 0;   // this write opens the ride frame (RideFrameAnchor) at that count
+    bool rideDrawn = false;   // ... from the drawn pose write, seated: the frame's matrix becomes the drawn one (RideDrawnMatrix)
     bool capturePose = false; // menu/exit poses cannot replace the template; this never gates rendering
     uint8_t* mount = nullptr; // validated, fully mounted Torrent (null during transitions)
     Vec3 root; Quat rootQ; // character root the whole frame is built on (model matrix, physics fallback)
@@ -1225,22 +1291,30 @@ struct FrameInfo {
 // The ray a casting hand aims along, in the game world: origin = the controller (placed exactly as the arm
 // solver places the hand, so it matches the rendered weapon), direction = the controller's pointing axis
 // (CastAimAxis=aim) or up its handle (=handle, the staff's own direction), tilted by CastAimPitchOffsetDeg.
+// What the last swing-aimed CastAimRay on this thread snapped to ("" = nothing): the projectile log names it.
+thread_local char t_swingSnapNote[128] = "";
 bool CastAimRay(const FrameInfo& f, int h, Vec3& origin, Vec3& dir) {
     const Config& c = Cfg();
     const Quat baseQ = Quat::YawQ(f.baseYaw);
     Vec3 sw;
     const int kind = CombatCastAimKind(&sw);
-    // A stance follow-up's projectile (SkillAim=swing): along the middle of the swing's arc, at the height you look.
-    // The ray's far point is the forced lock target the follow-up turns to and its bullet aims at; it starts at the
-    // weapon hand (the eye without one) - a ray from the eye is a projectile seen leaving your face.
+    // A stance follow-up's projectile (SkillAim=swing): along the middle of the swing's arc, at the height you look -
+    // or at the enemy nearest that line (SwingAimSnapDeg, CombatSnapSwingAim). The ray's far point is the forced lock
+    // target the follow-up turns to and its bullet aims at; it starts at the weapon hand (the eye without one) - a ray
+    // from the eye is a projectile seen leaving your face.
     if (kind == 1) {
+        t_swingSnapNote[0] = 0;
         const Vec3 s = baseQ.Rotate(ToGame(sw));
         float headPitch = 0.f;
         if (f.headValid) { const Vec3 hf = (baseQ * f.headQ).Rotate({0, 0, 1}); headPitch = std::asin(std::fmax(-1.f, std::fmin(1.f, hf.y))); }
         float dx, dy, dz;
         SwingAimDirection(s.x, s.y, s.z, WrapPi(f.baseYaw + f.headYaw), headPitch, Deg2Rad(45.f), &dx, &dy, &dz);
         dir = Vec3{dx, dy, dz};
-        if (h < 0 || h > 1 || !f.handValid[h]) { origin = f.headValid ? f.eye : f.anchor + Vec3{0.f, c.fpEyeHeight, 0.f}; return true; }
+        if (h < 0 || h > 1 || !f.handValid[h]) {
+            origin = f.headValid ? f.eye : f.anchor + Vec3{0.f, c.fpEyeHeight, 0.f};
+            CombatSnapSwingAim(origin, &dir, t_swingSnapNote, sizeof(t_swingSnapNote));
+            return true;
+        }
     } else if (h < 0 || h > 1 || !f.handValid[h]) return false;
     float handRotX = c.handRotOffX;
     DebugKeysHandRotX(&handRotX);
@@ -1251,6 +1325,7 @@ bool CastAimRay(const FrameInfo& f, int h, Vec3& origin, Vec3& dir) {
         Vec3 p = f.anchor + baseQ.Rotate(f.handP[h] * c.handScale) - cf * c.handBackOffset;
         if (c.handOrigin == "head") p = p + (f.eye - f.anchor);
         origin = p;
+        CombatSnapSwingAim(origin, &dir, t_swingSnapNote, sizeof(t_swingSnapNote));
         return true;
     }
     Vec3 d = c.castAimAxis == "handle" ? cu : cf;
@@ -1426,27 +1501,34 @@ void StabilizeRideCamera(FrameInfo& f) {
     Vec3 mp; Quat mq;
     f.rideCamShift = {};
     std::lock_guard<std::mutex> g(g_rideStabMtx);
-    if (!f.mount || !f.haveRider || c.rideCameraSmoothing <= 0.f || !PlayerRoot(f.mount, mp, mq)) {
+    if (!f.mount || !f.haveRider || !PlayerRoot(f.mount, mp, mq)) {
         g_rideStab.Reset(); g_rideFrame.Reset(); return;
     }
     const Vec3 raw = f.anchor;
     const double now = NowSec();
     const int pass = FramePumpCurrentPass();
+    // RideCameraSmoothing=0: the view rides the rider rigidly - still on the one frame matrix, so the drawn rider and
+    // the camera stay together (RideDrawnMatrix).
+    const bool smooth = c.rideCameraSmoothing > 0.f;
+    if (!smooth) g_rideStab.Reset();
+    auto smoothed = [&](bool advance) {
+        return smooth ? g_rideStab.Apply(raw, mp, HeadingQ(mq), now, advance, c.rideCameraSmoothing, c.rideCameraMaxDeviation) : raw;
+    };
     if (!c.rideFrameAnchor) {
         // [Experimental] RideFrameAnchor=false: the old pipeline, for an A/B of the "[ride] drawn" probe only.
         const bool advance = pass != 2 && (f.latePost || !c.fpCameraAfterModelPos);
-        f.anchor = g_rideStab.Apply(raw, mp, HeadingQ(mq), now, advance, c.rideCameraSmoothing, c.rideCameraMaxDeviation);
+        f.anchor = smoothed(advance);
         if (advance) { std::lock_guard<std::mutex> s(g_rideStats.mtx); g_rideStats.camDev = std::max(g_rideStats.camDev, g_rideStab.deviation); }
     } else if (f.rideOpens) {
-        f.anchor = g_rideStab.Apply(raw, mp, HeadingQ(mq), now, true, c.rideCameraSmoothing, c.rideCameraMaxDeviation);
-        g_rideFrame.Set(f.rideGen, f.rider, f.anchor, now);
+        f.anchor = smoothed(true);
+        g_rideFrame.Set(f.rideGen, f.rider, f.anchor, now, f.rideDrawn);
         std::lock_guard<std::mutex> s(g_rideStats.mtx);
         g_rideStats.camDev = std::max(g_rideStats.camDev, g_rideStab.deviation);
     } else if (g_rideFrame.Fresh(now)) {
         f.anchor = g_rideFrame.Anchor(f.rider);
     } else {
         // No frame opened lately (neither the pose hook nor the model-pos pre-write ran): smooth here, in pass 1.
-        f.anchor = g_rideStab.Apply(raw, mp, HeadingQ(mq), now, pass != 2, c.rideCameraSmoothing, c.rideCameraMaxDeviation);
+        f.anchor = smoothed(pass != 2);
     }
     if (f.seatPose) f.rideCamShift = f.anchor - raw;
 }
@@ -1520,6 +1602,8 @@ bool BuildFrame(uint8_t* player, FrameInfo& f, bool latePost = false, int write 
             if (g_rideFrame.Opens(gen, write != kWriteOther, now)) {
                 m = RidePredictRider(player, m, f.mount);
                 f.rideOpens = true; f.rideGen = gen;
+                // Only the pose hook's write is drawn: a frame it opens, seated, places the drawn rider on its matrix.
+                f.rideDrawn = write == kWritePoseHook && f.seatPose && c.rideDrawnMatrix && g_origAttachedLocUpdate;
             } else if (g_rideFrame.Fresh(now)) m = g_rideFrame.RiderFor(gen, m);
         }
         mPos = m.pos; mRot = m.rot;
@@ -3071,7 +3155,7 @@ bool RewriteProjectileSpawn(uint8_t* spawn, int hand, double swingAt, bool debug
         return false;
     }
     ProjectileFrame o; ProjectileTurn t; Vec3 pos = g.pos;
-    char what[200]; what[0] = 0;
+    char what[400]; what[0] = 0;
     if (debugOnly) {
         // Flat test: the game's own frame, turned and lifted by the [Experimental] DebugProjectile* knobs.
         const Vec3 aim = Quat::YawQ(Deg2Rad(c.debugProjectileYawDeg)).Rotate(g.fwd.Normalized());
@@ -3099,18 +3183,38 @@ bool RewriteProjectileSpawn(uint8_t* spawn, int hand, double swingAt, bool debug
             } else if (c.skillAim != "head") {
                 bool casting = false; Vec3 ro, rd;
                 if (CombatCastAimHand(&casting) == hand && casting && CastAimRay(f, hand, ro, rd)) {
-                    aim = rd; Vec3 sw; aimWhy = CombatCastAimKind(&sw) == 1 ? "the swing's aim" : "the weapon arm's aim";
+                    aim = rd; Vec3 sw;
+                    const bool swing = CombatCastAimKind(&sw) == 1;
+                    static thread_local char s_why[160];
+                    if (swing && t_swingSnapNote[0]) { snprintf(s_why, sizeof(s_why), "the enemy nearest the swing's aim: %s", t_swingSnapNote); aimWhy = s_why; }
+                    else aimWhy = swing ? "the swing's aim" : "the weapon arm's aim";
                 }
             }
         }
         // The roll: the game animation's slash plane (its last 0.3 s) onto your swing's (around the follow-up's press).
         int animN = 0, vrN = 0;
-        const Vec3 gamePlane = TrailPlane(g_animTrail[hand], now - 0.3, now, &animN);
+        Vec3 gamePlane = TrailPlane(g_animTrail[hand], now - 0.3, now, &animN);
         const Vec3 swingPlane = swingAt > 0.0 ? TrailPlane(g_vrTrail[hand], swingAt - 0.15, std::min(now, swingAt + 0.45), &vrN) : Vec3{};
+        // That slash plane in the projectile's OWN frame, per behavior: learnt whenever the game's animation slashed
+        // (the follow-up ERVR records), used when no animation did - a replayed follow-up (StanceFollowUps=replay)
+        // plays none, and its spawn frame is the sword's dummy poly in whatever pose the body holds, so without it the
+        // wave kept that arbitrary tilt (11-11's "vertical or horizontal seemingly random").
+        static std::unordered_map<int32_t, Vec3> s_slashLocal;   // game thread (SpawnBullet)
+        bool remembered = false;
+        {
+            const Vec3 gr = g.right.Normalized(), gu = g.up.Normalized(), gw = g.fwd.Normalized();
+            if (gamePlane.Length() >= kMinSweptRad) {
+                const Vec3 n = gamePlane.Normalized();
+                s_slashLocal[behaviorId] = Vec3{n.Dot(gr), n.Dot(gu), n.Dot(gw)};
+            } else if (auto it = s_slashLocal.find(behaviorId); it != s_slashLocal.end()) {
+                gamePlane = gr * it->second.x + gu * it->second.y + gw * it->second.z;
+                remembered = gamePlane.Length() >= kMinSweptRad;
+            }
+        }
         o = TurnProjectile(g, aim, gamePlane, swingPlane, &t);
         if (!bladeOk && aim.Length() < 0.5f) return false;
-        char roll[96];
-        if (t.rolled) snprintf(roll, sizeof(roll), "rolled %.0f deg into your swing's plane", t.rollDeg);
+        char roll[128];
+        if (t.rolled) snprintf(roll, sizeof(roll), "rolled %.0f deg into your swing's plane%s", t.rollDeg, remembered ? " (its slash plane remembered from the game's own follow-up)" : "");
         else snprintf(roll, sizeof(roll), "not rolled (%s)", swingAt <= 0.0 ? "no swing fired it" :
                       gamePlane.Length() < kMinSweptRad ? "the animation's slash not seen" : "your swing swept no plane along it");
         snprintf(what, sizeof(what), "moved %.2f m %s, turned %.0f deg to %s, %s", (pos - g.pos).Length(),
@@ -3299,7 +3403,15 @@ void RideProbeEventLocked(RideProbeKind k, uint8_t* player) {
     Vec3 p; const bool have = player && ModelMatrixPos(player, p);
     const float mm = have && r.haveLast ? (p - r.lastRider).Length() * 1000.f : 0.f;
     const int tag = FramePumpCurrentTaskGroup();
-    r.ev[r.n++] = {(uint8_t)k, (int16_t)Clamp(tag, -32768, 32767), (int16_t)std::fmin(mm, 32000.f)};
+    // RideDrawnMatrix: is the location matrix still the one ERVR last wrote? A miss marks this event "!" in the
+    // order line: the game re-placed the drawn rider between the write before it and this one.
+    uint8_t locOff = 0;
+    RigidPose loc;
+    if (r.haveWrote && player && LocationMatrixRoot(player, loc.pos, loc.rot)) {
+        const Quat d = (loc.rot * r.wrote.rot.Conj()).Normalized();
+        locOff = (loc.pos - r.wrote.pos).Length() > 0.002f || Rad2Deg(2.f * std::acos(std::fmin(1.f, std::fabs(d.w)))) > 0.2f;
+    }
+    r.ev[r.n++] = {(uint8_t)k, (int16_t)Clamp(tag, -32768, 32767), (int16_t)std::fmin(mm, 32000.f), locOff};
     if (have) { r.lastRider = p; r.haveLast = true; }
 }
 void RideProbeEvent(RideProbeKind k) {
@@ -3350,6 +3462,52 @@ void RideTrackRebuilt(int who) {
         t.resN = std::min(t.resN + 1, 2); t.resAt = now;
     }
     t.gen.fetch_add(1);
+}
+// After the rider's rebuild (RideWho 1, pass 1): the drawn rider placed with the frame's matrix (RideDrawnMatrix). The
+// game draws the rider's model with its location entity's matrix, which on horseback is not the model matrix ERVR
+// solves the seated pose in and anchors the camera to - it carries the horse's bounce and pitch (2026-11-14 flat
+// probe: 6-19 deg apart at rest, up to 192 mm / 20 deg in a jump). The frame's matrix (the predicted rebuild the drawn
+// pose was solved in) goes over it, the way erfps2 edits that same matrix after the model-pos update.
+void RidePlaceDrawnRider() {
+    uint8_t* player = MainPlayer(); if (!player || !Cfg().rideDrawnMatrix) return;
+    RigidPose frame;
+    {
+        std::lock_guard<std::mutex> g(g_rideStabMtx);
+        if (!g_rideFrame.Fresh(NowSec()) || !g_rideFrame.OwnsRebuild(g_rideTrack.gen.load())) return;
+        frame = g_rideFrame.rider;
+    }
+    uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl);
+    uint8_t* loc = ctrl ? Deref(ctrl + off::Ctrl_LocationEntity) : nullptr;
+    float cur[16];
+    if (!loc || !SafeRead(loc + off::Loc_Matrix, cur, sizeof(cur))) return;
+    bool sane = true;
+    for (float v : cur) sane = sane && std::isfinite(v);
+    RigidPose game;
+    sane = sane && LocationMatrixRoot(player, game.pos, game.rot) && (game.pos - frame.pos).Length() < 1.5f;
+    std::lock_guard<std::mutex> g(g_rideProbe.mtx);
+    RideProbe& r = g_rideProbe;
+    if (!sane) { ++r.refused; return; }   // not a rigid matrix near the rider: not ours to edit
+    float out[16];
+    LocationMatrixFrom(frame, cur, out);
+    if (!SafeWrite(loc + off::Loc_Matrix, out, sizeof(out))) { ++r.refused; return; }
+    const Quat d = (game.rot * frame.rot.Conj()).Normalized();
+    r.fixMm = std::fmax(r.fixMm, (game.pos - frame.pos).Length() * 1000.f);
+    r.fixDeg = std::fmax(r.fixDeg, Rad2Deg(2.f * std::acos(std::fmin(1.f, std::fabs(d.w)))));
+    r.wrote = frame; r.haveWrote = true; ++r.writes;
+}
+// After the attached location entity's update (Hook_AttachedLocUpdate): when it is the mounted rider's, the game has
+// just re-placed it on the saddle (2026-11-14 CamWatchRider census: written in the ride check after the rider's
+// rebuild, then read by the location tree for the draw) - the frame's matrix goes back before anything reads it.
+void RideAttachedLocationUpdated(uint8_t* entity) {
+    uint8_t* player = MainPlayer(); if (!player) return;
+    uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl);
+    if (!ctrl || Deref(ctrl + off::Ctrl_LocationEntity) != entity) return;
+    RidePlaceDrawnRider();
+}
+void __fastcall Hook_AttachedLocUpdate(void* entity) {
+    g_origAttachedLocUpdate(entity);
+    if (g_tripped || !g_moveRiding.load(std::memory_order_relaxed) || !Cfg().rideDrawnMatrix) return;
+    __try { RideAttachedLocationUpdated((uint8_t*)entity); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 // The frame's first write guesses the matrix the rider's rebuild is about to produce: the last one carried the way
 // the rider's physics moved since that rebuild. The game builds the matrix from the physics position and
@@ -3403,7 +3561,15 @@ void RideProbeDrawnPose() {
     const int bones[RideProbe::kBodyPts] = {g_skel.head, s_neck, g_skel.L_clav, g_skel.R_clav, g_skel.torso};
     Vec3 pts[RideProbe::kBodyPts]; bool ok[RideProbe::kBodyPts];
     for (int k = 0; k < RideProbe::kBodyPts; ++k) ok[k] = have && BoneModelPos(bones[k], pts[k]);
+    RigidPose loc, model;
+    const bool haveLoc = LocationMatrixRoot(player, loc.pos, loc.rot) && ModelMatrixRoot(player, model.pos, model.rot);
     std::lock_guard<std::mutex> g(g_rideProbe.mtx);
+    if (haveLoc) {
+        const Quat d = (loc.rot * model.rot.Conj()).Normalized();
+        g_rideProbe.locPoseMm = std::fmax(g_rideProbe.locPoseMm, (loc.pos - model.pos).Length() * 1000.f);
+        g_rideProbe.locPoseDeg = std::fmax(g_rideProbe.locPoseDeg, Rad2Deg(2.f * std::acos(std::fmin(1.f, std::fabs(d.w)))));
+        g_rideProbe.haveLocPose = true;
+    }
     g_rideProbe.havePre = have; g_rideProbe.headPre = head;
     for (int k = 0; k < RideProbe::kBodyPts; ++k) { g_rideProbe.haveBody[k] = ok[k]; g_rideProbe.bodyPre[k] = pts[k]; }
     RideProbeEventLocked(RP_Pose, player);
@@ -3482,6 +3648,31 @@ void RideProbeAfterPass1() {
             if (std::fabs(v.z) > std::fabs(mx.z)) mx.z = v.z;
         };
         const Vec3 drawn = endPos + endRot.Rotate(r.headPre), solved = endPos + endRot.Rotate(r.headPost);
+        // The drawn matrix: the location entity's copy, read where the model is placed from.
+        RigidPose loc;
+        if (LocationMatrixRoot(player, loc.pos, loc.rot)) {
+            const Quat d = (loc.rot * endRot.Conj()).Normalized();
+            r.locEndMm = std::fmax(r.locEndMm, (loc.pos - endPos).Length() * 1000.f);
+            r.locEndDeg = std::fmax(r.locEndDeg, Rad2Deg(2.f * std::acos(std::fmin(1.f, std::fabs(d.w)))));
+            if (r.havePrevModel) r.locPrevMm = std::fmax(r.locPrevMm, (loc.pos - r.prevModel).Length() * 1000.f);
+            if (r.haveWrote) {   // RideDrawnMatrix: still the matrix ERVR wrote after the rebuild?
+                const Quat k = (loc.rot * r.wrote.rot.Conj()).Normalized();
+                r.keptMm = std::fmax(r.keptMm, (loc.pos - r.wrote.pos).Length() * 1000.f);
+                r.keptDeg = std::fmax(r.keptDeg, Rad2Deg(2.f * std::acos(std::fmin(1.f, std::fabs(k.w)))));
+            }
+            const Vec3 dl = axes(loc.pos + loc.rot.Rotate(r.headPre) - cam);
+            if (!r.haveLocRange) { r.drawnLocMin = r.drawnLocMax = dl; r.haveLocRange = true; }
+            else {
+                r.drawnLocMin = {std::fmin(r.drawnLocMin.x, dl.x), std::fmin(r.drawnLocMin.y, dl.y), std::fmin(r.drawnLocMin.z, dl.z)};
+                r.drawnLocMax = {std::fmax(r.drawnLocMax.x, dl.x), std::fmax(r.drawnLocMax.y, dl.y), std::fmax(r.drawnLocMax.z, dl.z)};
+            }
+            ++r.locN;
+        } else ++r.locMissing;
+        if (uint8_t* mount = CurrentTorrent(player)) {
+            RigidPose ml, mm;
+            if (LocationMatrixRoot(mount, ml.pos, ml.rot) && ModelMatrixRoot(mount, mm.pos, mm.rot))
+                r.mountLocMm = std::fmax(r.mountLocMm, (ml.pos - mm.pos).Length() * 1000.f);
+        }
         keep(r.drawnCam, axes(drawn - cam));
         const Vec3 dc = axes(drawn - cam);
         if (!r.haveRange) { r.drawnMin = r.drawnMax = dc; r.haveRange = true; }
@@ -3510,7 +3701,7 @@ void RideProbeAfterPass1() {
         char order[640]; int o = 0;
         for (int i = 0; i < r.n && o < (int)sizeof(order) - 48; ++i)
             o += snprintf(order + o, sizeof(order) - o, "%s%s@%d%s", i ? " > " : "", kName[r.ev[i].kind < 9 ? r.ev[i].kind : 0],
-                          r.ev[i].tag, "");
+                          r.ev[i].tag, r.ev[i].locOff ? "!" : "");
         if (o < (int)sizeof(order) - 48) o += snprintf(order + o, sizeof(order) - o, " > end of pass 1");
         char moves[400]; int mo = 0;
         for (int i = 0; i < r.n && mo < (int)sizeof(moves) - 32; ++i)
@@ -3531,9 +3722,27 @@ void RideProbeAfterPass1() {
         else LOGI("[ride] the drawn body's nearest point in view (5 s): no head, neck, clavicle or torso within 60 deg of the camera's forward");
         LOGI("[ride] one frame in order (runner tag): %s | rider matrix moved (mm) at: %s", order, mo ? moves : "nowhere");
         if (guesses[0]) LOGI("[ride] the drawn write's guess at the rider's rebuilt matrix (5 s max): %s", guesses);
+        if (r.locN > 0)
+            LOGI("[ride] the rider's location matrix (the one its model is placed with) vs its model matrix (5 s max): at the pose "
+                 "hook %.0f mm %.1f deg%s, at the end of pass 1 %.0f mm %.1f deg, vs the frame before's model matrix %.0f mm | "
+                 "the drawn head placed with it vs the final camera lateral %+.0f..%+.0f vertical %+.0f..%+.0f forward %+.0f..%+.0f | "
+                 "Torrent's location vs model %.0f mm | %d frames read, %d unreadable",
+                 r.locPoseMm, r.locPoseDeg, r.haveLocPose ? "" : " (never read)", r.locEndMm, r.locEndDeg, r.locPrevMm,
+                 r.drawnLocMin.x * 1000.f, r.drawnLocMax.x * 1000.f, r.drawnLocMin.y * 1000.f, r.drawnLocMax.y * 1000.f,
+                 r.drawnLocMin.z * 1000.f, r.drawnLocMax.z * 1000.f, r.mountLocMm, r.locN, r.locMissing);
+        else LOGI("[ride] the rider's location matrix could not be read (%d frames)", r.locMissing);
+        if (r.writes + r.refused > 0)
+            LOGI("[ride] drawn rider placed with the frame's matrix (RideDrawnMatrix) %d times, %d refused: the game's own placement "
+                 "was up to %.0f mm %.1f deg off it; at the end of pass 1 the location matrix was up to %.0f mm %.1f deg off what "
+                 "ERVR wrote (0 = nothing re-placed it)", r.writes, r.refused, r.fixMm, r.fixDeg, r.keptMm, r.keptDeg);
         r.frames = 0; r.drawnCam = r.postCam = r.drawnPost = {}; r.drawnPostSum = r.matLate = r.mountLate = r.camLate = 0.f;
         r.haveRange = false; r.nearestM = 1e9f; r.nearestPt = -1;
+        r.haveLocPose = false; r.locPoseMm = r.locPoseDeg = r.locEndMm = r.locEndDeg = r.locPrevMm = r.mountLocMm = 0.f;
+        r.locN = r.locMissing = 0; r.haveLocRange = false;
+        r.fixMm = r.fixDeg = r.keptMm = r.keptDeg = 0.f; r.writes = r.refused = 0;
     }
+    r.haveWrote = false;   // per frame: the end-of-pass check compares only against this frame's write
+    if (haveEnd) { r.prevModel = endPos; r.havePrevModel = true; } else r.havePrevModel = false;
     r.n = 0; r.havePre = r.haveRebuilt = r.havePost = r.haveMount = false;
     for (bool& b : r.haveBody) b = false;
     // The next frame's first move is measured from here, so a move between frames shows on its first write.
@@ -3694,6 +3903,7 @@ void __fastcall Hook_UpdateChrModelPos(void* ctrl) {
     if (who) { __try { RideProbeAround(0, who); } __except (EXCEPTION_EXECUTE_HANDLER) { who = 0; } }
     g_origUpdModelPos(ctrl);
     if (who) { __try { RideTrackRebuilt(who); RideProbeAround(1, who); } __except (EXCEPTION_EXECUTE_HANDLER) { who = 0; } }
+    if (who == 1) { __try { RidePlaceDrawnRider(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (act) { __try { UpdateChrModelPosBody(ctrl, true); } __except (SehFilter(GetExceptionCode())) { g_tripped = true; } }
     if (who == 1) { __try { RideProbeAround(2, who); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 }
@@ -4098,6 +4308,18 @@ uint8_t* GameERCamWatchTarget(uint32_t* outLen) {
     if (outLen) *outLen = (uint32_t)(off::Cam_Fov + 4 - off::Cam_Matrix);
     return pc + off::Cam_Matrix;
 }
+// CamWatchRider target: the mounted rider's location matrix (the one its model is placed with), once Torrent is
+// found - who re-places it after the rider's rebuild, and who reads it for the draw.
+uint8_t* GameERRiderWatchTarget(uint32_t* outLen) {
+    if (!g_moveRiding.load()) return nullptr;
+    uint8_t* player = MainPlayer();
+    if (!player || !CurrentTorrent(player)) return nullptr;
+    uint8_t* ctrl = Deref(player + off::Chr_ChrCtrl);
+    uint8_t* loc = ctrl ? Deref(ctrl + off::Ctrl_LocationEntity) : nullptr;
+    if (!loc) return nullptr;
+    if (outLen) *outLen = 64;
+    return loc + off::Loc_Matrix;
+}
 
 bool GameERInit() {
     g_base = (uint8_t*)GetModuleHandleW(nullptr);
@@ -4172,6 +4394,13 @@ bool GameERInit() {
     if (udit && MH_CreateHook(udit, (void*)&Hook_UsesDithering, (void**)&g_origUsesDithering) == MH_OK && MH_EnableHook(udit) == MH_OK)
         LOGI("[game] near-camera dither lookup hooked @ %p (NearDither=%.2f)", (void*)udit, Cfg().fpNearDither);
     else LOGW("[game] near-camera dither hook unavailable - NearDither has no effect");
+
+    // The attached location entity's update (Hook_AttachedLocUpdate, RideDrawnMatrix): its own bytes, which hold the
+    // +0x48 source lookup and the +0x70 matrix it writes.
+    uint8_t* aloc = AobScan("40 53 48 81 EC D0 00 00 00 48 8B D9 48 83 C1 48 E8 ?? ?? ?? ?? 48 85 C0 0F 84 ?? ?? ?? ?? 4C 8B 08 48 8D 53 70 45 33 C0");
+    if (aloc && MH_CreateHook(aloc, (void*)&Hook_AttachedLocUpdate, (void**)&g_origAttachedLocUpdate) == MH_OK && MH_EnableHook(aloc) == MH_OK)
+        LOGI("[game] attached location update hooked @ %p (the mounted rider drawn with the frame's matrix)", (void*)aloc);
+    else LOGW("[game] attached location update not found - on Torrent the rider is drawn where the game places it (RideDrawnMatrix off)");
 
     // Per-frame pose hook: CS::NoUpdateInterface vft[10] (ERSkeletonMan's timing point).
     if (void** vt = FindVTable("CS::NoUpdateInterface")) {

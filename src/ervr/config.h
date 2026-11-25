@@ -25,6 +25,11 @@ struct Config {
     // pass per headset frame, the right eye re-drawn on the GPU from the left eye's recorded commands; the default
     // since 0.9.0 - an earlier install's StereoMode=full moves to it once, see Config::Load)
     std::string vrStereoMode = "replay";
+    // Single-frame stereo: compute shaders whose debug names contain one of these (comma-separated, case and slash
+    // direction ignored) run once a frame - the replay leaves their dispatches out and the right eye draws what the
+    // left eye's frame computed. Default = ER's GPU particle simulation (blood, sparks, embers: Vfx\CS_VFX_* steps and
+    // emits them, Vfx\CS_Gpu* resets their counters). Empty = the replay runs everything again. Read at launch.
+    std::string replaySimulateOnce = "Vfx/CS_VFX_,Vfx/CS_Gpu";
     // Full stereo: the OpenXR frame loop (xrWaitFrame/BeginFrame/EndFrame) runs on its own thread and submits
     // the newest finished stereo pair every headset frame; the game's presents only blit and publish. Without
     // it the game thread waits in xrWaitFrame, so a pair 1 ms over the frame waits for the NEXT slot and the
@@ -352,6 +357,29 @@ struct Config {
     float contactMaxSeconds = 1.5f;
     // After a strike that landed, the next opens this long after it ended (a missed one re-arms at once).
     float contactCooldownSeconds = 0.3f;
+    // A contact under ContactWeakTouch x a vanilla hit is a touch (weapon_contact.h ContactIsWeakTouch): it chips,
+    // and the swing keeps its hit - once it is ContactRehitGain faster (and at least a full contact) a fresh attack
+    // opens for one more contact. 2026-11-14: a strike opens at 0.8 m/s, so a blade already on the enemy took the
+    // swing's one hit at the 0.25x floor and the real swing after it went through inert. 0 = every contact spends.
+    float contactWeakTouch = 0.5f;
+    float contactRehitGain = 0.25f;
+    // A swing's blade is live - an attack that can hit - only once the swing is fast enough for this much of a vanilla
+    // hit (weapon_contact.h ContactGoesLive); its first contact then lands at the swing's own strength and spends it, and
+    // the weapon hand gets a tick the moment it goes live. 2026-11-21 session: 585 of 863 contacts were 0.25x touches on
+    // the strike's very first frame (opened at ContactOnSpeed, the blade already on something), and the real swing after
+    // them went through inert. 0 = live from the first motion, with ContactWeakTouch's touches and re-hits.
+    float contactLiveMult = 0.5f;
+    // A tick in the shield hand when the guard goes up, a softer one when it drops (the arm is the controller's, so the
+    // game's guard pose never shows). false = silent.
+    bool  guardHaptics = true;
+    // A landed hit felt (hit_feedback.h, 2026-11-21 "hitting enemies is hard to feel"): HitHaptics scales the impact
+    // the weapon hand gets - a crack, then a thud that dies away, both sized by how hard the hit was and the weapon's
+    // weight (two-handed: the other hand too); 0 = the plain 70 ms buzz of before. HitBiteSeconds / HitBiteHold: a
+    // full hit's blade stays where it struck (HitBiteHold of the hand's motion) and rejoins the hand over
+    // HitBiteSeconds; softer hits bite less. 0 = no bite. Only the drawn blade lags: swing speed keeps the hand's.
+    float hitHaptics = 1.f;
+    float hitBiteSeconds = 0.12f;
+    float hitBiteHold = 0.7f;
     float kineticContinuousMult = 0.2f;
     std::string kineticStaminaMode = "off";   // off (bar out of the loop, game's on-hit charge refunded) | game | full
     float kineticHitPause = 0.25f;        // gated model only: s the attack pauses after a landed hit (0 = the strike ends on its first hit)
@@ -432,9 +460,31 @@ struct Config {
     std::string skillButton = "LT";       // the game's skill button (what "game" presses and "effect" records from)
     // The skill trigger (combat_moves.h): TwoHandSkillButton one-handed too, held as long as the trigger is.
     bool  oneHandSkill = true;            // one-handed: the trigger holds the game's skill button (stances, charged skills)
+    // One-handed with a shield whose own skill takes the game's skill button (a shield art: Parry, Barricade Shield...):
+    // the right trigger still plays the right weapon's skill - the shield's art is hidden from the game while it does -
+    // and the left trigger plays the shield's (its guard is the raised shield). false = the game's rule: the shield's art
+    // owns the one skill button.
+    bool  skillPerHand = true;
+    // Flat test only: set the left shield's art aside whenever it would take the skill button (no trigger needed), so a
+    // pad's skill press shows which skill the game plays. 0 = off (the default), 1 = always, 2 = in alternate 8 s windows
+    // (one run shows both; the log's FP line says which the press met).
+    int   debugHideLeftArt = 0;
     float skillHoldSeconds = 0.3f;        // two-handed, TwoHandSkill=effect: a press held this long is the game's own skill, held
     bool  stanceSwings = true;            // while ERVR holds the skill, a swing is the game's R1/R2 (a stance's follow-up)
-    float swingAimMaxDeg = 45.f;          // SkillAim=swing: the swing turns the projectile at most this far from your view (0 = no limit)
+    // SkillAim=swing: the swing turns the projectile at most this far from your view (0 = no limit). 45 until
+    // 2026-11-14 (four Moonveil waves were sent a full 45 deg left); an ini carrying exactly 45 reads 20 (logged).
+    float swingAimMaxDeg = 20.f;
+    bool  retiredSwingAimMaxDeg = false;
+    // SkillAim=swing: the projectile turns to the enemy nearest the swing's line, within this many degrees of it and
+    // SwingAimSnapRange metres (combat_moves.h PickSnapTarget). Players and phantoms are never picked. 0 = no snap.
+    float swingAimSnapDeg = 30.f;
+    float swingAimSnapRange = 20.f;
+    // A stance follow-up (Moonveil's Transient Moonlight): replay = its projectile leaves from your blade at your
+    // swing's fastest point, no game animation (no lunge, no wind-up, no dropped presses), ERVR charging its FP; the
+    // game's own follow-up plays once per weapon and session so ERVR can record the wave (a follow-up without a
+    // projectile is always the game's). game = every swing presses the game's follow-up (the 0.9.1 behaviour).
+    std::string stanceFollowUps = "replay";
+    float stanceWaveMaxDelay = 0.25f;     // s after the press the wave leaves at the latest (it waits for the swing's fastest point)
     std::string skillAim = "swing";       // a melee weapon's skill projectile (Moonveil's wave): swing = where the stance follow-up's swing aimed (height from your view) | head = where the body faces (your view) | hand = along the weapon hand's controller
     // A stance (a skill with R1/R2 follow-ups: Moonveil, Unsheathe) while the trigger is held: true = the game holds
     // the stance (its animation plays for the whole hold); false = the hold plays nothing, and each swing enters the
@@ -883,6 +933,7 @@ struct Config {
     bool  camWatchIgt = false;      // watch the IGT counter's writer (game-time advance)
     bool  camWatchDst = false;      // watch the task-runner's staged frame-state block
     bool  camWatchAbm = false;      // watch the action-button manager's flag bytes (pass2_interact.h)
+    bool  camWatchRider = false;    // watch the mounted rider's location matrix (who re-places it, who draws from it)
     bool  igtTrace = false;         // hook the IGT-advance fn; log caller/dt/pass
 
     bool  m2TaskProbe = false;
@@ -999,6 +1050,11 @@ struct Config {
     // The frame's prediction of the rider's matrix continues the ride's tilt over its physics one frame further
     // (ExtrapolateTilt), used only while it measures better than the plain carry. false = always the plain carry.
     bool rideTiltExtrapolate = true;
+    // Seated on Torrent, the rider is drawn with the matrix its pose was solved in: the frame's matrix is written over
+    // the location matrix the game draws the rider with, which carries the horse's bounce and pitch (2026-11-14: up
+    // to 192 mm / 20 deg off, the body rising into view). false = the game's own placement (the "[ride] the rider's
+    // location matrix" line measures it).
+    bool rideDrawnMatrix = true;
 
     void Load(const std::wstring& iniPath);
 };

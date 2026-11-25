@@ -95,6 +95,7 @@ void Config::Load(const std::wstring& path) {
         }
         WritePrivateProfileStringW(L"VR", L"StereoModeDefault", L"replay", ini);
     }
+    replaySimulateOnce = GetS(ini, L"VR", L"ReplaySimulateOnce", replaySimulateOnce);
     vrAsyncSubmit    = GetB(ini, L"VR", L"AsyncSubmit", vrAsyncSubmit);
     vrRenderScale    = GetF(ini, L"VR", L"RenderScale", vrRenderScale);
     vrWorldScale     = GetF(ini, L"VR", L"WorldScale", vrWorldScale);
@@ -313,6 +314,13 @@ void Config::Load(const std::wstring& path) {
     contactDwellSeconds = Clamp(GetF(ini, L"Combat", L"ContactDwellSeconds", contactDwellSeconds), 0.02f, 1.f);
     contactMaxSeconds = Clamp(GetF(ini, L"Combat", L"ContactMaxSeconds", contactMaxSeconds), 0.f, 10.f);
     contactCooldownSeconds = Clamp(GetF(ini, L"Combat", L"ContactCooldownSeconds", contactCooldownSeconds), 0.f, 2.f);
+    contactWeakTouch = Clamp(GetF(ini, L"Combat", L"ContactWeakTouch", contactWeakTouch), 0.f, 1.2f);
+    contactRehitGain = Clamp(GetF(ini, L"Combat", L"ContactRehitGain", contactRehitGain), 0.f, 1.f);
+    contactLiveMult = Clamp(GetF(ini, L"Combat", L"ContactLiveMult", contactLiveMult), 0.f, 1.2f);
+    guardHaptics = GetB(ini, L"Combat", L"GuardHaptics", guardHaptics);
+    hitHaptics = Clamp(GetF(ini, L"Combat", L"HitHaptics", hitHaptics), 0.f, 2.f);
+    hitBiteSeconds = Clamp(GetF(ini, L"Combat", L"HitBiteSeconds", hitBiteSeconds), 0.f, 0.3f);
+    hitBiteHold = Clamp(GetF(ini, L"Combat", L"HitBiteHold", hitBiteHold), 0.f, 1.f);
     inertiaAngAccel = GetF(ini, L"Combat", L"InertiaAngAccel", inertiaAngAccel);
     inertiaSpringHz = GetF(ini, L"Combat", L"InertiaSpringHz", inertiaSpringHz);
     inertiaComRef = GetF(ini, L"Combat", L"InertiaComRef", inertiaComRef);
@@ -369,10 +377,21 @@ void Config::Load(const std::wstring& path) {
     twoHandSkillButton = GetS(ini, L"Combat", L"TwoHandSkillButton", twoHandSkillButton);
     skillButton = GetS(ini, L"Combat", L"SkillButton", skillButton);
     oneHandSkill = GetB(ini, L"Combat", L"OneHandSkill", oneHandSkill);
+    skillPerHand = GetB(ini, L"Combat", L"SkillPerHand", skillPerHand);
+    debugHideLeftArt = GetI(ini, L"Combat", L"DebugHideLeftArt", debugHideLeftArt);
     skillHoldSeconds = GetF(ini, L"Combat", L"SkillHoldSeconds", skillHoldSeconds);
     stanceSwings = GetB(ini, L"Combat", L"StanceSwings", stanceSwings);
     skillAim = GetS(ini, L"Combat", L"SkillAim", skillAim);
     swingAimMaxDeg = Clamp(GetF(ini, L"Combat", L"SwingAimMaxDeg", swingAimMaxDeg), 0.f, 180.f);
+    // 45 shipped until 0.9.1: the swing aim leans left on a right-handed forehand and the outliers flew a full 45 deg
+    // off (2026-11-14). An ini still carrying exactly that reads the new default.
+    retiredSwingAimMaxDeg = std::fabs(swingAimMaxDeg - 45.f) < 1e-4f;
+    if (retiredSwingAimMaxDeg) swingAimMaxDeg = 20.f;
+    swingAimSnapDeg = Clamp(GetF(ini, L"Combat", L"SwingAimSnapDeg", swingAimSnapDeg), 0.f, 90.f);
+    swingAimSnapRange = Clamp(GetF(ini, L"Combat", L"SwingAimSnapRange", swingAimSnapRange), 0.f, 60.f);
+    stanceFollowUps = GetS(ini, L"Combat", L"StanceFollowUps", stanceFollowUps);
+    if (stanceFollowUps != "replay" && stanceFollowUps != "game") stanceFollowUps = "replay";
+    stanceWaveMaxDelay = Clamp(GetF(ini, L"Combat", L"StanceWaveMaxDelay", stanceWaveMaxDelay), 0.f, 1.f);
     if (skillAim != "swing" && skillAim != "head" && skillAim != "hand") skillAim = "swing";
     stanceHoldAnimation = GetB(ini, L"Combat", L"StanceHoldAnimation", stanceHoldAnimation);
     skillProjectileFromBlade = GetB(ini, L"Combat", L"SkillProjectileFromBlade", skillProjectileFromBlade);
@@ -540,6 +559,7 @@ void Config::Load(const std::wstring& path) {
     camWatchIgt     = GetB(ini, L"Experimental", L"CamWatchIgt", camWatchIgt);
     camWatchDst     = GetB(ini, L"Experimental", L"CamWatchDst", camWatchDst);
     camWatchAbm     = GetB(ini, L"Experimental", L"CamWatchAbm", camWatchAbm);
+    camWatchRider   = GetB(ini, L"Experimental", L"CamWatchRider", camWatchRider);
     igtTrace        = GetB(ini, L"Experimental", L"IgtTrace", igtTrace);
     m2TaskProbe    = GetB(ini, L"Experimental", L"TaskProbe", m2TaskProbe);
     m2ForcePass2   = GetB(ini, L"Experimental", L"ForcePass2", m2ForcePass2);
@@ -586,6 +606,7 @@ void Config::Load(const std::wstring& path) {
     debugProjectileLift    = GetF(ini, L"Experimental", L"DebugProjectileLift", debugProjectileLift);
     rideFrameAnchor        = GetB(ini, L"Experimental", L"RideFrameAnchor", rideFrameAnchor);
     rideTiltExtrapolate    = GetB(ini, L"Experimental", L"RideTiltExtrapolate", rideTiltExtrapolate);
+    rideDrawnMatrix        = GetB(ini, L"Experimental", L"RideDrawnMatrix", rideDrawnMatrix);
 }
 
 Config& Cfg() { return g_cfg; }
@@ -606,6 +627,10 @@ void ConfigLogNotes() {
         LOGI("[config] [VR] Pass2ActionButtons in ERVR.ini is 0.7.0's and no longer read: the action-button update "
              "runs in both passes again (doors, levers, chests), Pass2ActionButtonUpdate=false would skip it. Delete "
              "the line to stop this note.");
+    if (g_cfg.retiredSwingAimMaxDeg)
+        LOGI("[config] [Combat] SwingAimMaxDeg=45 in ERVR.ini is the old shipped limit: a swing-aimed projectile turns at "
+             "most 20 deg from your view now (and snaps to an enemy near the swing's line, SwingAimSnapDeg). Delete the "
+             "line to stop this note; another value is used as written.");
     if (g_cfg.retiredRelearnHold)
         LOGI("[config] [Combat] TwoHandSkillRelearnHold in ERVR.ini is no longer read: holding the skill trigger past "
              "SkillHoldSeconds (0.3 s) is the game's own skill, held for as long as you hold the trigger, and it is "

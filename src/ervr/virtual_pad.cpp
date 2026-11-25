@@ -10,6 +10,7 @@
 #include "belt.h"
 #include "body_calibration.h"
 #include "weapon_wheel.h"
+#include "hit_feedback.h"
 #include <mutex>
 #include <cctype>
 #include <cmath>
@@ -104,6 +105,24 @@ uint16_t ActivePulses(double now) {
 
 void Haptic(Hand h, float amp, double now, double dur) {
     if (auto* b = ActiveBackend()) { b->Haptic(h, amp, (float)dur); g_hapticUntil[h] = now + dur; }
+}
+
+// A landed hit's impact (hit_feedback.h HitHaptic), played per hand: a vibration's amplitude is fixed, so the
+// envelope is stepped from the pad updates (250 Hz) - re-sent when it changed or every 20 ms, each send only 30 ms long
+// so a stalled worker can never leave a motor running. When it ends, the expiry below hands the motor back to the
+// game's rumble.
+struct HitPlay { bool on = false; double t0 = 0; HitHaptic shape; float scale = 1.f, lastAmp = -1.f; double lastSent = 0; };
+HitPlay g_hitPlay[2];
+void HitPlayStep(int h, double now) {
+    HitPlay& p = g_hitPlay[h];
+    if (!p.on) return;
+    const float a = HitHapticAmp(p.shape, (float)(now - p.t0));
+    if (a < 0.f) { p.on = false; return; }
+    const float amp = Clamp(a * p.scale, 0.f, 1.f);
+    if (std::fabs(amp - p.lastAmp) >= 0.05f || now - p.lastSent >= 0.02) {
+        Haptic((Hand)h, amp, now, 0.03);
+        p.lastAmp = amp; p.lastSent = now;
+    }
 }
 
 void ApplyDeadzone(float& x, float& y, float dz) {
@@ -456,6 +475,8 @@ void VirtualPadUpdate(double now) {
     bool physical = CombatHandlesSwings();
     if (!g_menuMode && !calib.showing) CombatPollHands(tr, in, now); // fit presets also apply with physical combat disabled
     else CombatPollHands(VRTracking{}, VRInputState{}, now);   // keeps its state machine idle
+    HitFeel hitFeel[2];
+    CombatTakeHitFeel(hitFeel);   // every update, so a hit never plays late
     if (uint32_t hr = CombatTakeHapticRequests(); hr && c.gestureHaptics) {
         auto weaponHaptic = [&](Hand h,float amplitude,double at,double duration) { Haptic(h,amplitude*CombatHapticScale(h),at,duration); };
         for (int h = 0; h < 2; ++h) {
@@ -464,9 +485,21 @@ void VirtualPadUpdate(double now) {
         }
         if (hr & 32u) weaponHaptic(HandLeft, 1.0f, now, 0.18);                    // deflect: hard, long
         else if (hr & 16u) weaponHaptic(HandLeft, 0.6f, now, 0.08);               // blocked hit: thud
-        for (int h = 0; h < 2; ++h) if (hr & (64u << h)) weaponHaptic((Hand)h, 0.9f, now, 0.07);   // strike landed: thud in the weapon hand
+        else if (hr & 1024u) weaponHaptic(HandLeft, 0.55f, now, 0.06);            // guard up: a firm tick
+        else if (hr & 2048u) weaponHaptic(HandLeft, 0.2f, now, 0.035);            // guard down: a soft one
+        // Strike landed: HitHaptics > 0 plays the hit's impact (below); 0 = the plain thud in the weapon hand.
+        if (c.hitHaptics <= 0.f) for (int h = 0; h < 2; ++h) if (hr & (64u << h)) weaponHaptic((Hand)h, 0.9f, now, 0.07);
         if (hr & 256u) { weaponHaptic(HandLeft, 0.7f, now, 0.15); weaponHaptic(HandRight, 0.7f, now, 0.15); }   // two-handed: both hands close on the weapon
         else if (hr & 512u) { weaponHaptic(HandLeft, 0.4f, now, 0.06); weaponHaptic(HandRight, 0.4f, now, 0.06); }   // back to one hand
+    }
+    for (int h = 0; h < 2; ++h) {
+        if (hitFeel[h].strength > 0.f && c.gestureHaptics && c.hitHaptics > 0.f) {
+            HitPlay& p = g_hitPlay[h];
+            p.on = true; p.t0 = now; p.lastAmp = -1.f; p.lastSent = 0;
+            p.shape = HitHapticFor(hitFeel[h].strength, hitFeel[h].weight);
+            p.scale = c.hitHaptics * CombatHapticScale(h);
+        }
+        HitPlayStep(h, now);
     }
     // A hand holding a belt item is not swinging (its pose reads as untracked to the detector).
     auto gesturePose = [&](int h) { Pose p = tr.hand[h]; if (BeltOwnsHand(h)) p.valid = false; return p; };

@@ -46,6 +46,7 @@
 #include "game_version.h"
 #include "action_queue_snapshot.h"
 #include "combat_moves.h"
+#include "hit_feedback.h"
 #include "weapon_motion.h"
 #include "weapon_contact.h"
 #include "mounted_rider.h"
@@ -158,6 +159,8 @@ constexpr size_t ChrDist_Stride = 0x10;          // {ChrIns* @0, f32 distance @8
 // ChrIns (fromsoftware-rs chr_ins.rs; modules @0x190 = the same container stamina already uses)
 constexpr size_t Chr_Handle   = 0x08;            // FieldInsHandle {u32 selector, i32 block}: the character itself
 constexpr size_t Chr_NpcId    = 0x64;            // i32, the 4-digit character id (e.g. 3070)
+constexpr size_t Chr_ChrType  = 0x68;            // i32 ChrType (fromsoftware-rs chr_ins.rs: 1 white phantom ... 17 blue, 19 summoned NPC)
+constexpr size_t Chr_TeamType = 0x6C;            // u8 team type (NpcParam TEAM_TYPE)
 constexpr size_t Chr_LastHitBy = 0x180;          // FieldInsHandle of whoever hit it last (selector ~0 = none)
 constexpr size_t Data_Hp      = 0x138;
 constexpr size_t Data_MaxHp   = 0x13C;
@@ -270,6 +273,14 @@ std::atomic<int> g_leftShield{0};    // game thread -> worker: 1 while a shield 
 CombatStatus g_status;
 volatile LONG g_injected = 0, g_swings = 0;
 std::atomic<uint32_t> g_haptic{0};
+// Landed hits for the pad worker's impact (CombatTakeHitFeel): the hardest per hand since it last looked, 0 = none.
+std::atomic<float> g_hitFeel[2] = {0.f, 0.f};
+void PostHitFeel(int h, float strength) {
+    if (h != HandLeft && h != HandRight) return;
+    const float v = strength > 0.001f ? strength : 0.001f;   // the softest hit still plays its crack
+    float cur = g_hitFeel[h].load();
+    while (v > cur && !g_hitFeel[h].compare_exchange_weak(cur, v)) {}
+}
 uint32_t g_lastFrame = 0xFFFFFFFF;
 double g_lastEvLog = 0;
 bool g_tripped = false;
@@ -414,6 +425,8 @@ struct RecEvent {
 struct SkillRecording {
     bool valid = false;
     int weaponId = 0, arts = -1;           // key: the weapon (affinity + level) and the SwordArtsParam it carried
+    int variant = 0;                       // ... and what was recorded: 0 the skill, 1 / 2 a stance's light / heavy follow-up
+    int bullets = 0;                       // follow-ups: projectile events kept (0 = the follow-up has none: always the game's)
     std::vector<RecEvent> ev;
     int fpObserved = 0;                    // FP the game took while recording (cost fallback)
     bool hasAttack = false; AttackBehaviorArgs attack{};   // the skill's first AttackBehavior: the next swing's row
@@ -435,6 +448,15 @@ std::atomic<int>  g_artType[2]{-1, -1};    // game thread -> worker: that hand's
 // stance does not play while held); each follow-up press is then the skill button AND the attack (chords 12/13).
 std::atomic<bool> g_stanceArmed{false};    // worker: armed that way right now
 std::atomic<double> g_stanceChordLead{0.15};   // worker: s the skill button leads the attack in chords 12/13 (StanceSettle)
+// StanceFollowUps=replay (combat_moves.h, "stance follow-up wave"): a follow-up's projectile is replayed from a recording
+// at the swing's fastest point instead of pressing the game's attack. Variants: 1 = light (R1), 2 = heavy (R2).
+std::atomic<int> g_followUpState[2][3]{};  // game thread -> worker, per hand and variant: 0 not recorded, 1 recorded with a
+                                           // projectile (replayable), 2 recorded without one (always the game's follow-up)
+std::atomic<int> g_followUpRecordReq{0};   // worker -> game thread: hand * 4 + variant - the game plays this one, record it
+std::atomic<int> g_waveFire{0};            // worker -> game thread: hand * 4 + variant - replay the recorded wave now
+std::atomic<double> g_wavePressAt[2]{};    // worker: when that swing was recognised (for the log)
+struct WavePending { bool pending = false; int variant = 1; double pressAt = 0.0; float peak = 0.f; };
+WavePending g_wave[2];                     // worker only: a recognised follow-up swing whose wave waits for its fastest point
 // The player's own BulletBehavior is running on this thread (the TAE hook or a replay): CSBulletManager::SpawnBullet
 // asks CombatPlayerProjectileNow whether the projectile it is spawning is one ERVR moves to the blade.
 thread_local int t_playerBulletEvent = 0;
@@ -1134,7 +1156,25 @@ void ApplyGuard(uint8_t* row, float q) {
     float d = e.origDark * cutMul; SafeWrite(row + Wep_DarkGuardCut, &d, 4);
     int16_t def = (int16_t)((float)e.origDef * defMul + 0.5f); SafeWrite(row + Wep_StaminaGuardDef, &def, 2);
 }
-void RestoreAll() { RestoreAtk(HandLeft); RestoreAtk(HandRight); RestoreBhv(HandLeft); RestoreBhv(HandRight); RestoreGuard(); }
+// SkillPerHand (2026-11-21): one-handed, a left shield whose art is a shield art (Parry, Barricade Shield...) takes the
+// game's one skill button - the HKS GetSwordArtInfo reads the left art's type and IsShieldArts hands the press to the
+// left. In a 2026-11-21 session a greatshield (SwordArtsParam 300, art type 90) put in the left at 16:08 made the
+// right trigger play the shield's skill instead of Reduvia's. While the right trigger plays the right weapon's skill,
+// the shield art's type is written as "no skill" (SwordArtsParam 10's: a shield without a shield art, like the Brass
+// Shield of 2026-11-12, leaves the button to the right weapon), and put back as soon as the left trigger asks for it.
+struct ArtHide { uint8_t* row = nullptr; int arts = -1; uint8_t t8 = 0; uint16_t t16 = 0; bool on = false; } g_artHide;   // game thread
+std::atomic<int> g_artHideWant{0};    // worker -> game thread: 1 = hide the left shield's art
+std::atomic<int> g_artHideState{0};   // game thread -> pad: 0 shown, 1 hidden, 2 cannot be hidden (the game's rule stands)
+std::atomic<bool> g_skillSplit{false};   // worker: per-hand skill triggers are in force (left trigger = the shield's skill)
+std::atomic<int> g_skillHoldHand{-1};    // worker: the hand whose trigger holds the skill now (-1 none)
+void RestoreArtHide() {
+    if (g_artHide.on && g_artHide.row) {
+        SafeWrite(g_artHide.row + Arts_Type, &g_artHide.t8, 1);
+        SafeWrite(g_artHide.row + Arts_TypeNew, &g_artHide.t16, 2);
+    }
+    g_artHide.on = false; g_artHideState.store(0);
+}
+void RestoreAll() { RestoreAtk(HandLeft); RestoreAtk(HandRight); RestoreBhv(HandLeft); RestoreBhv(HandRight); RestoreGuard(); RestoreArtHide(); }
 
 float QualityToMult(float q, const Config& c) {
     if (q <= 1.f) return Lerp(c.kineticMinMult, 1.f, q < 0 ? 0 : q);
@@ -1254,6 +1294,7 @@ void ResolveSkill(uint8_t* player, int h) {
             si.fpCost = mp; si.stamCost = sp; si.fpR1 = r1; si.fpR2 = r2;
             uint8_t t8 = 0; uint16_t t16 = 0;
             if (SafeRead(row + Arts_TypeNew, &t16, 2) && SafeRead(row + Arts_Type, &t8, 1)) si.artType = t16 != 0 ? t16 : t8;
+            if (g_artHide.on && g_artHide.arts == si.arts) si.artType = g_artHide.t16 != 0 ? g_artHide.t16 : g_artHide.t8;   // hidden by SkillPerHand: its real type
         }
         else if (row) LOGW("[combat] SWORD_ARTS_PARAM_ST row size 0x%X != 0x%X: skill costs unknown", sz, Arts_RowSize);
     }
@@ -1269,13 +1310,108 @@ void ResolveSkill(uint8_t* player, int h) {
          si.artType, si.fpCost, si.stamCost, follow, owns);
 }
 
-int FindRecording(int weaponId, int arts) {
-    for (size_t i = 0; i < g_skillLib.size(); ++i) if (g_skillLib[i].valid && g_skillLib[i].weaponId == weaponId && g_skillLib[i].arts == arts) return (int)i;
+// One-handed with a shield in the left whose art takes the game's skill button (game thread's view).
+bool LeftShieldArtOwnsSkillGame() {
+    const SkillInfo& si = g_skillInfo[HandLeft];
+    return !TwoHandedStyle(g_armStyle) && g_wep[HandLeft].valid && g_wep[HandLeft].isShield && si.logged && si.artType >= 0 &&
+           LeftArtOwnsSkill(si.artType, true);
+}
+// SkillPerHand, game thread: hide the left shield's art while the worker asks (the right trigger plays the right
+// weapon's skill), put it back when it stops asking. g_artHideState tells the pad when the game sees which, so the skill
+// button goes down only after the game's choice is the one the trigger means.
+void ApplyArtHide(bool want) {
+    const SkillInfo& left = g_skillInfo[HandLeft];
+    const int arts = left.logged ? left.arts : -1;
+    if (g_artHide.on && (!want || g_artHide.arts != arts)) RestoreArtHide();
+    if (!want) { g_artHideState.store(0); return; }
+    if (g_artHide.on) { g_artHideState.store(1); return; }
+    uint32_t sz = 0;
+    uint8_t* row = arts >= 0 ? ParamsRow(PI_SwordArtsParam, (uint32_t)arts, &sz) : nullptr;
+    const char* why = arts < 0 ? "the left weapon's skill is not read yet"
+                    : g_skillInfo[HandRight].logged && g_skillInfo[HandRight].arts == arts ? "both weapons carry the same skill"
+                    : !row || (sz != 0 && sz != Arts_RowSize) ? "its SwordArtsParam row is not readable" : nullptr;
+    static int s_loggedArts = -2;
+    if (why) {
+        if (s_loggedArts != arts) { s_loggedArts = arts; LOGW("[combat] skill: the left shield's skill (SwordArtsParam %d) cannot be set aside for the right trigger - %s; the game's rule stands (the shield's skill plays)", arts, why); }
+        g_artHideState.store(2);
+        return;
+    }
+    // "No skill", as the game's own data writes it (SwordArtsParam 10: the seals' and the plain shields' art).
+    static uint8_t s_n8 = 255; static uint16_t s_n16 = 255; static bool s_neutral = false;
+    if (!s_neutral) {
+        s_neutral = true; uint32_t nsz = 0;
+        uint8_t* nr = ParamsRow(PI_SwordArtsParam, 10u, &nsz);
+        if (nr && (nsz == 0 || nsz == Arts_RowSize)) { SafeRead(nr + Arts_Type, &s_n8, 1); SafeRead(nr + Arts_TypeNew, &s_n16, 2); }
+    }
+    ArtHide hd; hd.row = row; hd.arts = arts;
+    if (!SafeRead(row + Arts_Type, &hd.t8, 1) || !SafeRead(row + Arts_TypeNew, &hd.t16, 2) ||
+        !SafeWrite(row + Arts_Type, &s_n8, 1) || !SafeWrite(row + Arts_TypeNew, &s_n16, 2)) {
+        SafeWrite(row + Arts_Type, &hd.t8, 1); SafeWrite(row + Arts_TypeNew, &hd.t16, 2);
+        g_artHideState.store(2);
+        return;
+    }
+    hd.on = true; g_artHide = hd; g_artHideState.store(1);
+    if (s_loggedArts != arts) {
+        s_loggedArts = arts;
+        LOGI("[combat] skill: the right trigger plays the right weapon's skill (SwordArtsParam %d) - the left shield's own (SwordArtsParam %d, art type %d) "
+             "is set aside as no skill (type %u/%u) while it does; the left trigger plays the shield's", g_skillInfo[HandRight].arts, arts,
+             hd.t16 != 0 ? hd.t16 : hd.t8, s_n16, s_n8);
+    }
+}
+
+int FindRecording(int weaponId, int arts, int variant = 0) {
+    for (size_t i = 0; i < g_skillLib.size(); ++i)
+        if (g_skillLib[i].valid && g_skillLib[i].weaponId == weaponId && g_skillLib[i].arts == arts && g_skillLib[i].variant == variant) return (int)i;
     return -1;
+}
+const char* FollowUpName(int variant) { return variant == 2 ? "heavy" : "light"; }
+// A stance follow-up's recording keeps its projectile's volley only (combat_moves.h FollowUpVolley), times from the
+// first bullet. A window that saw no projectile - the game dropped the press, or no FP - is not stored; the third
+// such for the same weapon, skill and follow-up is (with no bullets): that follow-up is the game's from then on.
+std::unordered_map<uint64_t, int> g_followUpMisses;   // game thread
+void FinishFollowUpRecording(SkillRecording rec) {
+    const size_t n = rec.ev.size() < 64 ? rec.ev.size() : 64;
+    RecSpanIn spans[64]; bool keep[64] = {};
+    for (size_t i = 0; i < n; ++i) { spans[i].id = rec.ev[i].id; spans[i].firstT = rec.ev[i].firstT; spans[i].lastT = rec.ev[i].lastT; }
+    float t0 = 0.f;
+    const int bullets = FollowUpVolley(spans, (int)n, 0.15f, keep, &t0);
+    const uint64_t key = ((uint64_t)(uint32_t)rec.weaponId << 32) ^ ((uint64_t)(uint32_t)rec.arts << 2) ^ (uint64_t)rec.variant;
+    if (bullets == 0) {
+        const int misses = ++g_followUpMisses[key];
+        if (misses < 3) {
+            LOGI("[combat] stance follow-up (%s): the game's follow-up sent no projectile while it was recorded (%zu events; a dropped press or too little FP) - the next one is the game's again", FollowUpName(rec.variant), rec.ev.size());
+            return;
+        }
+        rec.ev.clear(); rec.valid = true; rec.bullets = 0; rec.length = 0.f;
+        LOGI("[combat] stance follow-up (%s) of weapon %d (arts %d): no projectile in 3 recordings - it stays the game's own follow-up", FollowUpName(rec.variant), rec.weaponId, rec.arts);
+    } else {
+        std::vector<RecEvent> kept;
+        for (size_t i = 0; i < n; ++i) {
+            if (!keep[i]) continue;
+            RecEvent e = rec.ev[i];
+            // Times from the first bullet. An art effect live since before it starts with it (its own animation clock
+            // moves on by the time it would have been at, so the effect is the one live when the wave left).
+            const float shift = e.firstT < t0 ? t0 - e.firstT : 0.f;
+            e.firstT = e.firstT - t0 + shift; e.lastT -= t0; e.animTime0 += shift;
+            if (e.lastT < e.firstT) e.lastT = e.firstT;
+            kept.push_back(e);
+        }
+        // The art effect first, so it is live when the bullet runs in the same frame.
+        std::stable_sort(kept.begin(), kept.end(), [](const RecEvent& a, const RecEvent& b) { return a.id == kEvWeaponArtsSpEffect && b.id != kEvWeaponArtsSpEffect; });
+        rec.ev = kept; rec.valid = true; rec.bullets = bullets; rec.length = 0.f;
+        for (const RecEvent& e : rec.ev) if (e.lastT > rec.length) rec.length = e.lastT;
+        g_followUpMisses.erase(key);
+        int art = 0; for (const RecEvent& e : rec.ev) if (e.id == kEvWeaponArtsSpEffect) ++art;
+        LOGI("[combat] stance follow-up (%s) recorded for weapon %d arts %d: %d projectile event(s)%s, %.2f s long, FP -%d while recorded - from now on that follow-up's projectile leaves from your swing",
+             FollowUpName(rec.variant), rec.weaponId, rec.arts, bullets, art ? " + its art effect" : "", rec.length, rec.fpObserved);
+    }
+    const int at = FindRecording(rec.weaponId, rec.arts, rec.variant);
+    if (at >= 0) g_skillLib[at] = rec; else g_skillLib.push_back(rec);
 }
 void FinishRecording() {
     SkillRec& r = g_rec; r.active = false;
     SkillRecording rec = r.rec;
+    if (rec.variant > 0) { rec.fpObserved = r.fpStart - r.fpMin; FinishFollowUpRecording(rec); return; }
     rec.valid = !rec.ev.empty(); rec.fpObserved = r.fpStart - r.fpMin;
     // Times relative to the FIRST event, not the press: the chord latency and the animation's
     // startup are not part of the effect - a tap replays it at once.
@@ -1361,6 +1497,39 @@ void RunReplay(uint8_t* player, CSChrTaeAnimEvent* ev, double now) {
     }
     if (!pending) { p.active = false; if (Cfg().combatDebug) LOGD("[combat] skill: replay done after %.2f s", t); }
 }
+// A stance follow-up's recorded projectile, replayed at the swing's fastest point (StanceFollowUps=replay): its volley
+// only (FinishFollowUpRecording), from the blade (CombatPlayerProjectileNow sees the replay's hand), along the swing's
+// aim, the follow-up's own FP charged (SwordArtsParam R1 / R2). The other follow-up's recording stands in for one not
+// recorded yet: one game-played follow-up per weapon and session is enough.
+void StartFollowUpWave(uint8_t* player, int h, int variant, double now) {
+    const Config& c = Cfg();
+    const SkillInfo& si = g_skillInfo[h];
+    int idx = si.logged ? FindRecording(si.weaponId, si.arts, variant) : -1;
+    bool borrowed = false;
+    if ((idx < 0 || g_skillLib[idx].bullets <= 0) && si.logged) {
+        const int o = FindRecording(si.weaponId, si.arts, 3 - variant);
+        if (o >= 0 && g_skillLib[o].bullets > 0) { idx = o; borrowed = true; }
+    }
+    if (idx < 0 || g_skillLib[idx].bullets <= 0) { LOGW("[combat] stance follow-up (%s): no recorded projectile for weapon %d arts %d - nothing left", FollowUpName(variant), si.weaponId, si.arts); return; }
+    if (g_play.active) { LOGI("[combat] stance follow-up (%s): the last replay is still running - this swing's projectile dropped", FollowUpName(variant)); return; }
+    const SkillRecording& rec = g_skillLib[idx];
+    int maxFp = 0; const int fp = ReadFp(player, &maxFp);
+    int cost = variant == 2 ? si.fpR2 : si.fpR1;
+    if (cost <= 0) cost = rec.fpObserved;
+    if (c.skillChargeFp && cost > 0 && maxFp > 0 && fp >= 0 && fp < cost) {
+        g_haptic.fetch_or(4u << h);
+        LOGI("[combat] stance follow-up (%s): not enough FP (%d < %d) - no projectile", FollowUpName(variant), fp, cost);
+        return;
+    }
+    g_play = SkillPlay{}; g_play.active = true; g_play.start = now; g_play.libIndex = idx; g_play.hand = h; g_play.st.resize(rec.ev.size());
+    g_play.fpCost = c.skillChargeFp ? cost : 0; g_play.stamCost = 0;
+    // The aim: the swing's (the worker published it at the release), else the weapon arm. SkillAim=head leaves the
+    // game's own direction (where the body faces).
+    if (c.castAim && c.skillAim != "head") ArmCastAim(h, now, "stance follow-up projectile", SwingAimFresh(h, now) ? kAimSwing : kAimHand);
+    BodyHapticsPost(BodyKind::Cast, h);
+    LOGI("[combat] stance follow-up (%s): its projectile leaves from your blade %.2f s after the swing was recognised (no game attack; %s; FP -%d)",
+         FollowUpName(variant), now - g_wavePressAt[h].load(), borrowed ? "the other follow-up's recording" : "recorded from the game's own follow-up", g_play.fpCost);
+}
 // One frame of the skill system: recording window, trigger requests, replay.
 void SkillFrame(uint8_t* player, CSChrTaeAnimEvent* ev, double now) {
     const Config& c = Cfg();
@@ -1370,7 +1539,30 @@ void SkillFrame(uint8_t* player, CSChrTaeAnimEvent* ev, double now) {
     ResolveSkill(player, 1 - wh);   // the other hand too: one-handed, the left weapon's art decides whose skill plays (SkillHand)
     if (g_rec.active) {
         const int fp = ReadFp(player); if (fp >= 0 && fp < g_rec.fpMin) g_rec.fpMin = fp;
-        if (now - g_rec.start >= (c.skillRecordSeconds > 0.5f ? c.skillRecordSeconds : 0.5f)) FinishRecording();
+        // A follow-up's projectile leaves 0.5-0.9 s after the press (the stance's entry included): 2 s holds it.
+        const float window = g_rec.rec.variant > 0 ? 2.0f : (c.skillRecordSeconds > 0.5f ? c.skillRecordSeconds : 0.5f);
+        if (now - g_rec.start >= window) FinishRecording();
+    }
+    // Stance follow-ups (StanceFollowUps=replay): the worker pressed the game's follow-up for one that is not recorded
+    // yet - record it; or a recorded one's swing reached its fastest point - replay its projectile now.
+    if (const int frq = g_followUpRecordReq.exchange(0)) {
+        const int fh = (frq >> 2) & 1, variant = frq & 3;
+        const SkillInfo& si = g_skillInfo[fh];
+        if (g_rec.active) { if (c.combatDebug) LOGD("[combat] stance follow-up (%s): another recording is open - not recorded this time", FollowUpName(variant)); }
+        else if (si.logged) {
+            g_rec = SkillRec{}; g_rec.active = true; g_rec.start = now; g_rec.rec.weaponId = si.weaponId; g_rec.rec.arts = si.arts; g_rec.rec.variant = variant;
+            const int fp = ReadFp(player); g_rec.fpStart = g_rec.fpMin = fp < 0 ? 0 : fp;
+            LOGI("[combat] stance follow-up (%s): the game plays it this once while ERVR records its projectile (weapon %d arts %d)", FollowUpName(variant), si.weaponId, si.arts);
+        }
+    }
+    if (const int fire = g_waveFire.exchange(0)) StartFollowUpWave(player, (fire >> 2) & 1, fire & 3, now);
+    for (int fh = 0; fh < 2; ++fh) {
+        const SkillInfo& si = g_skillInfo[fh];
+        for (int v = 1; v <= 2; ++v) {
+            int st = 0;
+            if (si.logged) { const int i = FindRecording(si.weaponId, si.arts, v); if (i >= 0) st = g_skillLib[i].bullets > 0 ? 1 : 2; }
+            g_followUpState[fh][v].store(st);
+        }
     }
     const int req = g_skillReq.exchange(0);
     if (req == 3 && two && c.twoHandSkill == "effect") {
@@ -1470,6 +1662,21 @@ struct EnemyFrame {
 struct EnemyPrev { int hp; uint32_t seenFrame; };
 std::unordered_map<uint8_t*, EnemyPrev> g_enemyPrev;
 uint32_t g_enemyFrame = 0;
+// Characters a swing-aimed projectile may snap to (SwingAimSnapDeg), refreshed by the watcher each game frame: alive,
+// within SwingAimSnapRange, not Torrent, and no player or phantom (ChrType: the local player 0 is the list's own entry;
+// 1-4 white / red phantoms and ghosts, 8 gray, 10/11/14 bloodstain, bonfire and message ghosts, 13 arena, 15-18
+// invaders and blue hunters, 19 a summoned NPC ally). A character on the player's own team type is left out too.
+// What the snap picked is logged with its team and type ("[combat] projectile ..."), so the rule can be checked.
+struct SnapEntry { Vec3 aim; int npc = 0; int chrType = -1; int team = 0; };
+std::mutex g_snapMtx;
+std::vector<SnapEntry> g_snap;   // guarded by g_snapMtx
+double g_snapAt = -1e9;          // NowSec of the last refresh
+bool SnapEligibleType(int32_t t) {
+    switch (t) {
+    case 1: case 2: case 3: case 4: case 8: case 10: case 11: case 13: case 14: case 15: case 16: case 17: case 18: case 19: return false;
+    default: return true;
+    }
+}
 
 // 5 s combat summary at INFO, printed only when something happened: strikes, how they ended, landed
 // hit-frames and damage, and whose HP drops the watcher saw. Game thread only.
@@ -1477,7 +1684,7 @@ struct CombatTally {
     int strikes[2] = {}, landed[2] = {}, spent[2] = {};
     int hitFrames = 0, dmg = 0, sliceN = 0; float sliceSum = 0.f;
     int unattributed = 0, foreign = 0, foreignDmg = 0, outside = 0;
-    int stamMarks = 0, stamOnly = 0, rises = 0, riseTotal = 0;
+    int rises = 0, riseTotal = 0;
     int rideStrikes = 0; float rideBlade = 1e9f, rideNearest = 1e9f;   // on Torrent: reach of the strikes
     // Where the stamina bar went, from the game's own frame-to-frame changes (ERVR's writes excluded): with a
     // strike live and without one, what it lost and what it regained, and what ERVR gave back. Players report
@@ -1485,8 +1692,58 @@ struct CombatTally {
     int stamFrames[2] = {}, stamLost[2] = {}, stamGained[2] = {};   // [0] no strike live, [1] a strike live
     int stamRefunded = 0, stamLow = INT_MAX, stamMax = 0;
     int execCharges = 0, execCharged = 0;   // stamina the game took INSIDE our attack exec (stamina off: given back)
+    // Contacts (2026-11-14): a strike's blade touching a character, by the game's own on-hit mark inside our exec
+    // (or, for a strike that cannot show it, an HP drop). Their damage multiplier, how far into the strike, weak
+    // touches and their re-hits, and whether an HP drop was seen after them (co-op sync, a target out of the list).
+    int contacts = 0, watcherContacts = 0, hist[4] = {}; double intoSum = 0.0;
+    int touches = 0, rehitOpened = 0, rehitLanded = 0, touchOnly = 0;
+    int unseen = 0, blind = 0;
+    // The live gate (ContactLiveMult): strikes that went live (and how far into the motion), strikes that never did and
+    // the strongest they got - the line to move if real swings stay dead.
+    int live = 0, neverLive = 0; double liveIntoSum = 0.0, neverBestSum = 0.0;
+    // The shield: blocked hits and deflects (the worker's raises and time up are atomics, below).
+    int blocked = 0, deflects = 0;
 } g_tally;
+std::atomic<int> g_guardRaises{0}, g_guardUpMs{0};   // worker -> 5 s line: the guard went up N times, held this long
 double g_tallyAt = 0;
+// Per hand, the live strike's contact state (game thread).
+struct StrikeContact {
+    uint32_t id = 0;          // the strike it belongs to
+    double startedAt = 0.0;   // NowSec of the strike's first frame
+    int charged = 0;          // stamina the game took inside our exec on the last frame: >0 = the blade touched someone
+    float mult = 0.f;         // the damage multiplier that exec ran with
+    bool markable = false;    // this strike's exec can show the mark (bar readable, behavior cost > 0)
+    int markCost = 0;         // what one contact costs (stamina off: ERVR's mark)
+    bool touched = false;     // a weak touch was taken: the blade is inert until the swing speeds up
+    float touchMult = 0.f;
+    bool rehit = false;       // ... and the re-hit's fresh attack is open
+    bool reopen = false;      // the next exec opens a fresh attack instance
+    bool rehitLanded = false;
+    int instHits = 0;         // contacts of the current attack instance (the flinch rule)
+    double instStart = 0.0;   // NowSec the current attack instance began (its animation clock)
+    bool opened = false;      // the strike's attack instance has run (ContactLiveMult: once the swing went live)
+    double liveAt = 0.0;      // NowSec it went live
+    float best = 0.f;         // the strongest the swing got while not live yet (x of a vanilla hit)
+} g_contact[2];
+// Contacts waiting for an HP drop (any character's) within 1 s: none seen = the hit did not register as damage here.
+double g_contactPending[16]; int g_contactPendingN = 0;
+void NoteContact(float mult, double into, bool watcherSeen, bool blind, double now) {
+    CombatTally& t = g_tally;
+    ++t.contacts; t.intoSum += into;
+    ++t.hist[mult < 0.35f ? 0 : mult < 0.6f ? 1 : mult < 0.9f ? 2 : 3];
+    if (blind) ++t.blind;
+    if (!watcherSeen && g_contactPendingN < 16) g_contactPending[g_contactPendingN++] = now;
+}
+void ContactSeenTick(const EnemyFrame& ef, double now) {
+    const bool drop = ef.available && ef.dmgEvents + ef.foreignEvents > 0;
+    int k = 0;
+    for (int i = 0; i < g_contactPendingN; ++i) {
+        if (drop) continue;                                       // seen: dropped from the list
+        if (now - g_contactPending[i] > 1.0) { ++g_tally.unseen; continue; }
+        g_contactPending[k++] = g_contactPending[i];
+    }
+    g_contactPendingN = k;
+}
 
 // In a co-op session, the first few HP drops of each kind with the raw handles: whether the game
 // records the attacker on characters another player's game owns is what decides the attribution.
@@ -1520,15 +1777,34 @@ void FlushTally(double now) {
         snprintf(stamina, sizeof(stamina), " | stamina (game's own changes): striking %d frames -%d +%d, otherwise %d frames -%d +%d; ERVR refunded %d (%d taken inside its attacks, %d times); low %d of %d",
                  t.stamFrames[1], t.stamLost[1], t.stamGained[1], t.stamFrames[0], t.stamLost[0], t.stamGained[0], t.stamRefunded,
                  t.execCharged, t.execCharges, t.stamLow == INT_MAX ? 0 : t.stamLow, t.stamMax);
-    if (t.strikes[0] + t.strikes[1] + t.hitFrames + t.foreign + t.outside + t.rises + spentEnds + spentTimeouts + t.stamLost[1] > 0)
-        LOGI("[combat] 5 s: strikes right %d (%d landed, %d budget-spent) left %d (%d landed, %d budget-spent); spent strikes re-armed at a speed valley %d, by timeout %d; "
+    char touches[160] = "";
+    if (t.touches + t.rehitOpened + t.rehitLanded + t.touchOnly > 0)
+        snprintf(touches, sizeof(touches), "; weak touches %d (the swing sped up and re-hit: opened %d, landed %d; the touch was the swing's only hit %d)",
+                 t.touches, t.rehitOpened, t.rehitLanded, t.touchOnly);
+    char fallback[96] = "";
+    if (t.watcherContacts) snprintf(fallback, sizeof(fallback), ", %d of them from HP drops (no mark possible)", t.watcherContacts);
+    // The live gate: how many swings became attacks, and how strong the ones that never did got.
+    char live[200] = "";
+    if (t.live + t.neverLive > 0)
+        snprintf(live, sizeof(live), "; live from x%.2f: %d went live (%.0f ms into the motion), %d never did (the strongest of them x%.2f on average)",
+                 Cfg().contactLiveMult, t.live, t.live ? t.liveIntoSum * 1000.0 / t.live : 0.0, t.neverLive, t.neverLive ? t.neverBestSum / t.neverLive : 0.0);
+    // The shield: the guard's raises, time up and what it stopped.
+    const int raises = g_guardRaises.exchange(0), upMs = g_guardUpMs.exchange(0);
+    char guard[160] = "";
+    if (raises + upMs + t.blocked + t.deflects > 0)
+        snprintf(guard, sizeof(guard), " | guard: raised %d times, up %.1f s, blocked hits %d (deflects %d)", raises, upMs / 1000.0, t.blocked, t.deflects);
+    if (t.strikes[0] + t.strikes[1] + t.contacts + t.hitFrames + t.foreign + t.outside + t.rises + spentEnds + spentTimeouts + t.stamLost[1] + raises + upMs + t.blocked > 0)
+        LOGI("[combat] 5 s: strikes right %d (%d landed, %d budget-spent) left %d (%d landed, %d budget-spent)%s; spent strikes re-armed at a speed valley %d, by timeout %d; "
              "missed swings ended as they slowed %d, at the longest strike %d | "
-             "own hit-frames %d, %d damage, mean hit %.2f of a vanilla hit, %d on-hit stamina marks (%d with no HP drop seen) | HP drops: %d without a recorded attacker (counted as ours), "
-             "%d not ours (%d damage), %d of ours outside a strike | HP rose %d times (+%d)%s%s%s",
-             t.strikes[HandRight], t.landed[HandRight], t.spent[HandRight], t.strikes[HandLeft], t.landed[HandLeft], t.spent[HandLeft], spentEnds, spentTimeouts,
+             "contacts %d (the game's on-hit mark inside ERVR's attack%s) at x%.2f of a vanilla hit [under .35: %d, .35-.6: %d, .6-.9: %d, .9 and up: %d], %.0f ms into the strike%s; "
+             "no HP drop seen within 1 s after %d, no character within the watch radius at %d | "
+             "HP drops: %d during strikes (%d damage), %d without a recorded attacker, %d not ours (%d damage), %d outside a strike | HP rose %d times (+%d)%s%s%s%s",
+             t.strikes[HandRight], t.landed[HandRight], t.spent[HandRight], t.strikes[HandLeft], t.landed[HandLeft], t.spent[HandLeft], live, spentEnds, spentTimeouts,
              slowEnds, longEnds,
-             t.hitFrames, t.dmg, t.sliceN ? t.sliceSum / (float)t.sliceN : 0.f, t.stamMarks, t.stamOnly, t.unattributed, t.foreign, t.foreignDmg, t.outside,
-             t.rises, t.riseTotal, stamina, ride, GameERCoopInSession() ? " | co-op session" : "");
+             t.contacts, fallback, t.sliceN ? t.sliceSum / (float)t.sliceN : 0.f, t.hist[0], t.hist[1], t.hist[2], t.hist[3],
+             t.contacts ? t.intoSum * 1000.0 / t.contacts : 0.0, touches, t.unseen, t.blind,
+             t.hitFrames, t.dmg, t.unattributed, t.foreign, t.foreignDmg, t.outside,
+             t.rises, t.riseTotal, stamina, guard, ride, GameERCoopInSession() ? " | co-op session" : "");
     t = CombatTally{};
 }
 
@@ -1557,19 +1833,37 @@ EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c, 
     ef.available = true;
     ++g_enemyFrame;
     const float radius = c.combatEnemyWatchRadius > 0.f ? c.combatEnemyWatchRadius : 8.f;
+    const float snapRange = c.skillAim == "swing" && c.swingAimSnapDeg > 0.f ? c.swingAimSnapRange : 0.f;
+    const float scan = std::max(radius, snapRange);
     uint64_t self = 0;
     const bool attribute = c.combatEnemyWatchOwnHits && SafeRead(player + Chr_Handle, &self, 8) && (uint32_t)self != UINT32_MAX;
+    uint8_t myTeam = 0xFF; SafeRead(player + Chr_TeamType, &myTeam, 1);
+    static std::vector<SnapEntry> s_snap; s_snap.clear();
     for (size_t i = 0; i < count; ++i) {
         uint8_t* chr = nullptr; float dist = 0.f;
         if (!SafeRead(first + i * ChrDist_Stride, &chr, 8) || !chr || chr == player) continue;
         if (!SafeRead(first + i * ChrDist_Stride + 8, &dist, 4)) continue;
-        if (dist > radius) break;   // the list is sorted by distance
+        if (dist > scan) break;   // the list is sorted by distance
         int maxHp = -1; int hp = ChrHp(chr, &maxHp);
         if (hp < 0 || maxHp <= 0) continue;
         int npc = 0; SafeRead(chr + Chr_NpcId, &npc, 4);
         // Torrent is never the enemy: from the saddle it was the "nearest enemy at 1.6 m" (2026-11-02), and a hit
         // an enemy lands on the horse is not a hit of ours.
         if (IsTorrentNpc(npc)) continue;
+        if (snapRange > 0.f && dist <= snapRange && hp > 0 && s_snap.size() < 32) {
+            int32_t type = -1; uint8_t team = 0; Vec3 at;
+            SafeRead(chr + Chr_ChrType, &type, 4); SafeRead(chr + Chr_TeamType, &team, 1);
+            // Once a session per character id (up to 12): what the snap sees, so its player/ally rule can be checked.
+            static std::unordered_map<int, int> s_seen;
+            if (s_seen.size() < 12 && s_seen.emplace(npc, 1).second)
+                LOGI("[combat] swing-aim snap: npc %d at %.1f m - type %d, team %d (yours %d): %s", npc, dist, type, team, myTeam,
+                     !SnapEligibleType(type) ? "a player or phantom, never picked" : myTeam != 0xFF && team == myTeam ? "on your team, never picked" : "a target");
+            if (SnapEligibleType(type) && !(myTeam != 0xFF && team == myTeam) && GameERChrPosition(chr, &at)) {
+                SnapEntry e; e.aim = at + Vec3{0.f, 1.0f, 0.f}; e.npc = npc; e.chrType = type; e.team = team;
+                s_snap.push_back(e);
+            }
+        }
+        if (dist > radius) continue;   // beyond the watch radius: a snap candidate only
         if (hp > 0 && dist < ef.nearest) { ef.nearest = dist; ef.nearestNpc = npc; }
         Vec3 at;
         if (hp > 0 && (blade[0] || blade[1]) && GameERChrPosition(chr, &at)) {
@@ -1598,7 +1892,29 @@ EnemyFrame WatchEnemies(uint8_t* player, bool anyStrikeActive, const Config& c, 
     if ((g_enemyFrame & 0xFF) == 0)
         for (auto it = g_enemyPrev.begin(); it != g_enemyPrev.end();)
             it = g_enemyFrame - it->second.seenFrame > 256 ? g_enemyPrev.erase(it) : std::next(it);
+    if (snapRange > 0.f) { std::lock_guard<std::mutex> g(g_snapMtx); g_snap = s_snap; g_snapAt = NowSec(); }
     return ef;
+}
+
+bool SnapSwingAim(const Vec3& origin, Vec3* dir, char* note, size_t noteLen) {   // CombatSnapSwingAim
+    const Config& c = Cfg();
+    if (!dir || !(c.swingAimSnapDeg > 0.f) || !(c.swingAimSnapRange > 0.f)) return false;
+    SnapEntry e[32]; int n = 0;
+    {
+        std::lock_guard<std::mutex> g(g_snapMtx);
+        if (NowSec() - g_snapAt > 0.5) return false;   // the watcher stopped (menu, loading, combat off)
+        for (const SnapEntry& s : g_snap) { if (n == 32) break; e[n++] = s; }
+    }
+    SnapCandidate cand[32];
+    for (int i = 0; i < n; ++i) { cand[i].x = e[i].aim.x; cand[i].y = e[i].aim.y; cand[i].z = e[i].aim.z; }
+    float deg = 0.f, dist = 0.f;
+    const int i = PickSnapTarget(origin.x, origin.z, dir->x, dir->z, cand, n, c.swingAimSnapDeg, c.swingAimSnapRange, &deg, &dist);
+    if (i < 0) return false;
+    const Vec3 to = e[i].aim - origin;
+    if (to.Length() < 0.1f) return false;
+    *dir = to.Normalized();
+    if (note && noteLen) snprintf(note, noteLen, "npc %d (team %d, type %d) %.0f deg off the swing's line, %.1f m away", e[i].npc, e[i].team, e[i].chrType, deg, dist);
+    return true;
 }
 
 // ---------------------------------------------------------------- criticals (game thread)
@@ -1829,7 +2145,27 @@ void GameFrameBody(uint8_t* player) {
     const double nowS = NowSec();
     UpdateTwoHand(nowS);
     SkillFrame(player, ev, nowS);
+    {   // SkillPerHand: the left shield's art set aside while the right trigger plays the right weapon's skill. Asked for
+        // while the game's own view says the shield does not take the button (its art not read): nothing to set aside,
+        // and the pad must not wait for it (state 2 = the game's rule).
+        const bool debugAsk = c.debugHideLeftArt == 1 || (c.debugHideLeftArt == 2 && ((int)(nowS / 8.0) & 1) == 0);
+        const bool asked = (g_artHideWant.load() == 1 && c.skillPerHand) || debugAsk;
+        const bool owns = LeftShieldArtOwnsSkillGame();
+        ApplyArtHide(asked && owns);
+        if (asked && !owns) g_artHideState.store(2);
+    }
     g_status.fp = ReadFp(player);
+    if (c.debugHideLeftArt) {   // flat test: which skill the game played, by its FP cost
+        static int s_prevFp = -1; static int s_prevHide = -1;
+        if ((int)g_artHide.on != s_prevHide) {
+            s_prevHide = (int)g_artHide.on;
+            LOGI("[combat] debug: the left shield's art is %s (state %d)", g_artHide.on ? "SET ASIDE" : "in place", g_artHideState.load());
+        }
+        if (s_prevFp >= 0 && g_status.fp >= 0 && g_status.fp < s_prevFp)
+            LOGI("[combat] debug: FP %d -> %d (-%d) with the left shield's art %s - the right weapon's skill costs %d, the shield's %d",
+                 s_prevFp, g_status.fp, s_prevFp - g_status.fp, g_artHide.on ? "set aside" : "in place", g_skillInfo[HandRight].fpCost, g_skillInfo[HandLeft].fpCost);
+        s_prevFp = g_status.fp;
+    }
     // Stamina modes: "off" takes the bar out of the loop entirely (no gate, no drain, no fatigue,
     // the attack's behavior cost forced to 1 and that 1 given back), "game" leaves the game's
     // charges alone, "full" adds ERVR's drain + fatigue on top.
@@ -1859,16 +2195,12 @@ void GameFrameBody(uint8_t* player) {
     // quality-scaled hit and the strike is spent. ER takes flat defense off every hit, so the per-frame
     // slices (6-10% of a hit) dealt 3-5 HP each where a full hit deals hundreds (2026-10-31 co-op log).
     const bool oneHit = c.kineticContinuous && !c.kineticSlices;
-    // The game charges the strike's behavior stamina when OUR attack lands - an attacker-side mark no one
-    // else's hit can make. Stamina off forces that cost to kHitMarkStamina for the strike (refunded), so
-    // the mark stands clear of a frame's regen; at 1 it was lost in it.
-    const int stamDrop = stamKnown ? g_prevStam - stamAtEntry : 0;
-    // Stamina off: only a drop the size of ERVR's own mark (less a frame's regen) is a hit. It was any drop of half
-    // the mark or more, so a roll or a jump during a live strike read as a hit and was refunded (2026-11-05:
-    // "stamina is either unlimited or gone for good").
-    const int markCost = oneHit ? kHitMarkStamina : 1;
-    bool stamHit = stamKnown && (stamOff ? StaminaMarkSized(stamDrop, markCost) : stamDrop >= c.kineticHitStamina);
-    if (blk.raised && stamKnown && stamDrop >= c.blockImpactStamina) stamHit = false;
+    // The live gate (ContactLiveMult, weapon_contact.h ContactGoesLive): with one hit per swing, the strike's attack
+    // opens only once the swing is strong enough, and a live swing's contact is never a weak touch. Only where the
+    // swing's strength means something (the kinetic rows are in play).
+    const float liveMult = oneHit && kinetic ? c.contactLiveMult : 0.f;
+    const float weakMult = WeakTouchMultFor(liveMult, c.contactWeakTouch);
+    static bool s_strikeSeen[2] = {false, false};   // a strike was running on this hand (counted once when it ends)
     const bool striking = cmd[0].active || cmd[1].active;
     if (stamKnown) {   // the game's own change since our last frame (regen, rolls, charges) - ERVR's writes are in g_prevStam
         const int d = stamAtEntry - g_prevStam, k = striking ? 1 : 0;
@@ -1877,27 +2209,16 @@ void GameFrameBody(uint8_t* player) {
         if (stamAtEntry < g_tally.stamLow) g_tally.stamLow = stamAtEntry;
         g_tally.stamMax = maxStam;
     }
-    bool refundCounted = false;
-    // On an enemy another player's game owns, the game records no attacker at all (2026-10-31: every
-    // co-op drop read last_hit_by ffffffff, ours included), so a partner's hit there reads as ours and
-    // would end our swing. Once the stamina mark has been seen landing with such a drop three times this
-    // session, only the mark (or a drop the game does attribute to us) counts - plus drops on two strike
-    // frames in a row, which is our own blade inside an enemy (a partner's hit is one event): a mark that
-    // stopped working can cost at most a second hit, never a hit every frame.
-    static bool s_markTrusted = false, s_wasSession = false;
-    static int s_markEvidence = 0, s_dropRun = 0;
+    // HIT SIGNAL (2026-11-14). The game charges our attack's behavior stamina when OUR blade touches a character -
+    // inside our own exec call, once per character it touches (stamina off forces that cost to kHitMarkStamina and
+    // gives it back right there). The exec is measured below and the contact kept per hand (g_contact): exact to the
+    // frame, the hand's own, and nobody else's hit can make it. 0.7.2 moved the refund inside the exec, after which
+    // the frame-to-frame mark test this replaces never saw a mark again (2026-11-14 logs: 0 marks, 638 charges inside
+    // the exec), so in co-op every HP drop with no attacker recorded - a partner's hits - counted as ours. The enemy
+    // watcher's HP drops stay as statistics, and as the hit signal only for a strike that cannot show the mark (no
+    // resolved behavior row, a zero cost, the bar unreadable): solo any drop, in co-op only one attributed to us.
     const bool session = GameERCoopInSession();
-    if (session != s_wasSession) { s_markTrusted = false; s_markEvidence = 0; s_wasSession = session; }
-    if (oneHit && session && !s_markTrusted && striking && stamHit && ef.dmgEvents > 0 && ++s_markEvidence >= 3) {
-        s_markTrusted = true;
-        LOGI("[combat] co-op: your hits carry the game's own on-hit stamina mark - HP drops with no attacker recorded (a partner's hits) no longer end your swing");
-    }
-    s_dropRun = striking && ef.dmgEvents > 0 ? s_dropRun + 1 : 0;
-    bool hitNow;
-    if (!ef.available) hitNow = stamHit;
-    else if (s_markTrusted) hitNow = stamHit || ef.ownEvents > 0 || s_dropRun >= 2;
-    else hitNow = ef.dmgEvents > 0 || (oneHit && stamHit);
-    if (striking && stamHit) { ++g_tally.stamMarks; if (ef.dmgEvents == 0) ++g_tally.stamOnly; }
+    const bool watcherHit = ef.available && (session ? ef.ownEvents > 0 : ef.dmgEvents > 0);
     if (ef.available) {
         if (striking) { if (ef.dmgEvents > 0) { ++g_tally.hitFrames; g_tally.dmg += ef.dmgTotal; } }
         else g_tally.outside += ef.dmgEvents;
@@ -1907,42 +2228,72 @@ void GameFrameBody(uint8_t* player) {
     static double s_lastHitHaptic[2] = {0, 0};
     for (int h = HandRight; h >= HandLeft; --h) {   // right first (main hand)
         SwingCmd& k = cmd[h];
+        StrikeContact& sc = g_contact[h];
         if (!k.active) {
+            if (s_strikeSeen[h] && !sc.opened && liveMult > 0.f) { ++g_tally.neverLive; g_tally.neverBestSum += sc.best; }
+            s_strikeSeen[h] = false;
             if (s_strikeStam[h] >= 0 && s_strikeHits[h] > 0) ++g_tally.landed[h];
+            if (s_strikeStam[h] >= 0 && sc.touched && !sc.rehitLanded) ++g_tally.touchOnly;
             if (s_strikeStam[h] >= 0 && c.combatDebug) {
                 const int now = ReadStamina(player);
-                LOGD("[combat] strike %s #%u ended after %d frames, %d hit-frames, %d damage dealt, budget spent %.2f: game charged %d stamina (stamina %d -> %d)", HandName(h), s_strikeId[h], s_strikeFrames[h], s_strikeHits[h], s_strikeDmg[h], s_spent[h], s_strikeStam[h] - now, s_strikeStam[h], now);
+                LOGD("[combat] strike %s #%u ended after %d frames, %d contacts (%s), %d damage seen, budget spent %.2f: game charged %d stamina (stamina %d -> %d)", HandName(h), s_strikeId[h], s_strikeFrames[h], s_strikeHits[h],
+                     !sc.touched ? "no weak touch" : sc.rehitLanded ? "a weak touch, then the re-hit" : sc.rehit ? "a weak touch, the re-hit opened and missed" : "a weak touch only",
+                     s_strikeDmg[h], s_spent[h], s_strikeStam[h] - now, s_strikeStam[h], now);
             }
             s_strikeStam[h] = -1;
             RestoreAtk(h); continue;
         }
-        if (k.first) { s_strikeId[h] = k.id; s_strikeFrames[h] = 0; s_strikeHits[h] = 0; s_hitPauseUntil[h] = 0; s_strikeDmg[h] = 0; s_spent[h] = 0.f; s_lastMult[h] = 0.f; s_qMax[h] = 0.f; }
+        if (k.first) {
+            s_strikeId[h] = k.id; s_strikeFrames[h] = 0; s_strikeHits[h] = 0; s_hitPauseUntil[h] = 0; s_strikeDmg[h] = 0; s_spent[h] = 0.f; s_lastMult[h] = 0.f; s_qMax[h] = 0.f;
+            sc = StrikeContact{}; sc.id = k.id; sc.startedAt = nowS;
+        }
         ++s_strikeFrames[h];
-        if (!k.first && hitNow && nowS >= s_hitPauseUntil[h]) {
-            ++s_strikeHits[h];
+        // This hand's contact from its own exec last frame; the watcher's drops only for a strike without a mark.
+        const bool ownContact = sc.id == k.id && sc.charged > 0;
+        // (Only once its attack runs: a swing the live gate still holds back hits nothing, so an HP drop then - a summon's
+        // hit, a bleed - is not its contact.)
+        const bool viaWatcher = !ownContact && sc.opened && !sc.markable && !k.first && watcherHit;
+        if ((ownContact || viaWatcher) && nowS >= s_hitPauseUntil[h]) {
+            const float hitMult = ownContact ? sc.mult : s_lastMult[h];
+            const int touchedChars = ownContact ? (sc.markCost > 0 && sc.charged >= 2 * sc.markCost ? sc.charged / sc.markCost : 1)
+                                                : (ef.dmgEvents > 1 ? ef.dmgEvents : 1);
+            sc.charged = 0;
+            ++s_strikeHits[h]; ++sc.instHits;
             s_strikeDmg[h] += ef.available ? ef.dmgTotal : 0;
-            // The damage seen this frame came from the sweep of the LAST frame's exec (and its
-            // mult); one budget slice per damaged enemy.
-            s_spent[h] += s_lastMult[h] * (float)(ef.dmgEvents > 1 ? ef.dmgEvents : 1);
-            g_tally.sliceSum += s_lastMult[h]; ++g_tally.sliceN;
+            // One budget slice per character touched, at the multiplier that exec ran with.
+            s_spent[h] += hitMult * (float)touchedChars;
+            g_tally.sliceSum += hitMult; ++g_tally.sliceN;
+            if (viaWatcher) ++g_tally.watcherContacts;
+            NoteContact(hitMult, nowS - (sc.liveAt > 0.0 ? sc.liveAt : sc.startedAt), viaWatcher || (ef.available && ef.dmgEvents + ef.foreignEvents > 0),
+                        ef.available && ef.nearest > 1e8f, nowS);
             if (nowS - s_lastHitHaptic[h] > 0.1) {
                 s_lastHitHaptic[h] = nowS; g_haptic.fetch_or(64u << h);
                 BodyHapticsPost(BodyKind::Strike, TwoHandedStyle(g_armStyle) ? -1 : h, Clamp(k.qualityCommit, 0.f, 1.f));
+                // Felt: an impact in the weapon hand (two-handed, the other hand too) sized by how hard the hit was, and
+                // the drawn blade bites - except on a weak touch, which keeps the swing for its re-hit (a lagging blade
+                // would carry that re-hit somewhere the hand is not).
+                const float strength = HitStrength(hitMult, c.kineticMinMult, c.kineticDamageScale);
+                PostHitFeel(h, strength);
+                if (TwoHandedStyle(g_armStyle)) PostHitFeel(h == HandLeft ? HandRight : HandLeft, 0.75f * strength);
+                const bool weakTouch = oneHit && ContactIsWeakTouch(sc.touched, hitMult, weakMult);
+                if (!weakTouch) GameERWeaponBite(h, strength);
+                if (c.combatDebug) LOGD("[combat] %s hit felt at %.2f of a full hit%s", HandName(h), strength,
+                                        weakTouch ? " (a weak touch: no bite)" : "");
             }
-            // The game charged its behavior cost: give it back (only an actual drop - with the
-            // watcher signalling the hit there may be nothing to refund). At most our mark per enemy hit:
-            // a roll, a jump or a blocked hit in the same frame is the player's own cost.
-            if (stamOff && stamAtEntry < g_prevStam && !refundCounted) {
-                const int hits = ef.available && ef.dmgEvents > 1 ? ef.dmgEvents : 1;
-                const int back = std::min(g_prevStam - stamAtEntry, markCost * hits);
-                WriteStamina(player, stamAtEntry + back); stam = stamAtEntry + back;
-                g_tally.stamRefunded += back; refundCounted = true;
-            }
-            if (c.combatDebug && (!c.kineticContinuous || s_strikeHits[h] == 1)) LOGD("[combat] %s strike HIT #%d (%d damage, stamina %d -> %d)%s", HandName(h), s_strikeHits[h], ef.dmgTotal, g_prevStam, stamAtEntry, stamOff ? " refunded" : "");
-            if (oneHit) {   // the swing landed its one hit: spent (the worker re-arms on the next swing)
-                std::lock_guard<std::mutex> g(g_mtx);
-                if (g_cmd[h].id == k.id) g_cmd[h].active = false;
-                continue;
+            if (c.combatDebug && (!c.kineticContinuous || s_strikeHits[h] <= 2))
+                LOGD("[combat] %s strike contact #%d at x%.2f (%s, %.0f ms into the strike; %d HP seen dropping this frame)", HandName(h), s_strikeHits[h], hitMult,
+                     ownContact ? "the game's on-hit mark" : "an HP drop", (nowS - sc.startedAt) * 1000.0, ef.dmgTotal);
+            if (oneHit) {
+                // A weak touch keeps the swing: the blade goes inert until the swing is fast enough to hit again (below).
+                if (ContactIsWeakTouch(sc.touched, hitMult, weakMult)) {
+                    sc.touched = true; sc.touchMult = hitMult; ++g_tally.touches;
+                    if (c.combatDebug) LOGD("[combat] %s strike: a weak touch at x%.2f - the swing keeps its hit (re-hit from x%.2f)", HandName(h), hitMult, RehitMult(hitMult, weakMult, c.contactRehitGain));
+                } else {   // the swing landed its hit: spent (the worker re-arms on the next swing)
+                    if (sc.touched) { sc.rehitLanded = true; ++g_tally.rehitLanded; }
+                    std::lock_guard<std::mutex> g(g_mtx);
+                    if (g_cmd[h].id == k.id) g_cmd[h].active = false;
+                    continue;
+                }
             }
             if (!c.kineticContinuous) {
                 if (c.kineticHitPause <= 0.f) {
@@ -1986,7 +2337,8 @@ void GameFrameBody(uint8_t* player) {
             if (riding) ++g_tally.rideStrikes;
             if (skillStrike) { g_skillSwing.armed = false; LOGI("[combat] skill strike: judge %d type %d (the skill's own attack row)", t.a.judgeId, t.a.attackType); }
         }
-        anyStrike = true;
+        // (anyStrike - "an attack of ours runs this frame" - is set where the attack runs: a swing the live gate holds back
+        // runs nothing, and a blocked hit during it is still a blocked hit.)
         // Stable per-hand storage: the game keys the attack instance on the args pointer across
         // frames - stable WITHIN a strike, but a FRESH address for every new strike (round-robin
         // pool). One address reused forever gave every strike of the session the same identity in
@@ -1995,8 +2347,6 @@ void GameFrameBody(uint8_t* player) {
         static AttackBehaviorArgs s_ab[2][8]; static CSTaeAnimEventArgs s_args[2][8];
         static unsigned s_abSlot[2]; static float s_time[2]; static bool s_logNext[2];
         static int s_stamAfterDrain[2];
-        if (k.first) s_abSlot[h] = (s_abSlot[h] + 1) & 7;
-        AttackBehaviorArgs& ab = s_ab[h][s_abSlot[h]]; CSTaeAnimEventArgs& args = s_args[h][s_abSlot[h]];
         // Kinetic: scale the strike's attack rows by quality x fatigue, refreshed every frame so
         // the value the sweep reads at contact reflects the tip speed at contact.
         float mult = 1.f; bool scaled = false;
@@ -2028,10 +2378,30 @@ void GameFrameBody(uint8_t* player) {
                     if (mult > remain) mult = remain;
                 }
             } else mult = QualityToMult(k.quality, c) * fat * c.kineticDamageScale;
+            // After a weak touch the blade is inert - the touched character cannot be hit twice by the same attack, and
+            // a slow blade resting in it is no strike - until the swing is fast enough for its re-hit: then a fresh
+            // attack instance opens (a new args slot below), and its contact spends the swing.
+            if (oneHit && sc.touched && !sc.rehit) {
+                const float need = RehitMult(sc.touchMult, weakMult, c.contactRehitGain);
+                if (mult < need) { RestoreAtk(h); continue; }
+                sc.rehit = true; sc.reopen = true; ++g_tally.rehitOpened;
+                if (c.combatDebug) LOGD("[combat] %s strike: the swing sped up to x%.2f after a touch at x%.2f - a fresh attack for its hit", HandName(h), mult, sc.touchMult);
+            }
+            // The live gate: until the swing is strong enough the strike runs no attack at all - nothing it rests on or
+            // brushes can take its hit. Its strength is the swing's quality as a fraction of a vanilla hit (no fatigue,
+            // no DamageScale: the same line for every setting). Not for the two-handed skill's own swing.
+            if (liveMult > 0.f && !sc.opened && !skillStrike) {
+                const float strength = QualityToMult(k.quality, c);
+                s_strikeSeen[h] = true;
+                if (strength > sc.best) sc.best = strength;
+                if (!ContactGoesLive(strength, liveMult)) { RestoreAtk(h); continue; }
+                if (c.combatDebug) LOGD("[combat] %s strike #%u live at x%.2f, %.0f ms into the motion (tip %.1f m/s)", HandName(h), k.id, strength, (nowS - sc.startedAt) * 1000.0, k.tipLive);
+            }
             if (r) {
-                // After the first landed hit-frame the strike keeps its damage but loses its hit
-                // reaction (dmg_level/hitstop/poise -> 0): one flinch per swing, no stunlock.
-                const bool suppress = c.kineticFlinchFirstHitOnly && s_strikeHits[h] > 0;
+                // After the attack instance's first contact the strike keeps its damage but loses its hit
+                // reaction (dmg_level/hitstop/poise -> 0): one flinch per attack, no stunlock. A re-hit after a
+                // weak touch is a new attack: the swing's real hit flinches.
+                const bool suppress = c.kineticFlinchFirstHitOnly && sc.instHits > 0;
                 ApplyAtk(h, r, mult, suppress);
                 if (stamOff) ApplyBhvStamina(h, r, oneHit ? kHitMarkStamina : 1);
                 // A weapon whose own variation lacks this judge: point its behaviorVariationId at
@@ -2044,13 +2414,31 @@ void GameFrameBody(uint8_t* player) {
             s_lastMult[h] = scaled ? mult : 1.f;
             g_status.lastQuality = k.quality; g_status.lastMult = scaled ? mult : 1.f;
         } else s_lastMult[h] = 1.f;
-        if (k.first) {
+        anyStrike = true;
+        // A fresh attack instance: the strike's first run (its first frame, or with the live gate the frame it went
+        // live), or a re-hit after a weak touch.
+        const bool opening = !sc.opened;
+        const bool fresh = opening || sc.reopen;
+        if (opening) {
+            sc.opened = true; sc.liveAt = nowS;
+            if (liveMult > 0.f) { ++g_tally.live; g_tally.liveIntoSum += nowS - sc.startedAt; }
+            // The tick that says "this swing is an attack now" (the worker's tick at the motion's start says nothing when
+            // the gate holds the swing back; with the gate off the two coincide).
+            if (c.kineticContinuous) g_haptic.fetch_or(1u << h);
+        }
+        if (fresh) s_abSlot[h] = (s_abSlot[h] + 1) & 7;
+        AttackBehaviorArgs& ab = s_ab[h][s_abSlot[h]]; CSTaeAnimEventArgs& args = s_args[h][s_abSlot[h]];
+        if (fresh) {
             ab = t.a;
             ab.source = h == HandLeft ? 2 : 1;                       // always the swinging hand's weapon
             if (c.combatAttackIndexRotate > 0) ab.attackIndex = (int32_t)(k.id % (uint32_t)c.combatAttackIndexRotate);
             memset(&args, 0, sizeof(args));
             args.eventId = EV_AttackBehavior; args.args = &ab; args.from = 0.f; args.to = c.swingMaxSeconds > 0 ? c.swingMaxSeconds : 1.f;
-            args.taeVersion = 0x1a; s_time[h] = 0.f; args.animTime = &s_time[h]; s_logNext[h] = c.combatDebug;
+            args.taeVersion = 0x1a; s_time[h] = 0.f; args.animTime = &s_time[h];
+            sc.instStart = nowS; sc.instHits = 0; sc.reopen = false;
+        } else s_time[h] = (float)(nowS - sc.instStart);
+        if (opening) {   // the strike's accounting starts when its attack does (a swing that never goes live is no strike)
+            s_logNext[h] = c.combatDebug;
             int drain = 0;
             if (c.combatExtraStamina[k.slot] > 0) drain += c.combatExtraStamina[k.slot];
             if (kinetic && stamFull) {
@@ -2073,26 +2461,31 @@ void GameFrameBody(uint8_t* player) {
                 if (scaled) LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) mult %.2f drain %d stamina %d/%d | %s", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, mult, drain, stam, maxStam, nearBuf);
                 else LOGD("[combat] strike %s %s: quality %.2f (tip %.1f m/s, arc %.2f m) VANILLA DAMAGE (no attack row to scale) drain %d stamina %d/%d | %s", HandName(h), SlotName(k.slot), k.qualityCommit, k.tipSpeed, k.arc, drain, stam, maxStam, nearBuf);
             }
-        } else s_time[h] = (float)(NowSec() - k.start);
+        }
         // Continuous contacts follow motion until it stops (or the hit budget
         // retires them). Keep the native event window ahead of that motion too;
         // the gated model's timeout must not make a long windup go inert mid-cut.
         if (c.kineticEnabled && c.kineticContinuous)
             args.to = s_time[h] + (c.swingMaxSeconds > 0.f ? c.swingMaxSeconds : 0.6f);
-        args.isFirstExecution = k.first ? 1 : 0;
-        // Stamina "off" takes the bar out of the loop. The game charges our attack's stamina INSIDE this call - the
-        // exec sweeps the hitbox and charges on contact - between this frame's entry read and its end read, so the
-        // hit-mark test and the refund above, which compare frame to frame, never saw it (0.7.1 player log: 0 refunds
-        // and stamina at -50 in every 5 s with a landed hit; "drains in a second in fights"). Only the game's own
-        // code runs between these two reads, on this thread, for our own attack: whatever it takes is ours.
-        const int stamPreExec = stamOff && maxStam > 0 ? ReadStamina(player) : INT_MIN;
+        args.isFirstExecution = fresh ? 1 : 0;
+        // The game charges our attack's stamina INSIDE this call - the exec sweeps the hitbox and charges on contact,
+        // once per character touched - so whatever it takes between these two reads is our own contact (only the
+        // game's own code for our own attack runs in between, on this thread). It is the hit signal (g_contact,
+        // processed at the top of the next frame), in every stamina mode. Stamina "off" gives it back at once (0.7.1
+        // player log: refunded frame to frame, it never was - stamina at -50 in every 5 s with a landed hit).
+        sc.markable = maxStam > 0 && scaled && (stamOff || g_resolve[h].bhvStamina > 0);
+        sc.markCost = stamOff ? (oneHit ? kHitMarkStamina : 1) : g_resolve[h].bhvStamina;
+        const int stamPreExec = maxStam > 0 ? ReadStamina(player) : INT_MIN;
         g_origExec(ev, &args);
         if (stamPreExec != INT_MIN) {
             const int post = ReadStamina(player);
             if (post < stamPreExec) {
-                WriteStaminaExact(player, stamPreExec); stam = stamPreExec;
+                sc.charged += stamPreExec - post; sc.mult = s_lastMult[h];
                 ++g_tally.execCharges; g_tally.execCharged += stamPreExec - post;
-                g_tally.stamRefunded += stamPreExec - post;
+                if (stamOff) {
+                    WriteStaminaExact(player, stamPreExec); stam = stamPreExec;
+                    g_tally.stamRefunded += stamPreExec - post;
+                }
             }
         }
         {
@@ -2100,12 +2493,13 @@ void GameFrameBody(uint8_t* player) {
             if (g_cmd[h].id == k.id) g_cmd[h].FinishFrame();
         }
         InterlockedIncrement(&g_injected);
-        if (c.combatDebug && k.first) LOGD("[combat] injected %s attack (judgeId %d index %d source %u) stamina %d", SlotName(k.slot), ab.judgeId, ab.attackIndex, ab.source, stam);
+        if (c.combatDebug && opening) LOGD("[combat] injected %s attack (judgeId %d index %d source %u) stamina %d", SlotName(k.slot), ab.judgeId, ab.attackIndex, ab.source, stam);
         // Whether the GAME charged the behavior's stamina on top of ours: the delta a frame later
         // beyond our own drain (regen is < 1/frame; a blocked hit would also show here).
-        if (!k.first && s_logNext[h]) { s_logNext[h] = false; int ns = ReadStamina(player); LOGD("[combat] ... next frame: stamina %d (game charged %d)", ns, s_stamAfterDrain[h] - ns); }
+        if (!opening && s_logNext[h]) { s_logNext[h] = false; int ns = ReadStamina(player); LOGD("[combat] ... next frame: stamina %d (game charged %d)", ns, s_stamAfterDrain[h] - ns); }
     }
 
+    ContactSeenTick(ef, nowS);   // after the loop: this frame's HP drops answer the contacts it just processed
     // ---- shield: guard quality -> shield params; blocked-hit / deflect detection -------------
     g_status.guarding = false; g_status.blockQuality = 0.f;
     if (leftShield && blk.raised) {
@@ -2116,8 +2510,8 @@ void GameFrameBody(uint8_t* player) {
         if (!anyStrike && maxStam > 0 && g_prevStam != INT_MIN && g_prevStam - stamAtEntry >= c.blockImpactStamina) {
             const int drop = g_prevStam - stamAtEntry;
             const bool deflect = blk.into >= AppliedWeaponPreset(HandLeft).tuning.Get(WeaponField::DeflectSpeed,c.deflectSpeed) && (NowSec() - blk.intoT) < 0.25;
-            if (deflect) { WriteStamina(player, g_prevStam); stam = g_prevStam; g_haptic.fetch_or(32u); g_tally.stamRefunded += drop; }
-            else g_haptic.fetch_or(16u);
+            if (deflect) { WriteStamina(player, g_prevStam); stam = g_prevStam; g_haptic.fetch_or(32u); g_tally.stamRefunded += drop; ++g_tally.deflects; }
+            else { g_haptic.fetch_or(16u); ++g_tally.blocked; }
             BodyHapticsPost(deflect ? BodyKind::Deflect : BodyKind::Block, HandLeft, deflect ? 1.f : Clamp(.4f + (float)drop / 100.f, .4f, 1.f));
             if (c.combatDebug) LOGD("[combat] blocked hit: stamina -%d quality %.2f into %.2f m/s%s", drop, blk.quality, blk.into, deflect ? " -> DEFLECT (refunded)" : "");
         }
@@ -2280,6 +2674,13 @@ bool OneHandSkillAllowed(const Config& c, int hand) {
 bool LeftOwnsSkill() {
     return LeftArtOwnsSkill(g_artType[HandLeft].load(), g_wepShield[HandLeft].load() != 0 || g_wepBow[HandLeft].load() != 0);
 }
+// The hand whose skill the game's skill button plays right now: the game's rule (SkillHand), except while SkillPerHand
+// has the left shield's art set aside - then it is the right weapon's.
+int SkillButtonHand(int style) {
+    const bool two = TwoHandedStyle(style);
+    if (!two && g_artHideState.load() == 1) return HandRight;
+    return SkillHand(two, two ? TwoHandedWeaponHand(style) : HandRight, LeftOwnsSkill());
+}
 
 void PollSkillTrigger(const VRInputState& in, double now) {
     const Config& c = Cfg();
@@ -2292,13 +2693,31 @@ void PollSkillTrigger(const VRInputState& in, double now) {
     if (in.handTrigger[HandRight]  >= c.gripThreshold)    buttons |= VRB_RGrip;
     const int style = g_armStyleShared.load();
     const bool two = TwoHandedStyle(style);
-    const int owner=SkillHand(two,TwoHandedWeaponHand(style),LeftOwnsSkill());
+    // SkillPerHand: one-handed with a shield whose art would take the game's skill button, each trigger is its own hand's
+    // skill - the configured (right-hand) control the right weapon's, the left trigger the shield's. A press latches its
+    // hand until it is let go; the other trigger is a new press after that.
+    const bool split = c.skillPerHand && c.oneHandSkill && !two && mask && VRButtonHand(mask) == HandRight &&
+                       g_wepShield[HandLeft].load() != 0 && LeftOwnsSkill();
+    g_skillSplit.store(split);
+    static int s_hand = -1; static bool s_wasDown = false; static double s_hideUntil = 0.0;
+    const bool mainDown = mask && (buttons & mask) != 0;
+    const bool leftDown = split && (buttons & VRB_LTrigger) != 0;
+    if (!s_wasDown) s_hand = mainDown ? VRButtonHand(mask) : leftDown ? HandLeft : -1;
+    const bool down = s_hand < 0 ? false : (split && s_hand == HandLeft) ? leftDown : mainDown;
+    s_wasDown = down;
+    const int owner = split ? (s_hand == HandLeft ? HandLeft : HandRight) : SkillHand(two,TwoHandedWeaponHand(style),LeftOwnsSkill());
+    // The right weapon's skill sets the shield's art aside while held and a little after (its animation may ask the game's
+    // skill choice again); the left trigger's press puts it back at once.
+    if (split && down && s_hand == HandRight) s_hideUntil = now + 1.5;
+    if (!split || (down && s_hand == HandLeft)) s_hideUntil = 0.0;
+    g_artHideWant.store(split && now < s_hideUntil ? 1 : 0);
+    g_skillHoldHand.store(down ? s_hand : -1);
     const auto preset=AppliedWeaponPreset(owner);
     const auto policy=DecideWeaponAction(preset,WeaponEvent::Skill,{owner,two,GameERRiding()});
     SkillTriggerIn ti;
-    ti.down = mask && (buttons & mask) != 0 && policy!=WeaponAction::Suppress;
+    ti.down = down && policy!=WeaponAction::Suppress;
     ti.twoHanded = two;
-    ti.oneHandAllowed = OneHandSkillAllowed(c, VRButtonHand(mask));
+    ti.oneHandAllowed = OneHandSkillAllowed(c, split && s_hand == HandLeft ? HandLeft : VRButtonHand(mask));
     ti.effectMode = c.twoHandSkill != "off" && (policy==WeaponAction::EffectSkill || (policy==WeaponAction::Default && c.twoHandSkill == "effect"));
     ti.gameMode = c.twoHandSkill != "off" && (policy==WeaponAction::GameSkill || (policy==WeaponAction::Default && c.twoHandSkill == "game"));
     ti.now = now;
@@ -2319,8 +2738,9 @@ void PollSkillTrigger(const VRInputState& in, double now) {
         LOGI("[combat] skill: the %s arms the stance's follow-ups (stance hold animation hidden): nothing plays while it is held - each swing presses %s and the attack together",
              c.twoHandSkillButton.c_str(), c.skillButton.c_str());
     else if (o.started)
-        LOGI("[combat] skill: holding %s for the game while the %s is held (%s)", c.skillButton.c_str(), c.twoHandSkillButton.c_str(),
-             two ? (ti.gameMode ? "two-handed, TwoHandSkill=game" : "two-handed, held past SkillHoldSeconds: the game's own skill, recorded") : "one-handed");
+        LOGI("[combat] skill: holding %s for the game while the %s is held (%s)", c.skillButton.c_str(), split && s_hand == HandLeft ? "LTrigger" : c.twoHandSkillButton.c_str(),
+             two ? (ti.gameMode ? "two-handed, TwoHandSkill=game" : "two-handed, held past SkillHoldSeconds: the game's own skill, recorded")
+                 : !split ? "one-handed" : s_hand == HandLeft ? "one-handed: the left shield's skill" : "one-handed: the right weapon's skill, the shield's set aside");
     // A two-handed skill (replayed or the game's): remember the weapon's hand for the skill's own aim events - a bow
     // aims with it; a melee weapon's projectile follows SkillAim (ArmCastAimFromEvent). A replay with bullets arms
     // itself in StartReplay. One-handed, the pad's LT press does.
@@ -2341,8 +2761,9 @@ void PollBlock(const VRTracking& tr, double now) {
     const bool suppressed = DecideWeaponAction(preset,WeaponEvent::Guard,{HandLeft,TwoHandedStyle(g_armStyleShared.load()),GameERRiding()}) == WeaponAction::Suppress;
     BlockState b;
     { std::lock_guard<std::mutex> g(g_mtx); b = g_block; }
+    const bool wasRaised = b.raised;
     const Pose& sh = tr.hand[HandLeft]; const Pose& hd = tr.head;
-    static double s_upSince = 0, s_downSince = 0, s_lastLog = 0;
+    static double s_upSince = 0, s_downSince = 0, s_lastLog = 0, s_raisedAt = 0;
     if (suppressed || !g_leftShield.load() || !sh.valid || !hd.valid) { b.raised = false; b.quality = 0.f; b.into = 0.f; s_upSince = s_downSince = 0; }
     else {
         Vec3 fwd = hd.rot.Forward(); fwd.y = 0.f; fwd = fwd.Normalized();
@@ -2378,6 +2799,16 @@ void PollBlock(const VRTracking& tr, double now) {
             const Vec3 ax = sh.rot.Rotate({1.f, 0.f, 0.f}), ay = sh.rot.Rotate({0.f, 1.f, 0.f}), az = sh.rot.Rotate({0.f, 0.f, -1.f});
             LOGD("[combat] shield: q %.2f align %.2f cov %.2f brace %.2f | fwd %.2f lat %.2f height %.2f | axes.fwd X %.2f Y %.2f -Z %.2f", b.quality, align, cov, brace, fd, lateral, height, ax.Dot(fwd), ay.Dot(fwd), az.Dot(fwd));
         }
+    }
+    // The guard's edges, felt (2026-11-21 "not clear when the shield is active"): the arm is the controller's, so the
+    // game's raised-guard pose never shows - a firm tick in the shield hand when the guard goes up, a soft one when it
+    // drops. Counted for the 5 s line either way.
+    if (b.raised != wasRaised) {
+        if (b.raised) { s_raisedAt = now; g_guardRaises.fetch_add(1, std::memory_order_relaxed); }
+        else if (s_raisedAt > 0) { g_guardUpMs.fetch_add((int)((now - s_raisedAt) * 1000.0), std::memory_order_relaxed); s_raisedAt = 0; }
+        if (c.guardHaptics) g_haptic.fetch_or(b.raised ? 1024u : 2048u);
+    } else if (b.raised && s_raisedAt > 0 && now - s_raisedAt >= 1.0) {   // a long hold reports its time as it goes
+        g_guardUpMs.fetch_add((int)((now - s_raisedAt) * 1000.0), std::memory_order_relaxed); s_raisedAt = now;
     }
     std::lock_guard<std::mutex> g(g_mtx); g_block = b;
 }
@@ -2610,13 +3041,15 @@ void CombatNotifyPad(uint16_t mask, double now) {
     if (rise & skill) {
         // The hand whose weapon's skill plays (the game's GetSwordArtInfo): a staff or seal in the left has none, so
         // one-handed it is the right weapon's skill unless the left holds a shield or a bow.
-        hand = SkillHand(TwoHandedStyle(style), TwoHandedStyle(style) ? TwoHandedWeaponHand(style) : HandRight, LeftOwnsSkill());
+        hand = SkillButtonHand(style);
         why = "skill button";
     }
     // A press only REMEMBERS the hand; the game's aim events arm the aim (a press by itself must not - guard
     // and grip-mapped buttons are presses too).
     if (hand >= 0) { g_castPressHand.store(hand); g_castPressAt.store(now); if (c.combatDebug) LOGD("[combat] cast aim: %s hand pressed (%s)", HandName(hand), why); }
 }
+
+bool CombatSnapSwingAim(const Vec3& origin, Vec3* dir, char* note, size_t noteLen) { return SnapSwingAim(origin, dir, note, noteLen); }
 
 int CombatCastAimKind(Vec3* swingTracking) {
     const int kind = g_castKind.load();
@@ -2665,6 +3098,12 @@ int CombatCastAimHand(bool* casting) {
 }
 
 uint32_t CombatTakeHapticRequests() { return g_haptic.exchange(0); }
+void CombatTakeHitFeel(HitFeel out[2]) {
+    for (int h = 0; h < 2; ++h) {
+        out[h].strength = g_hitFeel[h].exchange(0.f);
+        out[h].weight = out[h].strength > 0.f ? g_wepWeight[h].load() : 0.f;
+    }
+}
 
 uint16_t CombatBlockedButtons() {
     const Config& c = Cfg();
@@ -2680,7 +3119,7 @@ uint16_t CombatBlockedButtons() {
     if (!two && g_wepRanged[HandLeft].load() &&
         DecideWeaponAction(AppliedWeaponPreset(HandLeft),WeaponEvent::Cast,{HandLeft,false,mounted}) == WeaponAction::Suppress)
         m |= ParseXInputButton(c.leftSwingButton);
-    const int skillHand = SkillHand(two,attackHand,LeftOwnsSkill());
+    const int skillHand = g_skillSplit.load() ? HandRight : SkillHand(two,attackHand,LeftOwnsSkill());   // per hand: the configured trigger is the right weapon's
     const auto skillPolicy = DecideWeaponAction(AppliedWeaponPreset(skillHand),WeaponEvent::Skill,{skillHand,two,mounted});
     if (skillPolicy != WeaponAction::Default) m |= MappedButtonOf(c.twoHandSkillButton,c);
     if (c.twoHandMode == "grab") {
@@ -2692,11 +3131,22 @@ uint16_t CombatBlockedButtons() {
     if (c.twoHandSkill != "off" && TwoHandedStyle(g_armStyleShared.load())) m |= MappedButtonOf(c.twoHandSkillButton, c);
     else if (!TwoHandedStyle(g_armStyleShared.load()) && OneHandSkillAllowed(c, VRButtonHand(ParseVRButton(c.twoHandSkillButton))))
         m |= MappedButtonOf(c.twoHandSkillButton, c);
+    // SkillPerHand: the left trigger is the shield's skill - not also its [Buttons] mapping (LB, the guard: a raised
+    // shield holds that on its own, CombatHeldButtons, after this block).
+    if (g_skillSplit.load()) m |= MappedButtonOf("LTrigger", c);
     return m;
 }
 
 uint16_t CombatSkillHeldButtons() {
     if (!g_skillHeld.load() || !CombatHandlesSwings()) return 0;
+    // SkillPerHand: the button goes down only once the game sees the left shield's art set aside (the right trigger) or
+    // back in place (the left trigger) - a frame early and the game's own choice plays the other hand's skill. Set aside
+    // impossible (state 2): the game's rule, at once.
+    if (g_skillSplit.load()) {
+        const int hand = g_skillHoldHand.load(), state = g_artHideState.load();
+        if (hand == HandRight && state == 0) return 0;
+        if (hand == HandLeft && state == 1) return 0;
+    }
     return ParseXInputButton(Cfg().skillButton);   // LT = the VP_LT pseudo bit (the pad sets the analog trigger)
 }
 
@@ -2857,6 +3307,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             g_sm[h] = HandSM{}; g_sm[h].nextId = next;
         }
         for (auto& stance : g_stance) stance.Reset();
+        for (auto& w : g_wave) w.pending = false;   // a recognised follow-up's wave does not leave into a menu
         g_skillReq.store(0); g_chordReq.store(0); g_chord = ChordRun{};
         g_skillTrig.Reset(); g_skillHeld.store(false); g_stanceArmed.store(false);   // a menu or a transition lets go of a held skill
         std::lock_guard<std::mutex> g(g_mtx); g_block = BlockState{}; g_two = TwoHandState{};
@@ -2894,6 +3345,7 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             // down; tracking loss or taking the support grip must never replay it.
             WeaponPresetTrace(h,0,0,event,action);
             g_stance[h].Reset();
+            g_wave[h].pending = false;
             EndSwing(h, true);
             const uint32_t next = s.nextId;
             s = HandSM{}; s.nextId = next;
@@ -2935,6 +3387,18 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
         si.onSpeed = tuning.Get(WeaponField::SwingOn, c.swingOnSpeed); si.offSpeed = std::min(si.onSpeed * .95f,tuning.Get(WeaponField::SwingOff, c.swingOffSpeed)); si.minHand = tuning.Get(WeaponField::MinHand, c.minHandSpeed);
         si.heavySpeed = tuning.Get(WeaponField::Heavy, c.heavySwingSpeed); si.armWindow = tuning.Get(WeaponField::ArmWindow, c.swingArmWindow);
         ViewForward(tr, &si.vx, &si.vz);
+        // A recognised follow-up swing whose recorded wave waits for the swing's fastest point (StanceFollowUps=replay):
+        // released here - held or not, the trigger may already be let go - with the aim measured up to now.
+        if (g_wave[h].pending) {
+            WavePending& w = g_wave[h];
+            if (tip > w.peak) w.peak = tip;
+            if (WaveReleaseDue(tip, w.peak, now - w.pressAt, c.stanceWaveMaxDelay, !g_stance[h].Collecting())) {
+                w.pending = false;
+                PublishSwingAim(h, tr); ArmSwingAim(h, now);
+                g_waveFire.store(h * 4 + w.variant);
+                if (c.combatDebug) LOGD("[combat] %s follow-up swing: its wave leaves %.0f ms after the press (tip %.1f of a %.1f m/s peak)", HandName(h), (now - w.pressAt) * 1000.0, tip, w.peak);
+            }
+        }
         if (stanceHeld) {
             EndSwing(h, true);
             { const uint32_t next = s.nextId; s = HandSM{}; s.nextId = next; }
@@ -2943,11 +3407,34 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
             FinishSwingAim(h, tr, now);
             if (pr == StancePress::None) continue;
             const int throwState = g_throwState.load();
-            if (throwState == 3 || throwState == 4 || g_chordReq.load() != 0) {
-                if (c.combatDebug) LOGD("[combat] %s swing in the stance dropped (%s)", HandName(h), g_chordReq.load() ? "another press is running" : "a critical is playing");
+            if (throwState == 3 || throwState == 4) {
+                if (c.combatDebug) LOGD("[combat] %s swing in the stance dropped (a critical is playing)", HandName(h));
                 continue;
             }
             const bool heavy = action == WeaponAction::Heavy || (action != WeaponAction::Light && pr == StancePress::Heavy);
+            const int variant = heavy ? 2 : 1;
+            const bool replay = c.stanceFollowUps == "replay";
+            const int recorded = g_followUpState[h][variant].load(), otherRecorded = g_followUpState[h][3 - variant].load();
+            // StanceFollowUps=replay with this follow-up's projectile recorded (or the other one's, while this one is
+            // not): no game attack at all - the wave leaves from the blade at the swing's fastest point (above).
+            if (replay && (recorded == 1 || (recorded == 0 && otherRecorded == 1))) {
+                WavePending& w = g_wave[h];
+                w.pending = true; w.variant = variant; w.pressAt = now; w.peak = g_stance[h].PressPeak();
+                g_wavePressAt[h].store(now);
+                g_haptic.fetch_or(1u << h);
+                PublishSwingAim(h, tr);
+                ArmSwingAim(h, now);
+                LOGI("[combat] %s swing while the skill is held (tip %.1f m/s, %.2f s into the hold): its %s follow-up's projectile leaves from the blade at the swing's fastest point - no game attack",
+                     HandName(h), g_stance[h].PressPeak(), now - g_skillHeldAt, FollowUpName(variant));
+                continue;
+            }
+            if (g_chordReq.load() != 0) {
+                if (c.combatDebug) LOGD("[combat] %s swing in the stance dropped (another press is running)", HandName(h));
+                continue;
+            }
+            // Not recorded yet: the game plays this one and ERVR records its projectile (a follow-up recorded without
+            // one stays the game's).
+            if (replay && recorded == 0) g_followUpRecordReq.store(h * 4 + variant);
             // Armed without the hold (StanceHoldAnimation=false): the skill button leads the attack by StanceSettle -
             // the game enters the stance and takes the follow-up from it at once.
             if (stanceArmed) g_stanceChordLead.store(std::max(0.05, (double)si.settleSeconds));
@@ -3048,7 +3535,9 @@ void CombatPollHands(const VRTracking& tr, const VRInputState& in, double now) {
                 StartSwing(h, slot, now, q, s.arc, vq); s.st = HandSM::Swinging; s.t = now; s.spentAt = 0;
                 s.slowSince = 0; s.landed = false;
                 UpdateSwing(h, q, s.arc, vq, tip);
-                g_haptic.fetch_or(1u << h);
+                // Continuous contacts tick when the strike's attack actually starts (the game thread, at the live gate);
+                // a tick here fired on any motion of the arm and told the player nothing (2026-11-21).
+                if (!c.kineticContinuous) g_haptic.fetch_or(1u << h);
                 if (c.combatDebug) LOGD("[combat] %s swing start: %s (tip %.2f m/s, controller tip %.2f m/s, virtual %.2f m/s, hand %.2f m/s, arc %.2f/%.2f m, weight %.1f, reach %.2f m, quality %.2f)", HandName(h), SlotName(slot), s.peak, rawTip, s.vVirtPeak, handSpd, s.arc, ArcRefFor(weight, c), weight, reach, q);
             }
             break; }

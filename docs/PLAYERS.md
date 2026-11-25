@@ -115,10 +115,10 @@ Defaults for Quest Touch controllers. Every button is a key in `ERVR.ini` (`[But
 
 | Control | What it does |
 |---|---|
-| Swing the right hand | Attack with the right weapon. The swing is the hitbox: faster hits harder, a full windup hardest. Behind an enemy that can be backstabbed, the swing is the game's backstab |
+| Swing the right hand | Attack with the right weapon. The swing is the hitbox: faster hits harder, a full windup hardest. A swing counts once it is fast enough for half a normal hit, and a short tick in the hand tells you it does; slower motion hits nothing. Behind an enemy that can be backstabbed, the swing is the game's backstab |
 | Swing the left hand | Attack with the left weapon |
-| Shield raised in front | Block with a shield in the left hand; moving the shield into a hit deflects it |
-| Left trigger | Guard |
+| Shield raised in front | Block with a shield in the left hand (a firm tick when the guard goes up, a soft one when it drops); moving the shield into a hit deflects it |
+| Left trigger | Guard. With a shield whose own skill is a shield skill (Parry, Barricade Shield...), the shield's skill instead: the raised shield guards, and the right trigger stays your weapon's skill |
 | Free hand on the hilt, squeeze its grip | Two-hand the weapon; open the grip to let go |
 | Right trigger | The skill (Ash of War), held for as long as you hold it: stances (swing for the follow-up) and charged skills work. Two-handed, a tap plays the skill's effect without its animation |
 | Left grip, quick squeeze | Skill (a tap) |

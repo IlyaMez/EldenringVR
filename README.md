@@ -196,7 +196,7 @@ ERVR needs no other mod and does not use R.E.A.L. VR.
 | Crouch / lock on | **Left stick click** / **right stick click** |
 | Quick slots (the D-pad) | Hold the **left stick click** and tilt |
 | Attack | Swing the weapon. Faster hits harder; the left hand attacks with the left weapon. Behind an enemy, a swing backstabs |
-| Block, deflect | Raise the shield in front of you; move it into a blow to deflect it. **Left trigger** guards |
+| Block, deflect | Raise the shield in front of you (a tick says the guard is up); move it into a blow to deflect it. **Left trigger** guards, or plays the shield's own skill if it has one (Parry and the like) |
 | Two-hand | Put your free hand on the hilt and squeeze its **grip**; open it to let go |
 | Ash of War | **Right trigger**: held, the game holds it (stances, charged skills); a quick **left grip** squeeze taps it too |
 | Switch weapons | Hold a **grip** with the hand still, move over a weapon and let go |

@@ -297,6 +297,42 @@ void DrawnPoseAndCameraRideOneMatrix() {
     Check(!frame.Fresh(1.001), "a reset drops the frame");
 }
 
+void TheDrawnRiderIsPlacedWithTheFramesMatrix() {
+    // 2026-11-14: the rider is drawn with its location matrix, which the game sets off the model matrix (here 15 cm
+    // up and 12 deg pitched, a jump's worth). A frame that places the drawn rider owns its rebuild and keeps every
+    // later write on its own matrix - the one written over the location matrix.
+    const RigidPose guess{{1.f, 2.f, 3.f}, Quat::YawQ(0.4f)};
+    const RigidPose rebuilt{guess.pos + Vec3{0.f, 0.01f, 0.f}, (guess.rot * Quat::AxisAngle({1.f, 0.f, 0.f}, 0.02f)).Normalized()};
+    const Vec3 eye = OutOfFrame(guess, {0.05f, 0.76f, 0.1f});
+    RideFrameAnchor frame;
+    frame.Set(7, guess, eye, 1.0, true);
+    Check(frame.OwnsRebuild(8), "the frame's own rebuild (count 7 -> 8) is the one whose drawn matrix it places");
+    Check(!frame.OwnsRebuild(7) && !frame.OwnsRebuild(9), "... no other");
+    Near((frame.RiderFor(8, rebuilt).pos - guess.pos).Length(), 0.f, "after the rebuild the writes stay on the frame's matrix");
+    const Vec3 written = eye + Vec3{0.f, -0.045f, 0.08f};
+    const Vec3 drawnHead = OutOfFrame(guess, IntoFrame(guess, written));   // drawn with the matrix written over it
+    Near(((drawnHead - frame.Anchor(frame.RiderFor(8, rebuilt))) - (written - eye)).Length(), 0.f,
+         "the drawn head keeps its exact place under the view, the guess's miss included", 1e-5f);
+    RideFrameAnchor plain;
+    plain.Set(7, guess, eye, 1.0);
+    Check(!plain.OwnsRebuild(8), "a frame that does not place the drawn rider leaves the location matrix to the game");
+    Near((plain.RiderFor(8, rebuilt).pos - rebuilt.pos).Length(), 0.f, "... and its writes after the rebuild use the rebuilt matrix");
+    frame.Reset();
+    Check(!frame.OwnsRebuild(8), "a reset frame places nothing");
+
+    // The matrix written: the frame's rotation and position, the game's row scales and fourth column kept.
+    const float current[16] = {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 9.f, 9.f, 9.f, 1.f};
+    float out[16];
+    LocationMatrixFrom(guess, current, out);
+    const Vec3 X{out[0], out[1], out[2]}, Y{out[4], out[5], out[6]}, Z{out[8], out[9], out[10]};
+    Near(std::fabs((Quat::FromBasis(X, Y, Z) * guess.rot.Conj()).Normalized().w), 1.f, "rows X Y Z are the frame's rotation", 1e-5f);
+    Near((Vec3{out[12], out[13], out[14]} - guess.pos).Length(), 0.f, "row 4 is its position");
+    Check(out[3] == 0.f && out[7] == 0.f && out[11] == 0.f && out[15] == 1.f, "the fourth column is the game's");
+    const Vec3 p{0.2f, 0.7f, -0.1f};
+    const Vec3 viaMatrix = Vec3{out[12], out[13], out[14]} + X * p.x + Y * p.y + Z * p.z;
+    Near((viaMatrix - OutOfFrame(guess, p)).Length(), 0.f, "a model-space point lands where the frame puts it", 1e-5f);
+}
+
 void PhysicalTurnsFollowTheHead() {
     RideHeadFollow follow;
     Near(follow.Step(0.3f, 0.0, 1, 0.f, 0.f), 0.f, "the first sample only sets the reference");
@@ -378,6 +414,7 @@ int main() {
     ARidesTiltIsCarriedOn();
     TheRiddenHorseIsFound(); TurnsStayWithTheMountedPair(); VisibilityPreservesOtherFlags();
     SeatedPoseIsASettledSeat(); SeatedBodyStaysUpright(); CameraRidesTheHorseNotTheBounce();
-    DrawnPoseAndCameraRideOneMatrix(); PhysicalTurnsFollowTheHead(); SecondEyeDrawsTheRiderWhereTheFirstDid();
+    DrawnPoseAndCameraRideOneMatrix(); TheDrawnRiderIsPlacedWithTheFramesMatrix(); PhysicalTurnsFollowTheHead();
+    SecondEyeDrawsTheRiderWhereTheFirstDid();
     std::puts("Mounted rider resolution, seat, ride frame, camera, turning and second-eye checks passed.");
 }

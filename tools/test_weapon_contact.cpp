@@ -69,5 +69,21 @@ int main() {
     Check(std::fabs(SegmentDistance({2, 3, 0}, {2, 4, 0}, feet, top) - 1.3f) < 1e-4f,
           "a blade above the head is measured to the top of the body line");
     Check(std::fabs(SegmentDistance({0, 0.5f, 0}, {0, 0.5f, 0}, feet, top) - 2.f) < 1e-4f, "a zero-length blade is a point");
+    // Weak touches (2026-11-14): a floor-level first contact must not use up the swing that follows it.
+    Check(ContactIsWeakTouch(false, 0.26f, 0.5f), "a contact at the 0.25x floor is a touch, not the swing's hit");
+    Check(!ContactIsWeakTouch(false, 0.74f, 0.5f), "a real swing's contact spends the swing");
+    Check(!ContactIsWeakTouch(true, 0.26f, 0.5f), "only the first contact can be a touch: the re-hit always spends");
+    Check(!ContactIsWeakTouch(false, 0.26f, 0.f), "ContactWeakTouch=0 turns touches off");
+    Check(std::fabs(RehitMult(0.25f, 0.5f, 0.25f) - 0.5f) < 1e-5f, "a floor touch re-hits once the swing is a full contact");
+    Check(std::fabs(RehitMult(0.45f, 0.5f, 0.25f) - 0.7f) < 1e-5f, "a touch just under the line needs the swing clearly faster");
+    Check(std::fabs(RehitMult(0.3f, 0.5f, -1.f) - 0.5f) < 1e-5f, "a negative gain is no gain");
+    // The live gate (2026-11-21): the strike's attack opens only once the swing is strong enough.
+    Check(!ContactGoesLive(0.25f, 0.5f), "a swing at the floor is not live: a blade resting on something cannot spend it");
+    Check(!ContactGoesLive(0.49f, 0.5f), "just under the line is not live yet");
+    Check(ContactGoesLive(0.5f, 0.5f) && ContactGoesLive(0.9f, 0.5f), "from the line on the swing is live");
+    Check(ContactGoesLive(0.25f, 0.f), "ContactLiveMult=0 is live from the first frame, as before");
+    Check(WeakTouchMultFor(0.5f, 0.5f) == 0.f && !ContactIsWeakTouch(false, 0.4f, WeakTouchMultFor(0.5f, 0.5f)),
+          "with the gate on a live swing's contact is never a touch, even after its speed fell back");
+    Check(WeakTouchMultFor(0.f, 0.5f) == 0.5f, "with the gate off the touch rule stands");
     std::puts("Weapon contact regression checks passed.");
 }

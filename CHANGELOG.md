@@ -3,6 +3,65 @@
 All notable changes to ERVR. Versions are tags on `main`; each tag is built by the public
 release workflow and published on GitHub Releases and Nexus Mods.
 
+## Unreleased
+
+Swings land their full hit even when the blade starts on the enemy or the ground, co-op partners' hits no longer use
+up yours, Moonveil's wave leaves from your blade during your swing (no lunge, no wait), a hit you land is something
+you feel, and each trigger plays its own hand's skill.
+
+### New
+* A landed hit is felt. The weapon hand gets an impact, a sharp crack and then a thud that dies away, sized by
+  how hard the hit was and how heavy the weapon is. Two-handed, both hands feel it. The blade also bites: at a
+  full hit it stays where it struck for a moment and then rejoins your hand, the way a real blade drags in what it
+  cuts. Softer hits bite less, and a weak touch doesn't bite at all. Only what you see lags. Your swing's speed is
+  still your hand's. Before, every hit was the same short buzz. `[Combat] HitHaptics` (0 = the old buzz),
+  `HitBiteSeconds` (0 = no bite), `HitBiteHold`.
+* You can feel when your shield's guard is up: a firm tick in the shield hand when it goes up, a soft one when it
+  drops. Your arm follows the controller, so the game's raised-shield pose never shows (`[Combat] GuardHaptics`).
+
+### Fixed
+* Single-frame stereo: blood, sparks, embers and other GPU particle effects could sit in different places in each
+  eye. The game simulates these particles on the GPU, colliding them with what the camera sees, and ERVR ran that
+  simulation a second time for the right eye: against the right eye's view, and the next frame carried on from that
+  version. The simulation now runs once a frame and both eyes draw the same particles (`[VR] ReplaySimulateOnce`,
+  empty = as before).
+* On Torrent, your body rose into view when the horse jumped or galloped. The game draws the rider with its own
+  placement on the saddle, which carries the horse's bounce and tilt. ERVR posed your body and placed the camera in
+  a different one. The two were up to 19 cm and 20 degrees apart in a jump, so your neck, chest and shoulders came
+  up in front of your eyes while the view stayed put. ERVR now draws the rider where it poses it: your body and
+  the view move together, and the horse moves under them (`[Experimental] RideDrawnMatrix=false` = the game's
+  placement).
+* Hits that felt like they did not register. A swing gets one hit, taken where the blade first touches, and a
+  strike opened as soon as the blade moved. A blade already resting on an enemy, the ground or a wall, or a
+  wind-up brushing it, took that hit at the lowest damage (a quarter of a normal hit), and the real swing after it
+  went straight through. In one session 585 of 863 hits were that weak, almost all on the swing's very first
+  frame. Now a swing becomes an attack only once it is fast enough for half a normal hit. Its first contact then
+  lands at the swing's own strength, and the weapon hand gets a short tick the moment the swing goes live, so you
+  can feel which swings count. Slow pokes and a resting blade do nothing (`[Combat] ContactLiveMult`, 0 = live
+  from the first motion, with the weak-touch chip and re-hit: `ContactWeakTouch`, `ContactRehitGain`).
+* One-handed with a shield whose own skill is a shield skill (Parry, Barricade Shield and the like), the skill
+  trigger played the shield's skill instead of your weapon's. That is the game's own rule for its one skill
+  button. In VR each hand has a trigger, so now the right trigger always plays the right weapon's skill and the
+  left trigger plays the shield's. Guarding is still raising the shield (`[Combat] SkillPerHand=false` = the
+  game's rule).
+* Co-op: your partner's hits counted as yours. ERVR now knows your blade touched someone from the game's own
+  on-hit cost, taken inside ERVR's attack, for that hand alone. Since 0.7.2 that cost was refunded before ERVR
+  looked for it, so any enemy losing HP during your swing ended it.
+* Moonveil's wave flew left of where you swung. Your swing's aim leaned left on a right-handed slash, and swings
+  past the limit went a full 45 degrees left. The wave now goes to the enemy nearest your swing's line, within 30
+  degrees and 20 m (`SwingAimSnapDeg`, `SwingAimSnapRange`); players and phantoms are never picked. With no enemy
+  there it keeps your swing's direction, now at most 20 degrees from your view (`SwingAimMaxDeg`; an ini still
+  saying 45 reads 20).
+
+### Changed
+* A stance's follow-up with a projectile (Moonveil's Transient Moonlight) no longer plays the game's attack. The
+  first follow-up of each weapon per session is still the game's own, so ERVR can record its wave. After that,
+  every follow-up swing sends the wave from your blade at the fastest point of your swing. Before, the wave left
+  0.5-0.8 s after the swing, the attack lunged you forward, and swings made while it still played were lost
+  (7 waves from 18 swings in one session). ERVR charges the follow-up's FP itself; without enough you get a long
+  buzz. The wave lies in the plane of your swing as before. `[Combat] StanceFollowUps=game` keeps the game's
+  attacks.
+
 ## 0.9.2 (2026-11-16)
 
 Single-frame stereo starts on fast PCs too, and a locked-on enemy stays in front of you.

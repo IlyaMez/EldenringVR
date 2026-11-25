@@ -101,6 +101,38 @@ inline bool ContactCooldownDone(bool landed, double sinceEnd, float cooldown) {
     return !landed || sinceEnd >= cooldown;
 }
 
+// A swing's hit is taken at the instant the blade first touches, with the damage of the swing's speed at that
+// instant, and one swing gets one hit. A strike opens at ContactOnSpeed (0.8 m/s), so a blade that starts on or
+// beside the enemy, or a wind-up that brushes it, took the hit at the 0.25x floor and the real swing after it went
+// through inert (2026-11-14 Moonveil session: 39 of 65 contacts at 0.25-0.35x, whole stretches of a fight at the
+// floor). A contact under `weakMult` is a TOUCH: it chips, and the swing keeps its hit. The blade goes inert (the
+// same attack cannot hit the touched enemy again anyway) until the swing is fast enough for RehitMult; then a fresh
+// attack opens for one more contact, and that one spends the swing. weakMult <= 0: every contact spends the swing.
+inline bool ContactIsWeakTouch(bool touchedAlready, float mult, float weakMult) {
+    return !touchedAlready && weakMult > 0.f && mult < weakMult;
+}
+// The damage multiplier the swing must reach after a touch at `touchMult` before it may hit again: clearly above the
+// touch (+gain), and at least what a full contact is (weakMult).
+inline float RehitMult(float touchMult, float weakMult, float gain) {
+    const float g = touchMult + (gain > 0.f ? gain : 0.f);
+    return g > weakMult ? g : weakMult;
+}
+
+// The live gate (ContactLiveMult). The weak-touch rule above still let the strike's FIRST exec run at 0.8 m/s: in the
+// 2026-11-21 session 585 of 863 contacts were 0.25x touches 11 ms into the strike - the blade already on something (an
+// enemy it rested in, the ground, a wall) when the motion began - and only 122 of 663 touched swings ever sped up enough
+// to re-hit, so the real swing went through inert. Now the strike's attack instance opens only once the swing's
+// strength (its quality as a fraction of a vanilla hit) reaches `liveMult`: nothing below it touches anything, and the
+// first contact lands at the swing's own strength. liveMult <= 0: live from the first frame (the old behaviour).
+inline bool ContactGoesLive(float strength, float liveMult) {
+    return liveMult <= 0.f || strength >= liveMult;
+}
+// With the gate on a contact is never a weak touch: a live swing has earned its hit, and a contact after its speed
+// fell back (the live value is floored at 70% of the peak) must not turn it inert. Gate off: the touch threshold.
+inline float WeakTouchMultFor(float liveMult, float weakMult) {
+    return liveMult > 0.f ? 0.f : weakMult;
+}
+
 // The one-frame stamina drop that is ERVR's own on-hit mark (stamina "off": the strike's behavior cost is forced
 // to `mark` and refunded). A frame's regen can shave up to 2 off it; a roll, a jump or a blocked hit costs
 // something else, and that cost is the player's - it used to be read as a hit and refunded (free rolls while a

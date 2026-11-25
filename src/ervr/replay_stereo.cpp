@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -573,6 +574,240 @@ void STDMETHODCALLTYPE HkCreateDsv(ID3D12Device* d, ID3D12Resource* r, const D3D
     }
 }
 
+// ---- GPU particles: simulated once a frame ([VR] ReplaySimulateOnce) ------------------------------------------------
+// ER simulates its GPU particles - blood, sparks, embers, spell motes - in compute shaders: Vfx\CS_VFX_StandardParticle*
+// steps them (consume last frame's buffer, append this frame's, collide with the depth buffer), ...Emit* adds new ones
+// with directions from a persistent GPU random seed (rwRandomSeed), CS_GpuClearEmitCounter / CS_GpuInitRandomCounter
+// reset their counters (the names are the shaders' own debug names). The replay ran all of it again for the right eye:
+// a second emission from the advanced seed and a second collision pass, so each eye drew different blood - droplets
+// apart between the eyes (2026-11-21: "blood effects look weird in SFS"). Their pipelines are recognised when the game
+// makes them, by the debug name inside the shader, and the replay leaves their dispatches out: the right eye draws the
+// particles the left eye's frame simulated, which are world-space, from its own camera. The sort that orders them for
+// drawing (PrepareSort128 / BitonicSortSinglePass128) only reads them and depends on the camera: it is replayed.
+bool g_simOnce = false;                       // set with the device hooks, from the config
+std::vector<std::string> g_oncePatterns;      // lower case, '/' separators; read only once the hooks are in
+constexpr int kOnceSlots = 1024;              // open addressing, power of two; lock-free reads on the recording threads
+constexpr uintptr_t kOnceTomb = 1;            // a pipeline made again at an address that held a simulation pipeline
+std::atomic<uintptr_t> g_oncePso[kOnceSlots];
+std::mutex g_onceMtx;                         // writers
+std::unordered_set<std::string> g_onceNamesSeen;   // under g_onceMtx: the effect shaders already logged
+std::atomic<long> g_onceSkips{0}, g_oncePsoCount{0};
+std::atomic<bool> g_onceFull{false};
+
+inline uint32_t OnceSlot(uintptr_t k) { return (uint32_t)(((k >> 4) * 0x9E3779B97F4A7C15ull) >> 54) & (kOnceSlots - 1); }
+bool IsOncePso(const void* p) {
+    if (!p) return false;
+    const uintptr_t k = (uintptr_t)p;
+    for (uint32_t i = OnceSlot(k), n = 0; n < (uint32_t)kOnceSlots; i = (i + 1) & (kOnceSlots - 1), ++n) {
+        const uintptr_t v = g_oncePso[i].load(std::memory_order_acquire);
+        if (v == 0) return false;
+        if (v == k) return true;
+    }
+    return false;
+}
+// Caller holds g_onceMtx. The newest pipeline made at an address decides: a simulation pipeline goes in, anything
+// else made there takes an older entry out.
+void SetOncePsoLocked(uintptr_t k, bool once) {
+    if (k <= kOnceTomb) return;
+    int freeAt = -1;
+    for (uint32_t i = OnceSlot(k), n = 0; n < (uint32_t)kOnceSlots; i = (i + 1) & (kOnceSlots - 1), ++n) {
+        const uintptr_t v = g_oncePso[i].load(std::memory_order_relaxed);
+        if (v == k) {
+            if (!once) { g_oncePso[i].store(kOnceTomb, std::memory_order_release); g_oncePsoCount.fetch_sub(1); }
+            return;
+        }
+        if (v == kOnceTomb && freeAt < 0) freeAt = (int)i;
+        if (v == 0) { if (freeAt < 0) freeAt = (int)i; break; }
+    }
+    if (!once) return;
+    if (freeAt < 0) { g_onceFull.store(true); return; }
+    g_oncePso[freeAt].store(k, std::memory_order_release);
+    g_oncePsoCount.fetch_add(1);
+}
+
+// The shader's debug name (the DXIL container's ILDN part: u16 flags, u16 length, the name), or empty.
+std::string ShaderDebugName(const void* code, size_t size) {
+    const auto* b = static_cast<const uint8_t*>(code);
+    if (!b || size < 32 || std::memcmp(b, "DXBC", 4) != 0) return {};
+    uint32_t total = 0, parts = 0;
+    std::memcpy(&total, b + 24, 4); std::memcpy(&parts, b + 28, 4);
+    if (total > size) total = (uint32_t)size;
+    if (parts > 64 || 32ull + 4ull * parts > total) return {};
+    for (uint32_t i = 0; i < parts; ++i) {
+        uint32_t off = 0, partSize = 0;
+        std::memcpy(&off, b + 32 + 4 * i, 4);
+        if ((uint64_t)off + 12 > total || std::memcmp(b + off, "ILDN", 4) != 0) continue;
+        std::memcpy(&partSize, b + off + 4, 4);
+        uint16_t len = 0;
+        std::memcpy(&len, b + off + 10, 2);
+        if (partSize < 4 || 4ull + len > partSize || (uint64_t)off + 12 + len > total) return {};
+        return std::string(reinterpret_cast<const char*>(b + off + 12), len);
+    }
+    return {};
+}
+// "..\..\..\Dist\GR\WIN_D3D12_Pdb\Vfx\CS_VFX_StandardParticle.cpo.pdb" -> "Vfx/CS_VFX_StandardParticle", for the log.
+std::string ShortShaderName(std::string n) {
+    for (char& ch : n) if (ch == '\\') ch = '/';
+    if (const size_t dot = n.find(".cpo"); dot != std::string::npos) n.resize(dot);
+    const size_t last = n.find_last_of('/');
+    const size_t prev = last != std::string::npos && last > 0 ? n.find_last_of('/', last - 1) : std::string::npos;
+    return prev == std::string::npos ? n : n.substr(prev + 1);
+}
+
+// A pipeline the game made: its compute shader (null for a graphics pipeline) decides whether the replay runs it.
+void NotePipeline(void* pso, const D3D12_SHADER_BYTECODE* cs) {
+    if (!g_simOnce || !pso) return;
+    std::string name;
+    if (cs && cs->pShaderBytecode && cs->BytecodeLength) name = ShaderDebugName(cs->pShaderBytecode, cs->BytecodeLength);
+    std::string low = name;
+    for (char& ch : low) { ch = (char)std::tolower((unsigned char)ch); if (ch == '\\') ch = '/'; }
+    bool once = false;
+    for (const std::string& p : g_oncePatterns) if (!p.empty() && low.find(p) != std::string::npos) { once = true; break; }
+    std::lock_guard<std::mutex> g(g_onceMtx);
+    SetOncePsoLocked((uintptr_t)pso, once);
+    if (low.find("/vfx/") != std::string::npos && g_onceNamesSeen.insert(low).second)
+        LOGI("[replay] GPU effect shader %s: %s", ShortShaderName(name).c_str(),
+             once ? "simulated once a frame - the right eye draws the left eye's particles" : "replayed for the right eye");
+}
+
+// The compute shader in a pipeline-state stream, or null (none, or a subobject this parser does not know: then the
+// pipeline only takes an older entry at its address out).
+const D3D12_SHADER_BYTECODE* StreamComputeShader(const D3D12_PIPELINE_STATE_STREAM_DESC* d) {
+    if (!d || !d->pPipelineStateSubobjectStream || !d->SizeInBytes) return nullptr;
+    const auto* p = static_cast<const uint8_t*>(d->pPipelineStateSubobjectStream);
+    const uint8_t* end = p + d->SizeInBytes;
+    auto up = [](size_t v, size_t a) { return (v + a - 1) & ~(a - 1); };
+    while (p + sizeof(UINT) <= end) {
+        size_t sz = 0, al = 4;
+        const auto type = *reinterpret_cast<const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*>(p);
+        switch (type) {
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: sz = sizeof(void*); al = alignof(void*); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS: case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS:
+                sz = sizeof(D3D12_SHADER_BYTECODE); al = alignof(D3D12_SHADER_BYTECODE); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT: sz = sizeof(D3D12_STREAM_OUTPUT_DESC); al = alignof(D3D12_STREAM_OUTPUT_DESC); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND: sz = sizeof(D3D12_BLEND_DESC); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK: sz = sizeof(UINT); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER: sz = sizeof(D3D12_RASTERIZER_DESC); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL: sz = sizeof(D3D12_DEPTH_STENCIL_DESC); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT: sz = sizeof(D3D12_INPUT_LAYOUT_DESC); al = alignof(D3D12_INPUT_LAYOUT_DESC); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE: sz = sizeof(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY: sz = sizeof(D3D12_PRIMITIVE_TOPOLOGY_TYPE); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS: sz = sizeof(D3D12_RT_FORMAT_ARRAY); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT: sz = sizeof(DXGI_FORMAT); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC: sz = sizeof(DXGI_SAMPLE_DESC); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK: sz = sizeof(UINT); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: sz = sizeof(D3D12_CACHED_PIPELINE_STATE); al = alignof(D3D12_CACHED_PIPELINE_STATE); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS: sz = sizeof(D3D12_PIPELINE_STATE_FLAGS); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1: sz = sizeof(D3D12_DEPTH_STENCIL_DESC1); break;
+            case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING: sz = sizeof(D3D12_VIEW_INSTANCING_DESC); al = alignof(D3D12_VIEW_INSTANCING_DESC); break;
+            default: return nullptr;
+        }
+        const size_t inner = up(sizeof(UINT), al);
+        if (p + inner + sz > end) return nullptr;
+        if (type == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS) return reinterpret_cast<const D3D12_SHADER_BYTECODE*>(p + inner);
+        p += up(inner + sz, alignof(void*));
+    }
+    return nullptr;
+}
+
+using PfnCreateGfxPso = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
+using PfnCreateCsPso = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, const D3D12_COMPUTE_PIPELINE_STATE_DESC*, REFIID, void**);
+using PfnCreateStreamPso = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device2*, const D3D12_PIPELINE_STATE_STREAM_DESC*, REFIID, void**);
+using PfnLoadGfxPso = HRESULT(STDMETHODCALLTYPE*)(ID3D12PipelineLibrary*, LPCWSTR, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
+using PfnLoadCsPso = HRESULT(STDMETHODCALLTYPE*)(ID3D12PipelineLibrary*, LPCWSTR, const D3D12_COMPUTE_PIPELINE_STATE_DESC*, REFIID, void**);
+using PfnLoadStreamPso = HRESULT(STDMETHODCALLTYPE*)(ID3D12PipelineLibrary1*, LPCWSTR, const D3D12_PIPELINE_STATE_STREAM_DESC*, REFIID, void**);
+PfnCreateGfxPso g_origCreateGfxPso = nullptr;
+PfnCreateCsPso g_origCreateCsPso = nullptr;
+PfnCreateStreamPso g_origCreateStreamPso = nullptr;
+PfnLoadGfxPso g_origLoadGfxPso = nullptr;
+PfnLoadCsPso g_origLoadCsPso = nullptr;
+PfnLoadStreamPso g_origLoadStreamPso = nullptr;
+
+HRESULT STDMETHODCALLTYPE HkCreateGfxPso(ID3D12Device* d, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid, void** pp) {
+    const HRESULT hr = g_origCreateGfxPso(d, desc, riid, pp);
+    if (SUCCEEDED(hr) && pp) NotePipeline(*pp, nullptr);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE HkCreateCsPso(ID3D12Device* d, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid, void** pp) {
+    const HRESULT hr = g_origCreateCsPso(d, desc, riid, pp);
+    if (SUCCEEDED(hr) && pp) NotePipeline(*pp, desc ? &desc->CS : nullptr);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE HkCreateStreamPso(ID3D12Device2* d, const D3D12_PIPELINE_STATE_STREAM_DESC* desc, REFIID riid, void** pp) {
+    const HRESULT hr = g_origCreateStreamPso(d, desc, riid, pp);
+    if (SUCCEEDED(hr) && pp) NotePipeline(*pp, StreamComputeShader(desc));
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE HkLoadGfxPso(ID3D12PipelineLibrary* l, LPCWSTR name, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
+                                       REFIID riid, void** pp) {
+    const HRESULT hr = g_origLoadGfxPso(l, name, desc, riid, pp);
+    if (SUCCEEDED(hr) && pp) NotePipeline(*pp, nullptr);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE HkLoadCsPso(ID3D12PipelineLibrary* l, LPCWSTR name, const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc,
+                                      REFIID riid, void** pp) {
+    const HRESULT hr = g_origLoadCsPso(l, name, desc, riid, pp);
+    if (SUCCEEDED(hr) && pp) NotePipeline(*pp, desc ? &desc->CS : nullptr);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE HkLoadStreamPso(ID3D12PipelineLibrary1* l, LPCWSTR name, const D3D12_PIPELINE_STATE_STREAM_DESC* desc,
+                                          REFIID riid, void** pp) {
+    const HRESULT hr = g_origLoadStreamPso(l, name, desc, riid, pp);
+    if (SUCCEEDED(hr) && pp) NotePipeline(*pp, StreamComputeShader(desc));
+    return hr;
+}
+
+// Every way the game makes a pipeline, so each one is known by what it runs before its first command list does.
+void InstallPipelineHooks(ID3D12Device* d) {
+    g_oncePatterns.clear();
+    std::string s = Cfg().replaySimulateOnce;
+    for (char& ch : s) { ch = (char)std::tolower((unsigned char)ch); if (ch == '\\') ch = '/'; }
+    size_t at = 0;
+    while (at <= s.size()) {
+        size_t comma = s.find(',', at);
+        if (comma == std::string::npos) comma = s.size();
+        std::string p = s.substr(at, comma - at);
+        while (!p.empty() && (p.front() == ' ' || p.front() == '\t')) p.erase(p.begin());
+        while (!p.empty() && (p.back() == ' ' || p.back() == '\t')) p.pop_back();
+        if (!p.empty()) g_oncePatterns.push_back(p);
+        at = comma + 1;
+    }
+    if (g_oncePatterns.empty()) { LOGI("[replay] ReplaySimulateOnce is empty: the replay runs the GPU particle simulation again"); return; }
+    g_simOnce = true;
+    HookSlot(d, 10, (void*)&HkCreateGfxPso, (void**)&g_origCreateGfxPso, "ID3D12Device::CreateGraphicsPipelineState");
+    HookSlot(d, 11, (void*)&HkCreateCsPso, (void**)&g_origCreateCsPso, "ID3D12Device::CreateComputePipelineState");
+    ID3D12Device2* d2 = nullptr;
+    if (SUCCEEDED(d->QueryInterface(IID_PPV_ARGS(&d2))) && d2) {
+        HookSlot(d2, 47, (void*)&HkCreateStreamPso, (void**)&g_origCreateStreamPso, "ID3D12Device2::CreatePipelineState");
+        d2->Release();
+    }
+    // Pipelines loaded from a pipeline library: the library's methods, from an empty library of our own.
+    ID3D12Device1* d1 = nullptr;
+    if (SUCCEEDED(d->QueryInterface(IID_PPV_ARGS(&d1))) && d1) {
+        ID3D12PipelineLibrary* lib = nullptr;
+        const HRESULT hr = d1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&lib));
+        if (SUCCEEDED(hr) && lib) {
+            HookSlot(lib, 9, (void*)&HkLoadGfxPso, (void**)&g_origLoadGfxPso, "ID3D12PipelineLibrary::LoadGraphicsPipeline");
+            HookSlot(lib, 10, (void*)&HkLoadCsPso, (void**)&g_origLoadCsPso, "ID3D12PipelineLibrary::LoadComputePipeline");
+            ID3D12PipelineLibrary1* lib1 = nullptr;
+            if (SUCCEEDED(lib->QueryInterface(IID_PPV_ARGS(&lib1))) && lib1) {
+                HookSlot(lib1, 13, (void*)&HkLoadStreamPso, (void**)&g_origLoadStreamPso, "ID3D12PipelineLibrary1::LoadPipeline");
+                lib1->Release();
+            }
+            lib->Release();
+        } else {
+            LOGI("[replay] no pipeline library on this device (0x%08lX): pipelines are only made, never loaded", (unsigned long)hr);
+        }
+        d1->Release();
+    }
+    std::string list;
+    for (const std::string& p : g_oncePatterns) list += (list.empty() ? "" : ", ") + p;
+    LOGI("[replay] GPU particle simulation runs once a frame: compute shaders named %s are left out of the replay", list.c_str());
+}
+
 // Per DSV handle, lock-free (recording threads): draws and clears, and in how many frames (presents) each happened.
 struct DepthUse {
     std::atomic<uint64_t> key{0};
@@ -842,6 +1077,9 @@ struct Shadow {
     ULONGLONG lastUse = 0;
     // Transitions of the per-eye volumes (see EyeVolume) this list records, in order: where the game leaves each one.
     std::vector<std::pair<ID3D12Resource*, uint32_t>> volStates;
+    // The game list's pipeline right now is a GPU particle simulation (ReplaySimulateOnce): its dispatches stay out of
+    // the shadow. Only the list's recording thread touches it.
+    bool oncePso = false;
 };
 std::atomic<uint32_t> g_shadowGen{0};
 thread_local uint32_t t_lastGen = 0;
@@ -963,6 +1201,7 @@ void ShadowBegin(ID3D12GraphicsCommandList* game, ID3D12PipelineState* pso) {
     if (!s && want) g_shadowMisses.fetch_add(1, std::memory_order_relaxed);
     if (s) {
         s->volStates.clear();
+        s->oncePso = g_simOnce && IsOncePso(pso);
         s->owner = game;
         s->gen = g_shadowGen.fetch_add(1) + 1;
         AcquireSRWLockExclusive(&g_mapLock);
@@ -1068,6 +1307,20 @@ struct LH<Slot, R (STDMETHODCALLTYPE C::*)(A...)> {
             }
             if constexpr (Slot == 47) {
                 if (g_skipShadowMap && IsShadowDsv(std::get<0>(std::tuple<A...>(a...)).ptr)) { mirror = false; g_shadowMapSkips.fetch_add(1, std::memory_order_relaxed); }
+            }
+            // ReplaySimulateOnce: the list's pipeline (ClearState / SetPipelineState / a state object), then its dispatches
+            // while that pipeline is a GPU particle simulation stay out of the shadow.
+            if constexpr (Slot == 11 || Slot == 25 || Slot == 75) {
+                if (g_simOnce && ShadowOf(self) && t_lastShadow) {
+                    if constexpr (Slot == 75) t_lastShadow->oncePso = false;
+                    else t_lastShadow->oncePso = IsOncePso(std::get<0>(std::tuple<A...>(a...)));
+                }
+            }
+            if constexpr (Slot == 14 || Slot == 59) {
+                if (g_simOnce && ShadowOf(self) && t_lastShadow && t_lastShadow->oncePso) {
+                    mirror = false;
+                    g_onceSkips.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             if (mirror)
                 if (ID3D12GraphicsCommandList* sh = ShadowOf(self)) orig(sh, a...);   // the same command, recorded again
@@ -1296,8 +1549,10 @@ std::atomic<bool> g_deviceHooked{false};
 void InstallDeviceHooks(ID3D12Device* d) {
     if (!d || g_deviceHooked.exchange(true)) return;
     g_descInc = d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    if (ReplayLevel() > 0)
+    if (ReplayLevel() > 0) {
         HookSlot(d, 12, (void*)&HkCreateList, (void**)&g_origCreateList, "ID3D12Device::CreateCommandList");
+        InstallPipelineHooks(d);   // before the game's first pipeline: the particle simulation is known by its shaders
+    }
     HookSlot(d, 17, (void*)&HkCreateCbv, (void**)&g_origCreateCbv, "ID3D12Device::CreateConstantBufferView");
     g_skipShadowMap = Cfg().replaySkipShadowMap;
     if (Cfg().replayDepthCensus > 0.f || Cfg().replaySkipShadowMap || PassLogSeconds() > 0)
@@ -3844,6 +4099,14 @@ void ReplayStats() {
              (double)g_gpuReplayUs.exchange(0) / 1000.0 / n, n);
     }
     if (g_skipShadowMap) LOGI("[replay] 5 s shadow-map draws and clears left out of the replay: %ld", g_shadowMapSkips.exchange(0));
+    if (g_simOnce) {
+        const long skips = g_onceSkips.exchange(0), known = g_oncePsoCount.load();
+        static long s_lastKnown = -1;
+        if (skips || known != s_lastKnown)
+            LOGI("[replay] 5 s GPU particle simulation dispatches left out of the replay: %ld (%ld simulation pipelines "
+                 "known%s)", skips, known, g_onceFull.load() ? "; THE TABLE IS FULL - later ones are replayed" : "");
+        s_lastKnown = known;
+    }
     if (g_dev) {
         const HRESULT hr = g_dev->GetDeviceRemovedReason();
         if (hr != S_OK) LOGE("[replay] DEVICE REMOVED: 0x%08lX", (unsigned long)hr);

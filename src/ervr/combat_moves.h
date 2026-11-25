@@ -269,6 +269,76 @@ inline float SwingAimDirection(float sx, float sy, float sz, float headYaw, floa
     return yaw;
 }
 
+// ---- swing aim: snap to an enemy -------------------------------------------------------------------------------
+// SkillAim=swing measures where a swing points, and a right-handed forehand's follow-through pulls that left
+// (2026-11-14: 13 of 18 Moonveil swings centred left of the view, 3-25 deg, four past the limit and sent a full
+// 45 deg left). With SwingAimSnapDeg the projectile turns to the enemy nearest the swing's line instead: the
+// candidate (an aim point at chest height, game world) whose horizontal direction from the origin is the fewest
+// degrees off the swing's, within maxDeg and maxDist. A tie goes to the nearer one (1 deg per 4 m). Returns its
+// index, -1 for none; degOut / distOut say how far off and how far away it was.
+struct SnapCandidate { float x = 0.f, y = 0.f, z = 0.f; };
+inline int PickSnapTarget(float ox, float oz, float dx, float dz, const SnapCandidate* c, int n, float maxDeg,
+                          float maxDist, float* degOut = nullptr, float* distOut = nullptr) {
+    if (!(maxDeg > 0.f) || !(maxDist > 0.f) || !c || n <= 0) return -1;
+    const float dl = std::sqrt(dx * dx + dz * dz);
+    if (!(dl > 1e-4f)) return -1;
+    const float aimYaw = std::atan2(dx, dz);
+    int best = -1; float bestScore = 1e9f, bestDeg = 0.f, bestDist = 0.f;
+    for (int i = 0; i < n; ++i) {
+        const float vx = c[i].x - ox, vz = c[i].z - oz;
+        const float dist = std::sqrt(vx * vx + vz * vz);
+        if (!(dist > 0.05f) || dist > maxDist) continue;
+        float deg = (std::atan2(vx, vz) - aimYaw) * 57.2957795f;
+        while (deg > 180.f) deg -= 360.f;
+        while (deg < -180.f) deg += 360.f;
+        deg = std::fabs(deg);
+        if (deg > maxDeg) continue;
+        const float score = deg + dist * 0.25f;
+        if (score < bestScore) { bestScore = score; best = i; bestDeg = deg; bestDist = dist; }
+    }
+    if (best >= 0) { if (degOut) *degOut = bestDeg; if (distOut) *distOut = bestDist; }
+    return best;
+}
+
+// ---- stance follow-up wave ------------------------------------------------------------------------------------
+// StanceFollowUps=replay: a stance follow-up's projectile (Moonveil's Transient Moonlight wave) leaves from the
+// blade DURING your swing, with no game animation. Pressing the game's follow-up played its whole attack: the wave
+// left 0.73-0.77 s after the press (0.53 s with the stance held), the attack lunged the body forward, and presses
+// that came while it still played were dropped (2026-11-14: 7 waves from 18 presses). The game's own follow-up is
+// played once per weapon and session; ERVR records its wave and replays it from then on.
+//
+// When: StanceSwing decides the press 0.06 s after the tip passes SwingOnSpeed - early in the swing. The wave
+// waits for the swing's fastest point: it leaves once the tip has fallen under kWavePastPeak of the fastest it
+// has been since the swing began, or maxDelay after the press, or when the swing is over.
+constexpr float kWavePastPeak = 0.85f;
+inline bool WaveReleaseDue(float tip, float peak, double sincePress, float maxDelay, bool swingOver) {
+    if (swingOver || sincePress >= maxDelay) return true;
+    return sincePress > 0.0 && peak > 0.f && tip < kWavePastPeak * peak;
+}
+// What a follow-up recording keeps: the first volley of BulletBehavior (TAE event 2) instances - those starting
+// within volleySeconds of the first one - and the AddSpEffect_WeaponArts (331) instances live when it fires (the
+// skill's "enough FP" effect). Everything else is the animation's: its own attack, sounds, the stance, and a
+// second follow-up pressed while the window was still open. keep[i] says which; *t0 is the first bullet's time
+// (the replay's zero). Returns how many bullets were kept (0 = the recording holds no wave).
+struct RecSpanIn { uint32_t id = 0; float firstT = 0.f, lastT = 0.f; };
+constexpr uint32_t kEvBullet = 2, kEvWeaponArtsSpEffect = 331;
+inline int FollowUpVolley(const RecSpanIn* ev, int n, float volleySeconds, bool* keep, float* t0) {
+    float first = 1e9f;
+    for (int i = 0; i < n; ++i) if (ev[i].id == kEvBullet && ev[i].firstT < first) first = ev[i].firstT;
+    int bullets = 0;
+    for (int i = 0; i < n; ++i) {
+        bool k = false;
+        if (first < 1e8f) {
+            if (ev[i].id == kEvBullet) k = ev[i].firstT <= first + volleySeconds;
+            else if (ev[i].id == kEvWeaponArtsSpEffect) k = ev[i].firstT <= first + 1e-3f && ev[i].lastT >= first - 1e-3f;
+        }
+        if (keep) keep[i] = k;
+        if (k && ev[i].id == kEvBullet) ++bullets;
+    }
+    if (t0) *t0 = first < 1e8f ? first : 0.f;
+    return bullets;
+}
+
 // The hand whose weapon's skill the skill button plays - the game's HKS GetSwordArtInfo: two-handed, the two-handed
 // weapon's; one-handed, the left weapon's only when the left weapon's SKILL is a shield's or a bow's
 // (IsShieldArts / IsArrowStanceArts on its art type), else the right weapon's. It is the art that decides, not the
