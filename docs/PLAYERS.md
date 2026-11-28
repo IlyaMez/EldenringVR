@@ -216,6 +216,11 @@ height and arm length: choose *Redo when the menu closes*, close the menu, and t
 The launcher's Options tab has those and the other settings players change most. Everything else is in
 `ELDEN RING\Game\ERVR\ERVR.ini`, and most keys apply within a second while you play.
 
+- **Camera style** (`[VR] CameraStyle`): *Third-person gamepad* uses the game's follow camera, regular gamepad
+  controls, and Full stereo. Your head moves the view relative to your seated position. Set it in the launcher's
+  Options tab before starting the game. To recenter while playing, choose *Recenter view* in **System → ERVR Settings**,
+  sit comfortably facing forward, and close the menu. NumPad . also recenters with debug keys enabled.
+  See the [third-person gamepad notes](THIRD_PERSON_GAMEPAD.md) for supported versions and validation.
 - **View** (`[VR] StereoMode`): *Single-frame* (`replay`, the default since 0.9.0) runs the game once per
   headset frame and has the graphics card draw that frame a second time for the other eye: about half full
   stereo's processor work, so a steady 90 fps is in reach. The card still draws both eyes, so if new frames fall

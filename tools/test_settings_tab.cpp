@@ -90,6 +90,16 @@ int main() {
 
     // The edits land in the file the way the launcher's do: the key in place, every other byte kept.
     {
+        const auto& rows = TabRows(true);
+        const auto& recenter = rows.front();
+        const TabShown shown = TabShow(recenter, "");
+        Check(TabAsksRecenter(recenter, 1) && !TabAsksRecenter(recenter, 0) && shown.labels.size() == 2,
+              "third person offers seated recenter and cancel");
+        Check(TabWrites(recenter, shown, 1).empty(), "seated recenter does not persist a command in the INI");
+        for (const auto& row : rows) Check(row.kind != TabRowKind::calibrate, "third person omits body calibration");
+    }
+
+    {
         const std::string ini = "; ERVR\r\n[Movement]\r\n; comment\r\nForward=head\r\nTurnSpeed=120\r\n";
         const TabRow& r = Row("Movement", "Forward");
         const TabShown s = TabShow(r, ini);

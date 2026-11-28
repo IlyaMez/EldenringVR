@@ -16,7 +16,7 @@ namespace {
 ervr::VRInputState input;
 ervr::MoveBasis basis;
 int menu = 0;
-bool foreignCam = false, combatMenu = false, dead = false;
+bool foreignCam = false, combatMenu = false, dead = false, thirdPerson = false;
 float yaw = 0.f;
 double now = 1.0;
 void Check(bool ok, const char* what) {
@@ -39,6 +39,7 @@ bool GetLatestVRState(VRTracking& tr, VRInputState& in) { tr = {}; in = input; r
 bool GameERPlayerActive() { return true; }
 bool GameERPlayerDead() { return dead; }
 bool GameERForeignCamActive() { return foreignCam; }
+bool StereoThirdPersonGamepad() { return thirdPerson; }
 int GameMenuOpen(double) { return menu; }
 MoveBasis GameERGetMoveBasis() { return basis; }
 void GameERAddCameraYaw(float amount) { yaw += amount; }
@@ -74,6 +75,17 @@ int main() {
     basis.active = true;
     input.controllerConnected[0] = input.controllerConnected[1] = true;
     VirtualPadInit();
+    thirdPerson = true;
+    menu = 1;
+    VirtualPadUpdate(now += 0.02);
+    XINPUT_STATE native{};
+    native.Gamepad.sThumbRX = 18000;
+    native.Gamepad.wButtons = XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_RIGHT_THUMB;
+    Check(!VirtualPadMerge(native) && native.Gamepad.sThumbRX == 18000 &&
+          native.Gamepad.wButtons == (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_RIGHT_THUMB),
+          "third person leaves native orbit, lock-on and confirm inputs unchanged");
+    Check(combatMenu, "third person keeps observing the native menu state");
+    thirdPerson = false;
     for (bool snap : {false, true}) {
         c.snapTurn = snap;
         for (int state : {-1, 0, 1}) {

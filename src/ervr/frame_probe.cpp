@@ -1378,7 +1378,7 @@ void DoSecondPass(void* self, void* a, void* b) {
         }
         if (hold) { if (!menuHold) g_lastHoldTick = GetTickCount64(); return; }
     }
-    if (g_pumpMode == 2) {
+    if (g_pumpMode == 2 || (g_pumpMode == 1 && StereoThirdPersonGamepad())) {
         if (!GameERApplySecondEyeCamera()) return;
     }
     // Content probe (experiment mode): make pass 2's render unmistakable - the harness then
@@ -1802,6 +1802,7 @@ uint64_t __fastcall Hook_QueueTasks(void* self, void* a, void* b) {
              i, self, a, b, GetCurrentThreadId(), line);
     }
     if (!g_qtThread) g_qtThread = GetCurrentThreadId();
+    if (StereoThirdPersonGamepad()) GameERBeginThirdPersonFrame();
     ProfPassBegin(1);
     const uint64_t r = g_origQueueTasks(self, a, b);
     { LARGE_INTEGER tp; QueryPerformanceCounter(&tp); NotePassTime(0, tp.QuadPart - t0.QuadPart);
@@ -2355,12 +2356,12 @@ bool FrameProbeSetActiveApi(int index, bool active) {
 }
 
 void FrameProbeTick() {
-    const bool fullStereo = Cfg().vrStereoMode == "full";
+    const StereoMode mode = StereoActiveMode();
+    const bool fullStereo = mode == StereoMode::Full;
     // Alternate-eye stereo needs the same frame hook - each eye's report is pushed with the
     // camera the renderer really used, at the end of queue_tasks - but never a second pass.
     // Without it no report ever reached the queue and the mode stayed flat (2026-11-03).
-    const bool altStereo = Cfg().vrStereoMode == "debugalt" ||
-                           Cfg().vrStereoMode == "replay";   // single-frame stereo: the same frame hook, no pump
+    const bool altStereo = mode == StereoMode::DebugAlt || mode == StereoMode::Replay;
     if (!Cfg().m2TaskProbe && !fullStereo && !altStereo && !Cfg().m2ForcePass2) return;
     if (g_started.exchange(true)) return;
     // Its OWN thread, deliberately. This can scan a lot; the worker thread it used to run on
@@ -2377,8 +2378,8 @@ void FrameProbeTick() {
                     QueueTasksProbeInstall(true);
                     if (g_origQueueTasks) {
                         g_pumpMode = 1;
-                        LOGW("[stereo] ForcePass2: second pass runs UNCONDITIONALLY (test "
-                             "harness; no XR, no second-eye camera)");
+                        LOGW("[stereo] ForcePass2: desktop test harness, %s",
+                             StereoThirdPersonGamepad() ? "fixed third-person stereo poses" : "no second-eye camera");
                     } else {
                         LOGW("[stereo] ForcePass2 requested but the queue_tasks hook failed");
                     }

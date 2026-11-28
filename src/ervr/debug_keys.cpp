@@ -1,6 +1,7 @@
 #include "debug_keys.h"
 #include "body_calibration.h"
 #include "frame_probe.h"
+#include "game_er.h"
 #include "hud.h"
 #include "vr_backend.h"
 #include "config.h"
@@ -201,6 +202,7 @@ void DebugKeysTick() {
     }
     if (Pressed(VK_DECIMAL)) {
         HudRequestRecenter();
+        GameERRequestThirdPersonRecenter();
         Buzz(1);
     }
     const bool hand6 = Pressed(VK_NUMPAD6), hand9 = Pressed(VK_NUMPAD9);

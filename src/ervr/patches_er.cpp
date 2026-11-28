@@ -671,7 +671,7 @@ double WorkerFrameAspect() {
 // land on the identical numbers or the settings-apply rejects the request.
 bool ResolveResTarget(uint32_t& w, uint32_t& h) {
     const Config& c = Cfg();
-    if (c.vrStereoMode == "off" || c.vrGameRes == "off" || c.vrGameRes.empty()) return false;
+    if (c.StereoModeForCamera() == "off" || c.vrGameRes == "off" || c.vrGameRes.empty()) return false;
     if (c.vrGameRes == "auto") {
         const std::wstring cache = CachePath();
         uint32_t ew = (uint32_t)GetPrivateProfileIntW(L"Cache", L"HmdEyeW", 0, cache.c_str());

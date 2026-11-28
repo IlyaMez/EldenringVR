@@ -2077,7 +2077,13 @@ void App::options(ImVec2 origin, ImVec2 size) {
     const float pick = S(170), gauge = S(170), flip = S(42);
 
     group(0, "Picture", [&] {
-        option("View", "Single-frame (the default) runs the game once a frame and has the graphics card draw that "
+        option("Camera style", "Third-person gamepad uses the stock follow camera and a regular gamepad, with "
+                               "Full stereo and seated head tracking. Restart the game to switch styles.", pick, [&] {
+            choice("##cameraStyle", "VR", "CameraStyle", "immersive",
+                   {{"immersive", "Immersive"}, {"third-person", "Third-person gamepad"}});
+        });
+        if (iniValue("VR", "CameraStyle", "immersive") != "third-person")
+            option("View", "Single-frame (the default) runs the game once a frame and has the graphics card draw that "
                        "frame again for the other eye: about half the processor work of full stereo, so 90 fps is in "
                        "reach if the card has room. Full stereo runs the game twice a frame, once per eye. The big "
                        "screen shows the flat game in the headset (cheap, always works, and what menus and loading "

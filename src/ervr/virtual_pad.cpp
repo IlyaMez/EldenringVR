@@ -4,6 +4,7 @@
 #include "gestures.h"
 #include "combat.h"
 #include "game_er.h"
+#include "stereo.h"
 #include "config.h"
 #include "log.h"
 #include "game_memory.h"
@@ -160,6 +161,10 @@ void VirtualPadInit() {
 
 void VirtualPadUpdate(double now) {
     const Config& c = Cfg();
+    if (StereoThirdPersonGamepad()) {
+        CombatSetMenuOpen(GameERPlayerActive() && GameMenuOpen(now) == 1);
+        return;
+    }
     VRTracking tr; VRInputState in;
     VPad pad;
     if (!GetLatestVRState(tr, in) || (!in.controllerConnected[0] && !in.controllerConnected[1])) {
@@ -610,6 +615,12 @@ void VirtualPadUpdate(double now) {
 MoveIntent VirtualPadGetMove() { std::lock_guard<std::mutex> g(g_mtx); return g_move; }
 
 bool VirtualPadMerge(XINPUT_STATE& st) {
+    if (StereoThirdPersonGamepad()) {
+        // Observe native confirm presses for the draw-only transition guard.
+        if (st.Gamepad.wButtons & XINPUT_GAMEPAD_A)
+            g_lastATick.store(GetTickCount64(), std::memory_order_relaxed);
+        return false;
+    }
     VPad p;
     { std::lock_guard<std::mutex> g(g_mtx); p = g_pad; }
     if (!p.active) return false;
@@ -636,6 +647,7 @@ bool VirtualPadMerge(XINPUT_STATE& st) {
 }
 
 void VirtualPadRumble(float left, float right) {
+    if (StereoThirdPersonGamepad()) return;
     const Config& c = Cfg();
     float l = Clamp(left * c.rumbleScale, 0.f, 1.f), r = Clamp(right * c.rumbleScale, 0.f, 1.f);
     if (l != g_rumble[0] || r != g_rumble[1]) { g_rumble[0] = l; g_rumble[1] = r; g_rumbleDirty = true; }

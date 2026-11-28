@@ -520,7 +520,7 @@ void RelearnTarget(rs::device* dev) {
 bool HudEnabled() {
     const int ov = g_enabledOverride.load(std::memory_order_relaxed);
     if (ov >= 0) return ov != 0;
-    return Cfg().hudMode == "quad" && Cfg().vrStereoMode != "off";
+    return Cfg().hudMode == "quad" && Cfg().StereoModeForCamera() != "off";
 }
 
 void HudSetEnabledOverride(int on) {

@@ -32,11 +32,11 @@ long long Qpc() { LARGE_INTEGER q; QueryPerformanceCounter(&q); return q.QuadPar
 // StereoMode=replay is the product (level 3: shadows, held signals, the GPU camera patch); the
 // [Experimental] ReplayStereo levels are the bench tests that led to it (1 replay as-is, 2 CPU patch, 3 GPU patch).
 int ReplayLevel() {
-    static const int s_level = Cfg().vrStereoMode == "replay" ? 3 : Cfg().replayStereo;
+    static const int s_level = Cfg().StereoModeForCamera() == "replay" ? 3 : Cfg().replayStereo;
     return s_level;
 }
 bool ReplayIsStereoMode() {
-    static const bool s_on = Cfg().vrStereoMode == "replay";
+    static const bool s_on = Cfg().StereoModeForCamera() == "replay";
     return s_on;
 }
 
