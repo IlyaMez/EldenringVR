@@ -9,6 +9,7 @@
 #include "weapon_preset_runtime.h"
 #include "game_version.h"
 #include "head_anchor.h"
+#include "third_person_camera.h"
 #include "pose_frame.h"
 #include "body_pose.h"
 #include "movement_facing.h"
@@ -1923,6 +1924,117 @@ struct SecondEyeStash {
 };
 SecondEyeStash g_secondEye;
 
+// The renderer's primary camera publisher copies these fields synchronously.
+// Use an aligned copy so the follow camera and the game's next update keep
+// their original matrix and projection.
+struct alignas(16) PublishedCamera {
+    float header[4];
+    float matrix[16];
+    float projection[4];
+};
+static_assert(offsetof(PublishedCamera, matrix) == off::Cam_Matrix);
+static_assert(offsetof(PublishedCamera, projection) == off::Cam_Fov);
+using PublishCameraFn = void (__fastcall*)(void*, const PublishedCamera*);
+PublishCameraFn g_origPublishCamera = nullptr;
+
+struct ThirdPersonPair {
+    StereoEyeRequest request;
+    Pose tracking;               // raw stage coordinates, passed back to OpenXR
+    Pose head;                   // recentered in game coordinates, shared by both passes
+    PublishedCamera stock;
+    void* renderer = nullptr;
+    bool pendingRight = false;
+    bool overridden = false;
+};
+std::mutex g_thirdCameraMutex;
+std::atomic<bool> g_thirdRecenter{true};
+Pose g_thirdOrigin;
+ThirdPersonPair g_thirdPair;
+
+void RestoreThirdPersonCamera() {
+    if (g_thirdPair.overridden && !WorldDyingNow())
+        g_origPublishCamera(g_thirdPair.renderer, &g_thirdPair.stock);
+    g_thirdPair.overridden = false;
+}
+
+void PublishThirdPersonEye(bool right) {
+    const auto& req = g_thirdPair.request;
+    Pose eye = ThirdPersonEye(g_thirdPair.head, right ? req.otherOffset : req.offset, right ? req.otherRot : req.rot);
+    const float pitch = right ? DebugPass2PitchDeg() : DebugKeysPass1Pitch();
+    if (pitch != 0.f) eye.rot = eye.rot * Quat::AxisAngle({1, 0, 0}, Deg2Rad(pitch));
+    const Vec3 r = eye.rot.Rotate({1, 0, 0}), u = eye.rot.Rotate({0, 1, 0}), f = eye.rot.Rotate({0, 0, 1});
+    const auto& p = eye.pos;
+    auto output = g_thirdPair.stock;
+    const float matrix[] = {r.x, r.y, r.z, 0.f, u.x, u.y, u.z, 0.f, f.x, f.y, f.z, 0.f, p.x, p.y, p.z, 1.f};
+    std::memcpy(output.matrix, matrix, sizeof(matrix));
+    if (req.fovWrite > 0.05f) output.projection[0] = req.fovWrite;
+    g_origPublishCamera(g_thirdPair.renderer, &output);
+    g_thirdPair.overridden = true;
+
+    StereoEyeReport report;
+    report.eye = right ? req.otherEye : req.eye;
+    report.pair = req.pair;
+    report.fovY = output.projection[0];
+    report.headPos = g_thirdPair.tracking.pos;
+    report.headRot = g_thirdPair.tracking.rot;
+    StashPendingReport(report, eye.rot, eye.pos);
+}
+
+bool CaptureThirdPersonPair(void* renderer, const PublishedCamera* camera) {
+    const bool desktopProbe = Cfg().m2ForcePass2;
+    if ((!FramePumpReady() && !desktopProbe) || !MainPlayer() || CombatMenuActive() || WorldDyingNow()) return false;
+    PublishedCamera stock;
+    if (!SafeRead(camera, &stock, sizeof(stock)) || !(stock.projection[0] > 0.05f && stock.projection[0] < 3.2f))
+        return false;
+    if (!g_thirdPair.head.valid) {
+        if (desktopProbe) {
+            // Give the existing desktop capture harness repeatable eye poses.
+            g_thirdPair.request.offset = {-0.032f, 0.f, 0.f};
+            g_thirdPair.request.otherOffset = {0.032f, 0.f, 0.f};
+            g_thirdPair.request.haveOther = true;
+            g_thirdPair.tracking.valid = true;
+        } else {
+            VRTracking tracking;
+            VRInputState input;
+            if (!StereoTakeEyeRequest(g_thirdPair.request) || !GetLatestVRState(tracking, input) || !tracking.head.valid)
+                return false;
+            g_thirdPair.tracking = tracking.head;
+        }
+    }
+    const auto& m = stock.matrix;
+    Pose cameraPose;
+    cameraPose.pos = {m[12], m[13], m[14]};
+    cameraPose.rot = Quat::FromBasis({m[0], m[1], m[2]}, {m[4], m[5], m[6]}, {m[8], m[9], m[10]});
+    Pose head = g_thirdPair.tracking;
+    head.pos = ToGame(head.pos);
+    head.rot = ToGame(head.rot);
+    if (g_thirdRecenter.exchange(false) || !g_thirdOrigin.valid) {
+        g_thirdOrigin = head;
+        g_thirdOrigin.rot = Quat::YawQ(head.rot.Yaw());
+        LOGI("[third-person] seated view recentered");
+    }
+    g_thirdPair.renderer = renderer;
+    g_thirdPair.stock = stock;
+    g_thirdPair.head = ThirdPersonHead(cameraPose, head, g_thirdOrigin, Clamp(Cfg().vrWorldScale, 0.25f, 4.f));
+    g_thirdPair.pendingRight = g_thirdPair.request.haveOther;
+    if (g_thirdPair.pendingRight) g_lastStashTick.store(GetTickCount64(), std::memory_order_relaxed);
+    return true;
+}
+
+void __fastcall Hook_PublishCamera(void* renderer, const PublishedCamera* camera) {
+    std::lock_guard<std::mutex> lock(g_thirdCameraMutex);
+    if (FramePumpCurrentPass() == 2) {
+        if (g_thirdPair.head.valid && g_thirdPair.renderer == renderer && !WorldDyingNow()) {
+            PublishThirdPersonEye(true);
+            return;
+        }
+    } else if (CaptureThirdPersonPair(renderer, camera)) {
+        PublishThirdPersonEye(false);
+        return;
+    }
+    g_origPublishCamera(renderer, camera);
+}
+
 void UpdateCamera(uint8_t* player, const FrameInfo& f) {
     const Config& c = Cfg();
     // Draw-only second pass: the camera step re-runs (Pass2Keep includes 106) purely so the
@@ -2851,7 +2963,7 @@ void UpdateArms(uint8_t* player, FrameInfo& f, int writePoint = 0) {
 }
 
 // ---------------------------------------------------------------- hooks
-bool FirstPersonActive() { return Cfg().fpEnabled && MainPlayer() != nullptr; }
+bool FirstPersonActive() { return !StereoThirdPersonGamepad() && Cfg().fpEnabled && MainPlayer() != nullptr; }
 
 int SehFilter(unsigned code) { LOGE("[game] exception 0x%08X inside hook; disabling first person for safety", code); return EXCEPTION_EXECUTE_HANDLER; }
 bool g_tripped = false;
@@ -4143,6 +4255,10 @@ bool GameERChrPhysics(uint8_t* chr, Vec3* pos, float* yaw) {
 // where fast travel is confirmed, produces a multi-second gap ending the instant the
 // confirm closes it.
 bool GameERSecondEyePending() {
+    if (StereoThirdPersonGamepad()) {
+        std::lock_guard<std::mutex> lock(g_thirdCameraMutex);
+        return g_thirdPair.pendingRight;
+    }
     std::lock_guard<std::mutex> g(g_secondEye.mtx);
     return g_secondEye.valid;
 }
@@ -4155,6 +4271,14 @@ unsigned long long GameERLastStashTick() {
 }
 
 bool GameERApplySecondEyeCamera() {
+    if (StereoThirdPersonGamepad()) {
+        std::lock_guard<std::mutex> lock(g_thirdCameraMutex);
+        if (!g_thirdPair.pendingRight) return false;
+        g_thirdPair.pendingRight = false;
+        if (WorldDyingNow()) return false;
+        PublishThirdPersonEye(true);
+        return true;
+    }
     bool haveHeadBasis; Quat qHead, rot; Vec3 br, bu, bf, posBase, offset;
     StereoEyeReport rep;
     {
@@ -4212,14 +4336,30 @@ bool GameERApplySecondEyeCamera() {
 // present that will consume this report has not run yet).
 void GameERAfterPass1() { SafeRideProbeAfterPass1(); }
 
+void GameERBeginThirdPersonFrame() {
+    std::lock_guard<std::mutex> lock(g_thirdCameraMutex);
+    RestoreThirdPersonCamera();
+    g_thirdPair = {};
+}
+
+void GameERRequestThirdPersonRecenter(bool requested) {
+    if (StereoThirdPersonGamepad()) g_thirdRecenter.store(requested);
+}
+
 void GameERFinalizePassReport() {
     PendingReport pr;
     {
         std::lock_guard<std::mutex> g(g_pendingRepMtx);
-        if (!g_pendingRep.valid) return;
         pr = g_pendingRep;
         g_pendingRep.valid = false;
     }
+    if (StereoThirdPersonGamepad()) {
+        std::lock_guard<std::mutex> lock(g_thirdCameraMutex);
+        RestoreThirdPersonCamera();
+        if (pr.valid && !Cfg().m2ForcePass2) StereoReportEye(pr.rep);
+        return;
+    }
+    if (!pr.valid) return;
     static long s_corr = 0, s_skipped = 0; static float s_sumYawDeg = 0.f, s_sumPosCm = 0.f;
     if (Cfg().vrReportFinalCamera) {
         float m[16];
@@ -4324,7 +4464,12 @@ uint8_t* GameERRiderWatchTarget(uint32_t* outLen) {
 bool GameERInit() {
     g_base = (uint8_t*)GetModuleHandleW(nullptr);
     g_status.versionOk = CurrentGameBuild() != GameBuild::Unknown;
-    posescan::Install();
+    const bool thirdPerson = StereoThirdPersonGamepad();
+    if (thirdPerson && CurrentGameBuild() != GameBuild::V272) {
+        LOGW("[third-person] primary camera publisher is only verified for 1.17.2");
+        return false;
+    }
+    if (!thirdPerson) posescan::Install();
 
     // Globals via classic AOBs.
     if (uint8_t* hit = AobScan("48 8B 05 ?? ?? ?? ?? 48 85 C0 74 0F 48 39 88")) g_worldChrManPtr = (uint8_t**)ResolveRipRelative(hit, 3, 7);
@@ -4343,6 +4488,21 @@ bool GameERInit() {
     if (!g_gameManPtr) LOGW("[game] GameMan AOB missed - warp-request guard degraded to heuristics (consider Pass2SafeOnA)");
     if (!g_worldChrManPtr || !g_fieldAreaPtr) { LOGW("[game] core globals not found; first person disabled"); return false; }
 
+    if (thirdPerson) {
+        // 1.17.2: copies the resolved perspective camera into the primary
+        // renderer slot and marks it dirty. Validate the copy's entry bytes.
+        auto* publish = g_base + 0x3bb2a0;
+        constexpr uint8_t expected[] = {0x8b, 0x42, 0x50, 0x4c, 0x8b, 0x41, 0x10};
+        uint8_t bytes[sizeof(expected)];
+        g_status.cameraHooked = SafeRead(publish, bytes, sizeof(bytes)) &&
+            std::memcmp(bytes, expected, sizeof(bytes)) == 0 &&
+            MH_CreateHook(publish, (void*)&Hook_PublishCamera, (void**)&g_origPublishCamera) == MH_OK &&
+            MH_EnableHook(publish) == MH_OK;
+        if (g_status.cameraHooked) LOGI("[third-person] primary render camera publisher hooked");
+        else LOGW("[third-person] primary render camera publisher unavailable");
+        return g_status.cameraHooked;
+    }
+
     // Functions: RVA when the version matches, else erfps2's AOBs.
     uint8_t* camStep = nullptr; uint8_t* getDmy = nullptr;
     if (g_status.versionOk) { camStep = g_base + GameRva(RVA_CameraStepUpdate); getDmy = g_base + GameRva(RVA_GetDmyPos); }
@@ -4356,6 +4516,8 @@ bool GameERInit() {
             g_status.cameraHooked = true; LOGI("[game] camera step hooked");
         } else LOGW("[game] failed to hook camera step");
     }
+    uint8_t* cfin = (g_status.versionOk && Cfg().fpCameraFinalWrite) ? g_base + GameRva(RVA_CamFinalize) : nullptr;
+    if (cfin && MH_CreateHook(cfin, (void*)&Hook_CamFinalize, (void**)&g_origCamFinalize) == MH_OK && MH_EnableHook(cfin) == MH_OK) LOGI("[game] camera finalizer hooked @ %p (our matrix goes back after it)", (void*)cfin); else if (Cfg().fpCameraFinalWrite) LOGW("[game] camera finalizer hook unavailable");
     // Camera wall recovery: a global bool the follow cam consults to push the camera out of geometry. The game
     // refreshes it every frame, so the hooks above clear it per frame while first person runs (erfps2 pattern:
     // "0F B6 43 0D 88 05 <rel32>" = the instruction pair that refreshes it).
@@ -4383,8 +4545,6 @@ bool GameERInit() {
             else LOGW("[game] bullet spawn not found: skill projectiles leave where the game's animation puts them");
         }
     }
-    uint8_t* cfin = (g_status.versionOk && Cfg().fpCameraFinalWrite) ? g_base + GameRva(RVA_CamFinalize) : nullptr;
-    if (cfin && MH_CreateHook(cfin, (void*)&Hook_CamFinalize, (void**)&g_origCamFinalize) == MH_OK && MH_EnableHook(cfin) == MH_OK) LOGI("[game] camera finalizer hooked @ %p (our matrix goes back after it)", (void*)cfin); else if (Cfg().fpCameraFinalWrite) LOGW("[game] camera finalizer hook unavailable");
     uint8_t* peval = (g_status.versionOk && Cfg().fpPoseAfterHavok) ? g_base + GameRva(RVA_PoseEval) : nullptr;
     if (peval && MH_CreateHook(peval, (void*)&Hook_PoseEval, (void**)&g_origPoseEval) == MH_OK && MH_EnableHook(peval) == MH_OK) LOGI("[game] havok pose eval hooked @ %p (post-animation pose reassert)", (void*)peval); else if (Cfg().fpPoseAfterHavok) LOGW("[game] havok pose eval hook unavailable");
 
@@ -4918,7 +5078,9 @@ bool GameERKillPlayer() {
 // reads of the faulting code page can disagree with the executing bytes).
 bool GameERVersionOk() { return g_status.versionOk; }
 
-bool GameERPlayerActive() { return g_status.playerFound && MainPlayer() != nullptr; }
+bool GameERPlayerActive() {
+    return (StereoThirdPersonGamepad() ? g_status.cameraHooked : g_status.playerFound) && MainPlayer() != nullptr;
+}
 
 void GameERShutdown() {
     if (g_hkSlot && g_hkOrig) {

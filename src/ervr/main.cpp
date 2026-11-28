@@ -169,7 +169,7 @@ DWORD WINAPI Worker(LPVOID) {
     BackendsInit(Cfg().vrRuntime.c_str());
     VirtualPadInit();
     StereoInit();
-    if (Cfg().fpEnabled) GameERInit();
+    if (Cfg().fpEnabled || StereoThirdPersonGamepad()) GameERInit();
     PatchesInit();   // [Patches] FpsTarget etc.; no-op when unset
     SettingsTabInit();   // the ERVR tab in the game's Settings
     Pass2InteractInit();    // action buttons once per frame across the second eye's pass, and what that pass changes

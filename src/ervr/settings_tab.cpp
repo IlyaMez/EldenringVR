@@ -3,9 +3,11 @@
 #include "body_calibration.h"
 #include "config.h"
 #include "game_memory.h"
+#include "game_er.h"
 #include "game_version.h"
 #include "ini_file.h"
 #include "log.h"
+#include "stereo.h"
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
@@ -196,7 +198,7 @@ void AddRow(void* page, const TabRow& row, const TabShown& s, size_t i) {
 
 // The page's row builder, called by the game's page code as (page, page's option data).
 void __fastcall BuildRows(void* page, void*) {
-    const std::vector<TabRow>& rows = TabRows();
+    const std::vector<TabRow>& rows = TabRows(StereoThirdPersonGamepad());
     std::vector<TabShown> shown;
     AcquireSRWLockShared(&g_lock);
     for (const TabRow& r : rows)
@@ -242,7 +244,7 @@ void* __fastcall Hook_BrightnessPage(void* windowList, void* data, uint8_t flag)
     uint32_t fault = 0;
     if (void* page = SafeBuildPage(windowList, data, flag, &fault)) {
         if (g_pagesBuilt.fetch_add(1) == 0)
-            LOGI("[tab] ERVR page built: %zu rows in Sound's window", (std::min)(TabRows().size(), (size_t)kTabMaxRows));
+            LOGI("[tab] ERVR page built: %zu rows in Sound's window", (std::min)(TabRows(StereoThirdPersonGamepad()).size(), (size_t)kTabMaxRows));
         return page;
     }
     g_failed = true;
@@ -476,7 +478,7 @@ void SettingsTabInit() {
     }
     g_live = true;
     LOGI("[tab] the game's Settings get an ERVR tab (pause menu > System, after Graphics): %zu rows, icon %d",
-         (std::min)(TabRows().size(), (size_t)kTabMaxRows), Cfg().settingsTabIcon);
+         (std::min)(TabRows(StereoThirdPersonGamepad()).size(), (size_t)kTabMaxRows), Cfg().settingsTabIcon);
 }
 
 void SettingsTabIniChanged() {
@@ -489,7 +491,7 @@ void SettingsTabIniChanged() {
 void SettingsTabTick(double now) {
     if (!g_live.load() || !g_tabAdded.load())
         return;
-    const std::vector<TabRow>& rows = TabRows();
+    const std::vector<TabRow>& rows = TabRows(StereoThirdPersonGamepad());
     const size_t n = (std::min)(rows.size(), (size_t)kTabMaxRows);
     uint8_t value[kTabMaxRows]{};
     for (size_t i = 0; i < n; ++i)
@@ -511,6 +513,8 @@ void SettingsTabTick(double now) {
         if (value[i] != g_written[i]) {
             if (rows[i].kind == TabRowKind::calibrate)
                 calibration.push_back(TabAsksCalibration(rows[i], value[i]));
+            if (rows[i].kind == TabRowKind::recenter)
+                GameERRequestThirdPersonRecenter(TabAsksRecenter(rows[i], value[i]));
             for (TabWrite& w : TabWrites(rows[i], g_shown[i], value[i]))
                 writes.push_back(std::move(w));
             g_written[i] = value[i];

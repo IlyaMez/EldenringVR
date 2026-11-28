@@ -23,6 +23,8 @@ enum class StereoMode { Off = 0, Cinema, DebugAlt, Full, Replay };
 
 void StereoInit();
 void StereoShutdown();
+StereoMode StereoActiveMode();
+bool StereoThirdPersonGamepad();
 
 // Render-thread callbacks from reshade_addon.cpp.
 void StereoOnPresent(const Dx12Frame& frame);

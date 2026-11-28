@@ -25,6 +25,8 @@ struct Config {
     // pass per headset frame, the right eye re-drawn on the GPU from the left eye's recorded commands; the default
     // since 0.9.0 - an earlier install's StereoMode=full moves to it once, see Config::Load)
     std::string vrStereoMode = "replay";
+    std::string vrCameraStyle = "immersive";
+    std::string StereoModeForCamera() const { return vrCameraStyle == "third-person" ? "full" : vrStereoMode; }
     // Single-frame stereo: compute shaders whose debug names contain one of these (comma-separated, case and slash
     // direction ignored) run once a frame - the replay leaves their dispatches out and the right eye draws what the
     // left eye's frame computed. Default = ER's GPU particle simulation (blood, sparks, embers: Vfx\CS_VFX_* steps and

@@ -25,7 +25,7 @@ constexpr int kTabMaxChoices = 32;   // a list row: ComboItemList<unsigned char,
 // then the T-pose again. Choosing the second asks for the panel at the next moment of play (the menu holds it
 // until it closes); choosing the first again before that takes the ask back. It writes nothing itself: the
 // calibration does, when it is done.
-enum class TabRowKind : uint8_t { onOff, list, calibrate };
+enum class TabRowKind : uint8_t { onOff, list, calibrate, recenter };
 
 struct TabChoice {
     const wchar_t* label;
@@ -119,6 +119,10 @@ inline TabShown TabShow(const TabRow& row, std::string_view ini) {
     if (row.kind == TabRowKind::calibrate)
         return TabShowCalibration(ini);
     TabShown s;
+    if (row.kind == TabRowKind::recenter) {
+        s.labels = {L"Keep current center", L"Recenter when the menu closes"};
+        return s;
+    }
     const std::string v = detail::TabIniValue(ini, row.section, row.key, row.fallback);
     if (row.kind == TabRowKind::onOff) {
         s.current = TabTruthy(v) ? 1 : 0;
@@ -147,7 +151,7 @@ inline TabShown TabShow(const TabRow& row, std::string_view ini) {
 // The ini edits that choosing `index` on the row makes (none on the calibrate row: see TabAsksCalibration).
 inline std::vector<TabWrite> TabWrites(const TabRow& row, const TabShown& s, int index) {
     std::vector<TabWrite> out;
-    if (row.kind == TabRowKind::calibrate)
+    if (row.kind == TabRowKind::calibrate || row.kind == TabRowKind::recenter)
         return out;
     if (row.kind == TabRowKind::onOff) {
         out.push_back({row.section, row.key, index ? "true" : "false"});
@@ -162,9 +166,10 @@ inline std::vector<TabWrite> TabWrites(const TabRow& row, const TabShown& s, int
 }
 // Whether `index` on the calibrate row asks for the T-pose (false: it takes the ask back).
 inline bool TabAsksCalibration(const TabRow& row, int index) { return row.kind == TabRowKind::calibrate && index == 1; }
+inline bool TabAsksRecenter(const TabRow& row, int index) { return row.kind == TabRowKind::recenter && index == 1; }
 
 // The tab, top to bottom: moving, combat, the picture, the HUD, feel.
-inline const std::vector<TabRow>& TabRows() {
+inline const std::vector<TabRow>& TabRows(bool thirdPerson = false) {
     static const std::vector<TabRow> rows = {
         {TabRowKind::list, "Movement", "Forward", L"Walk toward", L"What forward on the left stick means.", "head",
          {{L"Where you look", "head"}, {L"Where the left hand points", "hand"}, {L"The stick's view", "camera"},
@@ -212,7 +217,17 @@ inline const std::vector<TabRow>& TabRows() {
          {{L"0%", "0"}, {L"25%", "0.25"}, {L"50%", "0.5"}, {L"75%", "0.75"}, {L"100%", "1.0"}, {L"125%", "1.25"},
           {L"150%", "1.5"}, {L"175%", "1.75"}, {L"200%", "2.0"}}},
     };
-    return rows;
+    if (!thirdPerson) return rows;
+    static const std::vector<TabRow> thirdPersonRows = [] {
+        std::vector<TabRow> result{{TabRowKind::recenter, "VR", "RecenterView", L"Recenter view",
+                                    L"Sit how you play, look forward, and close the menu.", "", {}}};
+        for (const TabRow& row : rows) {
+            const std::string_view section = row.section;
+            if (section == "VR" || section == "HUD") result.push_back(row);
+        }
+        return result;
+    }();
+    return thirdPersonRows;
 }
 
 } // namespace ervr

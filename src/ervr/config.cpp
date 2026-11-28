@@ -84,6 +84,7 @@ void Config::Load(const std::wstring& path) {
     pollHz     = GetI(ini, L"General", L"PollHz", pollHz);
 
     vrStereoMode     = GetS(ini, L"VR", L"StereoMode", vrStereoMode);
+    vrCameraStyle    = GetS(ini, L"VR", L"CameraStyle", "immersive");
     // Single-frame stereo is the default from 0.9.0. An installed ERVR.ini outlives updates and every earlier one
     // shipped StereoMode=full, so an ini without the marker moves to replay once - written back, so the launcher
     // shows it - and gets the marker: Full stereo chosen after that stays (the shipped ini carries the marker).

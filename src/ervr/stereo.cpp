@@ -33,6 +33,7 @@ std::atomic<long>  g_monoStalls{0};   // presents that fell back because pass 2 
 bool               g_pumpStalled = false;   // render thread only; drives the log line
 std::atomic<float> g_lastSubmitMs{0.f};
 std::atomic<int>   g_mode{(int)StereoMode::Off};
+std::atomic<bool>  g_thirdPersonGamepad{false};
 std::atomic<float> g_cropU{1.f}, g_cropV{1.f};
 std::atomic<float> g_hmdFrameAspect{0.f};   // StereoHmdFrameAspect
 
@@ -247,9 +248,16 @@ void ReleaseLocked() {
 } // namespace
 
 void StereoInit() {
-    g_mode.store((int)ParseMode(Cfg().vrStereoMode));
-    LOGI("[stereo] mode %s", Cfg().vrStereoMode.c_str());
+    const Config& c = Cfg();
+    const std::string mode = c.StereoModeForCamera();
+    g_mode.store((int)ParseMode(mode));
+    g_thirdPersonGamepad.store(c.vrCameraStyle == "third-person");
+    LOGI("[stereo] mode %s", mode.c_str());
+    if (StereoThirdPersonGamepad()) LOGI("[third-person] stock follow camera and native gamepad enabled");
 }
+
+StereoMode StereoActiveMode() { return (StereoMode)g_mode.load(); }
+bool StereoThirdPersonGamepad() { return g_thirdPersonGamepad.load(); }
 
 void StereoShutdown() {
     std::lock_guard<std::mutex> g(g_mtx);
@@ -699,7 +707,6 @@ void FullPresent(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
     if (Cfg().vrFadeGuard) FadeGuardSample(f);
     // A present with the pass tag at 2 is the proof the engine ran the second pass all the
     // way to Flip; the pump's wedged-runner watchdog warns when this stops arriving.
-    if (FramePumpCurrentPass() == 2) FramePumpNotePass2Present();
     // ER's renderer may be pipelined one present deep - the image a Present carries can be
     // the PREVIOUS pass's render, in which case eye content is cross-routed and both eyes
     // shimmer (each image is submitted with the other camera's pose). PresentLag selects
@@ -1016,7 +1023,6 @@ void AsyncPublishFlat(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp, 
 // second and publishes the pair - no xrWaitFrame, xrBeginFrame or xrEndFrame on this thread.
 void FullPresentAsync(IVRBackend* vr, const Dx12Frame& f, const BlitParams& bp) {
     if (Cfg().vrFadeGuard) FadeGuardSample(f);
-    if (FramePumpCurrentPass() == 2) FramePumpNotePass2Present();
     const int keyLag = DebugKeysPresentLag();
     const int lag = keyLag >= 0 ? keyLag : (Cfg().vrPresentLag != 0 ? 1 : 0);
     const int pass = FramePumpCurrentPass();
@@ -1230,6 +1236,7 @@ bool StereoReplayVisible() {
 
 // ---- frame loop, render-thread side -------------------------------------------------
 void StereoOnPresent(const Dx12Frame& f) {
+    if (FramePumpCurrentPass() == 2) FramePumpNotePass2Present();
     const StereoMode mode = (StereoMode)g_mode.load(std::memory_order_relaxed);
     if (mode == StereoMode::Off) return;
 

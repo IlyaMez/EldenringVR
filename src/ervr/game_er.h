@@ -36,6 +36,8 @@ unsigned long long GameERLastStashTick();  // tick of the last stash: fresh = ga
 // frame pump calls this right after each pass's queue_tasks returns; without the pump the
 // report simply stays unpushed (mono modes never consume reports).
 void GameERFinalizePassReport();
+void GameERBeginThirdPersonFrame();
+void GameERRequestThirdPersonRecenter(bool requested = true);
 // Pass 1 has drawn (frame pump, right after its queue_tasks): on horseback, compares the rider as it was skinned
 // with the final camera and logs the frame's write order every 5 s ("[ride] drawn").
 void GameERAfterPass1();
