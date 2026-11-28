@@ -14,15 +14,18 @@ On Elden Ring 1.17.2 (executable 2.7.2.0), [game_er.cpp](../src/ervr/game_er.cpp
 
 [third_person_camera.h](../src/ervr/third_person_camera.h) contains the pose math. The mode preserves native gamepad input and bypasses the immersive first-person body, motion-controller and character-facing overrides. Existing INIs that omit `CameraStyle` still select the immersive camera.
 
+A seated headset playtest found the game's camera pitch disorienting. The rendered camera now inherits the stock position and horizontal heading. Only the tracked head supplies pitch and roll. The right stick still orbits the stock camera, including any height or distance changes from vertical input. At the limits of the vertical orbit, the character can move out of frame until you look toward it. Head lean uses the level tracking axes.
+
 ## Observations and validation
 
 - On upstream 0.9.3, Single-frame showed left-eye jitter in the initial headset session. That mode replays captured GPU commands for the other eye. The cause of the jitter is unknown.
 - Full stereo with First Person enabled, hand tracking and physical combat disabled, and the character's head shown gave a more familiar camera distance. Right-stick orbit and head-driven character facing still felt wrong for seated play. There was a small artifact at foreground edges where visibility differed by eye. Its cause is unknown. That session delivered about 43–56 fresh pairs per second at 72 Hz.
 - The prototype passed all 31 Release regression tests, including third-person pose math, gamepad routing, and the recenter menu action.
 - The existing Windows desktop `ForcePass2` harness used fixed synthetic eye poses. Scripted gamepad input loaded Limgrave, orbited the camera in both directions, opened and closed the menu, and captured both render passes. A diagnostic 7° tilt appeared only in the intended eye. With the diagnostic tilt disabled, the nearer character shifted about 10 pixels between eyes in an 800-pixel-wide capture. Distant scenery shifted 0–1 pixels. This exercised the game's stereo draw and camera path without a headset runtime.
+- The level-horizon regression test varies stock pitch, roll, yaw, and position and checks that physical head pitch, roll, and lean still affect the view. Before-and-after `ForcePass2` captures used the same four stick directions in Limgrave. The updated build kept its heading and level view during vertical stick input as the camera moved around the character. Horizontal input still turned the view, and both render passes produced captures in all four directions.
 - The hardware smoke test used a Quest 3 at 72 Hz over VDXR. ADB through the [Machine Control Quest workflow](https://github.com/kzahel/machine-control/tree/main/platforms/quest) woke the attached headset and opened its Virtual Desktop client. Limgrave delivered about 55–62 fresh stereo pairs per second with zero recorded submit or blit failures during the measured gameplay intervals. The test used the headset itself for OpenXR submission. No virtual headset or Meta XR Simulator was used.
 
-A seated playtest is still needed for head rotation and lean, lock-on and combat comfort, and the foreground-edge artifact.
+A follow-up seated playtest on the level-horizon build is still needed for comfort during head rotation and lean, lock-on and combat, and the foreground-edge artifact.
 
 ## Source baseline and local build
 
